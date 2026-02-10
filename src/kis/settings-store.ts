@@ -10,7 +10,7 @@ class GlobalSettingsStore {
 
   set(settings: GlobalSettings): void {
     this.settings = settings;
-    if (settings.appKey && settings.appSecret) {
+    if (settings.appKey?.trim() && settings.appSecret?.trim()) {
       for (const resolve of this.waiters) {
         resolve(settings);
       }
@@ -24,7 +24,7 @@ class GlobalSettingsStore {
 
   async waitUntilReady(timeoutMs = 15_000): Promise<GlobalSettings | null> {
     const current = this.settings;
-    if (current?.appKey && current.appSecret) {
+    if (current?.appKey?.trim() && current.appSecret?.trim()) {
       return current;
     }
 

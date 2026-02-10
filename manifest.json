@@ -3,7 +3,7 @@
   "Author": "SayBGM",
   "Name": "KIS 주식 시세",
   "Description": "한국투자증권 WebSocket API를 활용한 실시간 주식 시세 플러그인",
-  "Version": "1.0.2",
+  "Version": "1.0.3",
   "Icon": "imgs/plugin-icon",
   "UUID": "com.kis.streamdeck",
   "SDKVersion": 2,

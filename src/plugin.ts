@@ -17,11 +17,11 @@ streamDeck.logger.setLevel(LogLevel.DEBUG);
 function hasCredentials(
   settings: GlobalSettings
 ): settings is GlobalSettings & { appKey: string; appSecret: string } {
-  return !!settings.appKey && !!settings.appSecret;
+  return !!settings.appKey?.trim() && !!settings.appSecret?.trim();
 }
 
 function credentialKey(settings: { appKey: string; appSecret: string }): string {
-  return `${settings.appKey}\n${settings.appSecret}`;
+  return `${settings.appKey.trim()}\n${settings.appSecret.trim()}`;
 }
 
 let lastAppliedCredentialKey: string | null = null;
@@ -31,10 +31,12 @@ let isInternalGlobalSettingsWrite = false;
  * 전역 설정 적용 (공통)
  */
 function applyGlobalSettings(settings: GlobalSettings): void {
+  // IMPORTANT: 토큰 hydrate를 먼저 수행해, settings store waiters가 풀리자마자
+  // 여러 버튼이 동시에 getAccessToken()을 호출하더라도 불필요한 발급이 발생하지 않게 합니다.
+  hydrateAccessTokenFromGlobalSettings(settings);
+
   // REST API용 설정 저장소에도 저장
   kisGlobalSettings.set(settings);
-
-  hydrateAccessTokenFromGlobalSettings(settings);
 
   if (!hasCredentials(settings)) {
     return;

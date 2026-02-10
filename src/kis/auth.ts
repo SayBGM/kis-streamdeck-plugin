@@ -26,14 +26,20 @@ const persistListeners = new Set<(p: TokenPersistPayload) => void | Promise<void
 function requireCredentials(
   settings: GlobalSettings
 ): asserts settings is GlobalSettings & { appKey: string; appSecret: string } {
-  if (!settings.appKey || !settings.appSecret) {
+  if (!settings.appKey?.trim() || !settings.appSecret?.trim()) {
     throw new Error("appKey/appSecret이 없습니다");
   }
 }
 
+function normalizedCredentials(settings: GlobalSettings): { appKey: string; appSecret: string } {
+  requireCredentials(settings);
+  return { appKey: settings.appKey.trim(), appSecret: settings.appSecret.trim() };
+}
+
 function settingsKey(settings: GlobalSettings): string {
   // 키/시크릿 조합이 바뀌면 토큰도 새로 받아야 합니다.
-  return `${settings.appKey ?? ""}\n${settings.appSecret ?? ""}`;
+  const { appKey, appSecret } = normalizedCredentials(settings);
+  return `${appKey}\n${appSecret}`;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -62,15 +68,16 @@ export function hydrateAccessTokenFromGlobalSettings(settings: GlobalSettings): 
     typeof settings.accessTokenExpiry === "number" ? settings.accessTokenExpiry : 0;
 
   if (!token || !expiry) return;
-  if (!settings.appKey || !settings.appSecret) return;
+  if (!settings.appKey?.trim() || !settings.appSecret?.trim()) return;
 
   const now = Date.now();
   // 만료가 임박했거나 이미 만료면 사용하지 않습니다.
   if (expiry <= now + TOKEN_REFRESH_SAFETY_MS) return;
 
+  const { appKey, appSecret } = normalizedCredentials(settings);
   cachedAccessToken = token;
   cachedTokenExpiry = expiry;
-  cachedSettings = { appKey: settings.appKey, appSecret: settings.appSecret };
+  cachedSettings = { appKey, appSecret };
 }
 
 export function clearAccessTokenCache(): void {
@@ -87,7 +94,7 @@ export function clearAccessTokenCache(): void {
 export async function getApprovalKey(
   settings: GlobalSettings
 ): Promise<string> {
-  requireCredentials(settings);
+  const { appKey, appSecret } = normalizedCredentials(settings);
   logger.info("[Auth] approval_key 발급 요청 시작");
 
   const response = await fetch(APPROVAL_URL, {
@@ -97,8 +104,8 @@ export async function getApprovalKey(
     },
     body: JSON.stringify({
       grant_type: "client_credentials",
-      appkey: settings.appKey,
-      secretkey: settings.appSecret,
+      appkey: appKey,
+      secretkey: appSecret,
     }),
   });
 
@@ -127,16 +134,16 @@ export async function getApprovalKey(
 export async function getAccessToken(
   settings: GlobalSettings
 ): Promise<string> {
-  requireCredentials(settings);
   const now = Date.now();
-  const key = settingsKey(settings);
+  const { appKey, appSecret } = normalizedCredentials(settings);
+  const key = `${appKey}\n${appSecret}`;
 
   // 캐시된 토큰이 유효하면 재사용 (만료 1시간 전까지)
   if (
     cachedAccessToken &&
     cachedTokenExpiry > now + TOKEN_REFRESH_SAFETY_MS &&
-    cachedSettings?.appKey === settings.appKey &&
-    cachedSettings?.appSecret === settings.appSecret
+    cachedSettings?.appKey === appKey &&
+    cachedSettings?.appSecret === appSecret
   ) {
     return cachedAccessToken;
   }
@@ -156,8 +163,8 @@ export async function getAccessToken(
         },
         body: JSON.stringify({
           grant_type: "client_credentials",
-          appkey: settings.appKey,
-          appsecret: settings.appSecret,
+          appkey: appKey,
+          appsecret: appSecret,
         }),
       });
 
@@ -199,7 +206,7 @@ export async function getAccessToken(
       const issuedAt = Date.now();
       cachedAccessToken = data.access_token;
       cachedTokenExpiry = issuedAt + data.expires_in * 1000;
-      cachedSettings = { appKey: settings.appKey, appSecret: settings.appSecret };
+      cachedSettings = { appKey, appSecret };
 
       notifyAccessTokenUpdated({
         token: cachedAccessToken,
