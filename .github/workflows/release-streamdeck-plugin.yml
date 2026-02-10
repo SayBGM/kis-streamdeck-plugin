@@ -1,0 +1,70 @@
+name: Release Stream Deck Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Prepare packaged plugin
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          UUID="$(node -e "console.log(require('./manifest.json').UUID)")"
+          VERSION="$(node -e "console.log(require('./manifest.json').Version)")"
+          STAGE_ROOT="dist"
+          STAGE_DIR="${STAGE_ROOT}/${UUID}.sdPlugin"
+          ASSET_NAME="${UUID}-v${VERSION}.streamDeckPlugin"
+
+          rm -rf "${STAGE_ROOT}"
+          mkdir -p "${STAGE_DIR}"
+
+          cp -R manifest.json imgs ui bin package.json package-lock.json "${STAGE_DIR}/"
+
+          npm ci --omit=dev --prefix "${STAGE_DIR}"
+
+          (
+            cd "${STAGE_ROOT}"
+            zip -r "../${ASSET_NAME}" "$(basename "${STAGE_DIR}")"
+          )
+
+          echo "asset_name=${ASSET_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "asset_path=${ASSET_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamdeck-plugin-package
+          path: ${{ steps.package.outputs.asset_path }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.asset_path }}
+          generate_release_notes: true
