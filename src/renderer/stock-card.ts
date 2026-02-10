@@ -17,6 +17,11 @@ const COLOR_SESSION_CLOSED = "#616161"; // 장 마감 (어두운 회색)
 const ARROW_UP = "\u25B2"; // ▲
 const ARROW_DOWN = "\u25BC"; // ▼
 
+// Intl 객체 생성 비용을 줄이기 위해 재사용합니다.
+const KR_INT_FORMAT = new Intl.NumberFormat("ko-KR", {
+  maximumFractionDigits: 0,
+});
+
 // ─── 장 상태 판단 ───
 
 /**
@@ -56,7 +61,7 @@ export function getMarketSession(market: Market): MarketSession {
  */
 function formatPrice(price: number, market: Market): string {
   if (market === "domestic") {
-    return price.toLocaleString("ko-KR");
+    return KR_INT_FORMAT.format(price);
   }
   return `$${price.toFixed(2)}`;
 }
@@ -70,7 +75,7 @@ function formatChangeWithArrow(change: number, sign: string, market: Market): st
   const arrow = sign === "rise" ? ARROW_UP : sign === "fall" ? ARROW_DOWN : "";
   const absChange =
     market === "domestic"
-      ? Math.abs(change).toLocaleString("ko-KR")
+      ? KR_INT_FORMAT.format(Math.abs(change))
       : `${Math.abs(change).toFixed(2)}`;
 
   return arrow ? `${arrow} ${absChange}` : absChange;

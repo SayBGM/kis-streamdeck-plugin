@@ -1,8 +1,20 @@
+// ─── JSON 타입 (Stream Deck Global Settings 호환) ───
+export type JsonPrimitive = boolean | number | string | null | undefined;
+export type JsonValue = JsonObject | JsonPrimitive | JsonValue[];
+export type JsonObject = { [key: string]: JsonValue };
+
 // ─── 전역 설정 (Global Settings) ───
 export type GlobalSettings = {
-  appKey: string;
-  appSecret: string;
-  [key: string]: string;
+  appKey?: string;
+  appSecret?: string;
+  /**
+   * KIS OpenAPI access_token (REST)
+   * Stream Deck Global Settings에 함께 저장해 재시작 후에도 재사용합니다.
+   */
+  accessToken?: string;
+  /** epoch ms */
+  accessTokenExpiry?: number;
+  [key: string]: JsonValue;
 };
 
 // ─── 액션별 설정 (Action Settings) ───
