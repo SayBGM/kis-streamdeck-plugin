@@ -18,7 +18,9 @@ async function getSettingsWithWait(): Promise<GlobalSettings | null> {
     return current;
   }
 
-  const waited = await kisGlobalSettings.waitUntilReady(SETTINGS_WAIT_TIMEOUT_MS);
+  const waited = await kisGlobalSettings.waitUntilReady(
+    SETTINGS_WAIT_TIMEOUT_MS,
+  );
   if (waited?.appKey && waited.appSecret) {
     logger.info("[REST] 전역 설정 준비 완료, 현재가 조회 재개");
     return waited;
@@ -52,7 +54,7 @@ function parseSign(signCode: string): PriceSign {
  */
 export async function fetchDomesticPrice(
   stockCode: string,
-  displayName: string
+  displayName: string,
 ): Promise<StockData | null> {
   const settings = await getSettingsWithWait();
   if (!settings) return null;
@@ -61,9 +63,9 @@ export async function fetchDomesticPrice(
     const token = await getAccessToken(settings);
 
     const url = new URL(
-      `${KIS_REST_BASE}/uapi/domestic-stock/v1/quotations/inquire-price`
+      `${KIS_REST_BASE}/uapi/domestic-stock/v1/quotations/inquire-price`,
     );
-    url.searchParams.set("FID_COND_MRKT_DIV_CODE", "J");
+    url.searchParams.set("FID_COND_MRKT_DIV_CODE", "UN");
     url.searchParams.set("FID_INPUT_ISCD", stockCode);
 
     const response = await fetch(url.toString(), {
@@ -121,7 +123,7 @@ export async function fetchDomesticPrice(
 export async function fetchOverseasPrice(
   exchange: string,
   ticker: string,
-  displayName: string
+  displayName: string,
 ): Promise<StockData | null> {
   const settings = await getSettingsWithWait();
   if (!settings) return null;
@@ -138,7 +140,7 @@ export async function fetchOverseasPrice(
     const excd = excdMap[exchange] || "NAS";
 
     const url = new URL(
-      `${KIS_REST_BASE}/uapi/overseas-price/v1/quotations/price`
+      `${KIS_REST_BASE}/uapi/overseas-price/v1/quotations/price`,
     );
     url.searchParams.set("AUTH", "");
     url.searchParams.set("EXCD", excd);
