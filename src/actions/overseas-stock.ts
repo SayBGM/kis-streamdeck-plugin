@@ -3,6 +3,7 @@ import {
   type WillAppearEvent,
   type WillDisappearEvent,
   type DidReceiveSettingsEvent,
+  type KeyDownEvent,
 } from "@elgato/streamdeck";
 import { kisWebSocket, type DataCallback, type SubscribeSuccessCallback } from "../kis/websocket-manager.js";
 import { parseOverseasData } from "../kis/overseas-parser.js";
@@ -34,6 +35,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
   >();
   private hasInitialPrice = new Set<string>();
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private refreshInFlight = new Set<string>();
 
   /**
    * 현재 시간 기반으로 주간/야간 자동 판별하여 tr_key 생성
@@ -169,6 +171,40 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       await kisWebSocket.subscribe(TR_ID_OVERSEAS, trKey, callback, onSuccess);
     } catch (err) {
       logger.error(`[미국] 재구독 실패: ${trKey}`, err);
+    }
+  }
+
+  override async onKeyDown(
+    ev: KeyDownEvent<OverseasStockSettings>
+  ): Promise<void> {
+    const actionId = ev.action.id;
+    if (this.refreshInFlight.has(actionId)) {
+      logger.debug(`[미국] 수동 새로고침 중복 요청 무시: action=${actionId}`);
+      return;
+    }
+
+    const settings = ev.payload.settings;
+    const ticker = settings.ticker?.trim().toUpperCase();
+    const stockName = settings.stockName?.trim() || ticker || "";
+
+    if (!ticker) {
+      await ev.action.setImage(svgToDataUri(renderSetupCard("티커를 설정하세요")));
+      return;
+    }
+
+    this.refreshInFlight.add(actionId);
+    try {
+      const ok = await this.fetchAndShowPrice(ev, settings, stockName);
+      if (ok) {
+        this.hasInitialPrice.add(actionId);
+        logger.info(`[미국] 수동 새로고침 성공: ${ticker}`);
+      } else {
+        logger.info(`[미국] 수동 새로고침 결과 없음: ${ticker}`);
+      }
+    } catch (err) {
+      logger.debug(`[미국] 수동 새로고침 실패: ${ticker} / ${err}`);
+    } finally {
+      this.refreshInFlight.delete(actionId);
     }
   }
 

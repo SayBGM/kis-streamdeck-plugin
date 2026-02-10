@@ -3,6 +3,7 @@ import {
   type WillAppearEvent,
   type WillDisappearEvent,
   type DidReceiveSettingsEvent,
+  type KeyDownEvent,
 } from "@elgato/streamdeck";
 import { kisWebSocket, type DataCallback, type SubscribeSuccessCallback } from "../kis/websocket-manager.js";
 import { parseDomesticData } from "../kis/domestic-parser.js";
@@ -31,6 +32,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
   >();
   private hasInitialPrice = new Set<string>();
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private refreshInFlight = new Set<string>();
 
   override async onWillAppear(
     ev: WillAppearEvent<DomesticStockSettings>
@@ -146,6 +148,40 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       await kisWebSocket.subscribe(TR_ID_DOMESTIC, stockCode, callback, onSuccess);
     } catch (err) {
       logger.error(`[국내] 재구독 실패: ${stockCode}`, err);
+    }
+  }
+
+  override async onKeyDown(
+    ev: KeyDownEvent<DomesticStockSettings>
+  ): Promise<void> {
+    const actionId = ev.action.id;
+    if (this.refreshInFlight.has(actionId)) {
+      logger.debug(`[국내] 수동 새로고침 중복 요청 무시: action=${actionId}`);
+      return;
+    }
+
+    const settings = ev.payload.settings;
+    const stockCode = settings.stockCode?.trim();
+    const stockName = settings.stockName?.trim() || stockCode || "";
+
+    if (!stockCode) {
+      await ev.action.setImage(svgToDataUri(renderSetupCard("종목코드를 설정하세요")));
+      return;
+    }
+
+    this.refreshInFlight.add(actionId);
+    try {
+      const ok = await this.fetchAndShowPrice(ev, stockCode, stockName);
+      if (ok) {
+        this.hasInitialPrice.add(actionId);
+        logger.info(`[국내] 수동 새로고침 성공: ${stockCode}`);
+      } else {
+        logger.info(`[국내] 수동 새로고침 결과 없음: ${stockCode}`);
+      }
+    } catch (err) {
+      logger.debug(`[국내] 수동 새로고침 실패: ${stockCode} / ${err}`);
+    } finally {
+      this.refreshInFlight.delete(actionId);
     }
   }
 
