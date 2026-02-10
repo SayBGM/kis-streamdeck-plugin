@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
+  <rect width="144" height="144" rx="20" fill="#1a1a2e"/>
+  <text x="72" y="52" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="bold" fill="#00c853" text-anchor="middle">KIS</text>
+  <text x="72" y="78" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#ffffff" text-anchor="middle">주식시세</text>
+  <polyline points="20,115 42,100 62,108 82,88 102,95 124,78" fill="none" stroke="#00c853" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

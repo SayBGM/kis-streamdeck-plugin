@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Author": "KIS StreamDeck",
+  "Name": "KIS 주식 시세",
+  "Description": "한국투자증권 WebSocket API를 활용한 실시간 주식 시세 플러그인",
+  "Version": "1.0.0",
+  "Icon": "imgs/plugin-icon",
+  "UUID": "com.kis.streamdeck",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.4"
+  },
+  "OS": [
+    { "Platform": "mac", "MinimumVersion": "10.15" },
+    { "Platform": "windows", "MinimumVersion": "10" }
+  ],
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "enabled"
+  },
+  "Category": "KIS 주식 시세",
+  "CategoryIcon": "imgs/category-icon",
+  "CodePath": "bin/plugin.js",
+  "Actions": [
+    {
+      "UUID": "com.kis.streamdeck.domestic-stock",
+      "Name": "국내주식 시세",
+      "Icon": "imgs/domestic-action",
+      "Tooltip": "한국투자증권 국내주식 실시간 시세",
+      "PropertyInspectorPath": "ui/domestic-stock-pi.html",
+      "States": [
+        {
+          "Image": "imgs/domestic-action"
+        }
+      ]
+    },
+    {
+      "UUID": "com.kis.streamdeck.overseas-stock",
+      "Name": "미국주식 시세",
+      "Icon": "imgs/overseas-action",
+      "Tooltip": "한국투자증권 미국주식 실시간 시세",
+      "PropertyInspectorPath": "ui/overseas-stock-pi.html",
+      "States": [
+        {
+          "Image": "imgs/overseas-action"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>국내주식 시세 설정</title>
+  <link rel="stylesheet" href="sdpi.css">
+</head>
+<body>
+  <div class="sdpi-wrapper">
+
+    <!-- ─── KIS API 설정 (전역) ─── -->
+    <div class="sdpi-group">
+      <div class="sdpi-group-label">KIS API 설정 (공통)</div>
+
+      <div class="sdpi-item">
+        <div class="sdpi-item-label">App Key</div>
+        <div class="sdpi-item-value">
+          <input type="password" id="appKey" placeholder="App Key 입력">
+        </div>
+      </div>
+
+      <div class="sdpi-item">
+        <div class="sdpi-item-label">App Secret</div>
+        <div class="sdpi-item-value">
+          <input type="password" id="appSecret" placeholder="App Secret 입력">
+        </div>
+      </div>
+
+      <div class="sdpi-help">
+        한국투자증권 Open API에서 발급받은 키를 입력하세요. 모든 버튼에 공통 적용됩니다.
+      </div>
+    </div>
+
+    <div class="sdpi-separator"></div>
+
+    <!-- ─── 국내주식 설정 (액션별) ─── -->
+    <div class="sdpi-group">
+      <div class="sdpi-group-label">국내주식 설정</div>
+
+      <div class="sdpi-item">
+        <div class="sdpi-item-label">종목코드</div>
+        <div class="sdpi-item-value">
+          <input type="text" id="stockCode" placeholder="005930">
+        </div>
+      </div>
+      <div class="sdpi-help">6자리 종목코드를 입력하세요 (예: 삼성전자 005930)</div>
+
+      <div class="sdpi-item">
+        <div class="sdpi-item-label">종목명</div>
+        <div class="sdpi-item-value">
+          <input type="text" id="stockName" placeholder="삼성전자">
+        </div>
+      </div>
+      <div class="sdpi-help">Stream Deck 키에 표시할 종목명을 입력하세요</div>
+    </div>
+
+    <!-- 상태 메시지 -->
+    <div id="statusMessage" class="sdpi-status info" style="display:none;"></div>
+
+  </div>
+
+  <script src="sdpi.js"></script>
+  <script>
+    // ─── 전역 설정 수신 ───
+    document.addEventListener("piDidReceiveGlobalSettings", function (evt) {
+      var settings = evt.detail || {};
+      document.getElementById("appKey").value = settings.appKey || "";
+      document.getElementById("appSecret").value = settings.appSecret || "";
+    });
+
+    // ─── 액션 설정 수신 ───
+    document.addEventListener("piDidReceiveSettings", function (evt) {
+      var settings = evt.detail || {};
+      document.getElementById("stockCode").value = settings.stockCode || "";
+      document.getElementById("stockName").value = settings.stockName || "";
+    });
+
+    // ─── 전역 설정 저장 (App Key / App Secret 변경 시) ───
+    function saveGlobalSettings() {
+      setGlobalSettings({
+        appKey: document.getElementById("appKey").value.trim(),
+        appSecret: document.getElementById("appSecret").value.trim(),
+      });
+      showStatus("API 설정이 저장되었습니다", "success");
+    }
+
+    document.getElementById("appKey").addEventListener("change", saveGlobalSettings);
+    document.getElementById("appSecret").addEventListener("change", saveGlobalSettings);
+
+    // ─── 액션 설정 저장 (종목코드 / 종목명 변경 시) ───
+    function saveActionSettings() {
+      setSettings({
+        stockCode: document.getElementById("stockCode").value.trim(),
+        stockName: document.getElementById("stockName").value.trim(),
+      });
+      showStatus("종목 설정이 저장되었습니다", "success");
+    }
+
+    document.getElementById("stockCode").addEventListener("change", saveActionSettings);
+    document.getElementById("stockName").addEventListener("change", saveActionSettings);
+
+    // ─── 상태 메시지 표시 ───
+    function showStatus(message, type) {
+      var el = document.getElementById("statusMessage");
+      el.textContent = message;
+      el.className = "sdpi-status " + type;
+      el.style.display = "block";
+      setTimeout(function () {
+        el.style.display = "none";
+      }, 2000);
+    }
+  </script>
+</body>
+</html>
