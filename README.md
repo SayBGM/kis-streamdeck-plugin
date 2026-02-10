@@ -1,6 +1,7 @@
 # KIS StreamDeck 실시간 주식 시세 플러그인
 
 ![Preview](https://github.com/user-attachments/assets/e6d074fa-1227-4d36-a9fd-d5af7da1efc0)
+
 한국투자증권 Open API를 사용해 Stream Deck 키에 국내/미국 주식 시세를 실시간으로 표시하는 플러그인입니다.
 
 ## 주요 기능
