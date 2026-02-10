@@ -1,7 +1,7 @@
 import type { StockData, PriceSign } from "../types/index.js";
 
 /**
- * 국내주식 실시간체결가 (H0STCNT0) 데이터 필드 인덱스
+ * 국내주식 실시간체결가 (H0UNCNT0) 데이터 필드 인덱스
  *
  * WebSocket으로 수신한 ^-구분 데이터의 각 필드 위치
  */
@@ -50,7 +50,7 @@ function parseSign(signCode: string): PriceSign {
  */
 export function parseDomesticData(
   fields: string[],
-  displayName: string
+  displayName: string,
 ): StockData {
   const ticker = fields[FIELD.MKSC_SHRN_ISCD] ?? "";
   const price = parseInt(fields[FIELD.STCK_PRPR] ?? "0", 10);

@@ -53,7 +53,7 @@ export type Market = "domestic" | "overseas";
 export const KIS_WS_URL = "ws://ops.koreainvestment.com:21000";
 export const KIS_REST_BASE = "https://openapi.koreainvestment.com:9443";
 
-export const TR_ID_DOMESTIC = "H0STCNT0"; // 국내주식 실시간체결가
+export const TR_ID_DOMESTIC = "H0UNCNT0"; // 국내주식 실시간체결가
 export const TR_ID_OVERSEAS = "HDFSCNT0"; // 해외주식 실시간지연체결가
 
 // ─── 해외주식 거래소 매핑 ───
