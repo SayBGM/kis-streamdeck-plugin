@@ -31,7 +31,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
 
   private callbackMap = new Map<
     string,
-    { trKey: string; callback: DataCallback }
+    { trKey: string; callback: DataCallback; onSuccess?: SubscribeSuccessCallback }
   >();
   private hasInitialPrice = new Set<string>();
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -94,7 +94,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       }
     };
 
-    this.callbackMap.set(ev.action.id, { trKey, callback });
+    this.callbackMap.set(ev.action.id, { trKey, callback, onSuccess });
 
     try {
       await kisWebSocket.subscribe(TR_ID_OVERSEAS, trKey, callback, onSuccess);
@@ -109,7 +109,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
   ): Promise<void> {
     const entry = this.callbackMap.get(ev.action.id);
     if (entry) {
-      kisWebSocket.unsubscribe(TR_ID_OVERSEAS, entry.trKey, entry.callback);
+      kisWebSocket.unsubscribe(TR_ID_OVERSEAS, entry.trKey, entry.callback, entry.onSuccess);
       this.callbackMap.delete(ev.action.id);
       this.hasInitialPrice.delete(ev.action.id);
       this.clearRetryTimer(ev.action.id);
@@ -122,7 +122,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
   ): Promise<void> {
     const oldEntry = this.callbackMap.get(ev.action.id);
     if (oldEntry) {
-      kisWebSocket.unsubscribe(TR_ID_OVERSEAS, oldEntry.trKey, oldEntry.callback);
+      kisWebSocket.unsubscribe(TR_ID_OVERSEAS, oldEntry.trKey, oldEntry.callback, oldEntry.onSuccess);
       this.callbackMap.delete(ev.action.id);
     }
     this.clearRetryTimer(ev.action.id);
@@ -165,7 +165,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       }
     };
 
-    this.callbackMap.set(ev.action.id, { trKey, callback });
+    this.callbackMap.set(ev.action.id, { trKey, callback, onSuccess });
 
     try {
       await kisWebSocket.subscribe(TR_ID_OVERSEAS, trKey, callback, onSuccess);

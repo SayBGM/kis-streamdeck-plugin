@@ -28,7 +28,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
 
   private callbackMap = new Map<
     string,
-    { trKey: string; callback: DataCallback }
+    { trKey: string; callback: DataCallback; onSuccess?: SubscribeSuccessCallback }
   >();
   private hasInitialPrice = new Set<string>();
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -73,7 +73,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       }
     };
 
-    this.callbackMap.set(ev.action.id, { trKey: stockCode, callback });
+    this.callbackMap.set(ev.action.id, { trKey: stockCode, callback, onSuccess });
 
     try {
       await kisWebSocket.subscribe(TR_ID_DOMESTIC, stockCode, callback, onSuccess);
@@ -88,7 +88,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
   ): Promise<void> {
     const entry = this.callbackMap.get(ev.action.id);
     if (entry) {
-      kisWebSocket.unsubscribe(TR_ID_DOMESTIC, entry.trKey, entry.callback);
+      kisWebSocket.unsubscribe(TR_ID_DOMESTIC, entry.trKey, entry.callback, entry.onSuccess);
       this.callbackMap.delete(ev.action.id);
       this.hasInitialPrice.delete(ev.action.id);
       this.clearRetryTimer(ev.action.id);
@@ -101,7 +101,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
   ): Promise<void> {
     const oldEntry = this.callbackMap.get(ev.action.id);
     if (oldEntry) {
-      kisWebSocket.unsubscribe(TR_ID_DOMESTIC, oldEntry.trKey, oldEntry.callback);
+      kisWebSocket.unsubscribe(TR_ID_DOMESTIC, oldEntry.trKey, oldEntry.callback, oldEntry.onSuccess);
       this.callbackMap.delete(ev.action.id);
     }
     this.clearRetryTimer(ev.action.id);
@@ -142,7 +142,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       }
     };
 
-    this.callbackMap.set(ev.action.id, { trKey: stockCode, callback });
+    this.callbackMap.set(ev.action.id, { trKey: stockCode, callback, onSuccess });
 
     try {
       await kisWebSocket.subscribe(TR_ID_DOMESTIC, stockCode, callback, onSuccess);

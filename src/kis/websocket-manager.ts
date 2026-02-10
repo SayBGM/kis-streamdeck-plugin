@@ -25,7 +25,7 @@ interface Subscription {
   trId: string;
   trKey: string;
   callbacks: Set<DataCallback>;
-  onSuccess?: SubscribeSuccessCallback;
+  successCallbacks: Set<SubscribeSuccessCallback>;
 }
 
 // ─── 상수 ───
@@ -91,12 +91,17 @@ class KISWebSocketManager {
     const key = this.makeKey(trId, trKey);
 
     if (!this.subscriptions.has(key)) {
-      this.subscriptions.set(key, { trId, trKey, callbacks: new Set() });
+      this.subscriptions.set(key, {
+        trId,
+        trKey,
+        callbacks: new Set(),
+        successCallbacks: new Set(),
+      });
     }
 
     const sub = this.subscriptions.get(key)!;
     sub.callbacks.add(callback);
-    if (onSuccess) sub.onSuccess = onSuccess;
+    if (onSuccess) sub.successCallbacks.add(onSuccess);
 
     if (!this.approvalKey) {
       logger.info(`[WS] approval_key 대기, 구독 예약: ${trId}/${trKey}`);
@@ -111,12 +116,18 @@ class KISWebSocketManager {
     }
   }
 
-  unsubscribe(trId: string, trKey: string, callback: DataCallback): void {
+  unsubscribe(
+    trId: string,
+    trKey: string,
+    callback: DataCallback,
+    onSuccess?: SubscribeSuccessCallback
+  ): void {
     const key = this.makeKey(trId, trKey);
     const sub = this.subscriptions.get(key);
 
     if (sub) {
       sub.callbacks.delete(callback);
+      if (onSuccess) sub.successCallbacks.delete(onSuccess);
       if (sub.callbacks.size === 0) {
         this.subscriptions.delete(key);
         this.sendUnsubscribe(trId, trKey);
@@ -281,15 +292,19 @@ class KISWebSocketManager {
   private notifySubscribeSuccess(trId: string, trKey?: string): void {
     if (trKey) {
       const exact = this.subscriptions.get(this.makeKey(trId, trKey));
-      if (exact?.onSuccess) {
-        exact.onSuccess(exact.trId, exact.trKey);
+      if (exact && exact.successCallbacks.size > 0) {
+        for (const cb of exact.successCallbacks) {
+          cb(exact.trId, exact.trKey);
+        }
         return;
       }
     }
 
     for (const sub of this.subscriptions.values()) {
-      if (sub.trId === trId && sub.onSuccess) {
-        sub.onSuccess(sub.trId, sub.trKey);
+      if (sub.trId === trId && sub.successCallbacks.size > 0) {
+        for (const cb of sub.successCallbacks) {
+          cb(sub.trId, sub.trKey);
+        }
       }
     }
   }
