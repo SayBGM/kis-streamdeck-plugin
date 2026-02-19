@@ -6,7 +6,12 @@
   "main": "bin/plugin.js",
   "scripts": {
     "build": "rollup -c",
-    "watch": "rollup -c -w"
+    "watch": "rollup -c -w",
+    "version:sync-manifest": "node ./scripts/sync-manifest-version.mjs",
+    "version": "npm run version:sync-manifest && git add manifest.json",
+    "release:patch": "npm version patch",
+    "release:minor": "npm version minor",
+    "release:major": "npm version major"
   },
   "dependencies": {
     "@elgato/streamdeck": "^1.1.0",
