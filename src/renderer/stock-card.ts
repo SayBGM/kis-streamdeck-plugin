@@ -1,4 +1,10 @@
-import type { StockData, MarketSession, Market } from "../types/index.js";
+import type {
+  StockData,
+  MarketSession,
+  Market,
+  StreamConnectionState,
+  StockCardRenderOptions,
+} from "../types/index.js";
 import { getETTotalMinutes, getKSTTotalMinutes } from "../utils/timezone.js";
 
 // ─── 디자인 상수 ───
@@ -10,17 +16,29 @@ const COLOR_RISE = "#00c853"; // 상승 (초록)
 const COLOR_FALL = "#ff1744"; // 하락 (빨강)
 const COLOR_FLAT = "#9e9e9e"; // 보합 (회색)
 const COLOR_TEXT = "#ffffff"; // 기본 텍스트
+const COLOR_TEXT_STALE = "#ffd54f"; // stale 상태 종목명 (노랑)
 const COLOR_SESSION_REG = "#00c853"; // 정규장 (초록)
 const COLOR_SESSION_OTHER = "#ff9800"; // 프리/에프터 (주황)
 const COLOR_SESSION_CLOSED = "#616161"; // 장 마감 (어두운 회색)
+const COLOR_CONN_LIVE = "#00c853";
+const COLOR_CONN_BACKUP = "#ffd54f";
+const COLOR_CONN_BROKEN = "#ff1744";
+
+const SESSION_TEXT_X_DEFAULT = 132;
+const SESSION_TEXT_X_WITH_BADGE = 122;
+const SESSION_BADGE_X = 132;
+const SESSION_BADGE_Y = 30;
 
 const ARROW_UP = "\u25B2"; // ▲
 const ARROW_DOWN = "\u25BC"; // ▼
+const SVG_DATA_URI_CACHE_MAX_ENTRIES = 200;
 
 // Intl 객체 생성 비용을 줄이기 위해 재사용합니다.
 const KR_INT_FORMAT = new Intl.NumberFormat("ko-KR", {
   maximumFractionDigits: 0,
 });
+
+const svgDataUriCache = new Map<string, string>();
 
 // ─── 장 상태 판단 ───
 
@@ -175,11 +193,16 @@ export function renderSetupCard(message: string): string {
  */
 export function renderStockCard(
   data: StockData,
-  market: Market
+  market: Market,
+  renderOptions: StockCardRenderOptions = {}
 ): string {
   const session = getMarketSession(market);
   const sessionColor = getSessionColor(session);
   const changeColor = getSignColor(data.sign);
+  const titleColor = renderOptions.isStale ? COLOR_TEXT_STALE : COLOR_TEXT;
+  const connectionState = renderOptions.connectionState;
+  const connectionColor = getConnectionColor(connectionState);
+  const sessionTextX = connectionColor ? SESSION_TEXT_X_WITH_BADGE : SESSION_TEXT_X_DEFAULT;
 
   // 포맷된 문자열
   const priceStr = formatPrice(data.price, market);
@@ -194,10 +217,11 @@ export function renderStockCard(
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   
   <!-- 종목명 (좌측 상단) -->
-  <text x="12" y="30" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(displayName)}</text>
+  <text x="12" y="30" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="${titleColor}">${escapeXml(displayName)}</text>
   
   <!-- 장 상태 (우측 상단) -->
-  <text x="132" y="30" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="${sessionColor}" text-anchor="end">${session}</text>
+  <text x="${sessionTextX}" y="30" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="${sessionColor}" text-anchor="end">${session}</text>
+  ${connectionColor ? `<text x="${SESSION_BADGE_X}" y="${SESSION_BADGE_Y}" font-family="Arial, Helvetica, sans-serif" font-size="10" font-weight="bold" fill="${connectionColor}" text-anchor="middle">●</text>` : ""}
   
   <!-- 현재가 (중앙) -->
   <text x="72" y="80" font-family="Arial, Helvetica, sans-serif" font-size="${priceFontSize}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceStr)}</text>
@@ -234,6 +258,21 @@ function getSessionColor(session: MarketSession): string {
   }
 }
 
+function getConnectionColor(
+  connectionState: StreamConnectionState | null | undefined
+): string | null {
+  switch (connectionState) {
+    case "LIVE":
+      return COLOR_CONN_LIVE;
+    case "BACKUP":
+      return COLOR_CONN_BACKUP;
+    case "BROKEN":
+      return COLOR_CONN_BROKEN;
+    default:
+      return null;
+  }
+}
+
 function truncateName(name: string, maxLen: number): string {
   if (name.length <= maxLen) return name;
   return name.substring(0, maxLen - 1) + "…";
@@ -249,5 +288,23 @@ function escapeXml(str: string): string {
 }
 
 export function svgToDataUri(svg: string): string {
-  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  const cached = svgDataUriCache.get(svg);
+  if (cached) {
+    // LRU 갱신: 조회된 키를 최근 사용으로 이동
+    svgDataUriCache.delete(svg);
+    svgDataUriCache.set(svg, cached);
+    return cached;
+  }
+
+  const dataUri = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  svgDataUriCache.set(svg, dataUri);
+
+  if (svgDataUriCache.size > SVG_DATA_URI_CACHE_MAX_ENTRIES) {
+    const oldestKey = svgDataUriCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      svgDataUriCache.delete(oldestKey);
+    }
+  }
+
+  return dataUri;
 }

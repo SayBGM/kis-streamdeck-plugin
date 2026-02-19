@@ -5,7 +5,12 @@ import {
   type DidReceiveSettingsEvent,
   type KeyDownEvent,
 } from "@elgato/streamdeck";
-import { kisWebSocket, type DataCallback, type SubscribeSuccessCallback } from "../kis/websocket-manager.js";
+import {
+  kisWebSocket,
+  type DataCallback,
+  type SubscribeSuccessCallback,
+  type ConnectionStateCallback,
+} from "../kis/websocket-manager.js";
 import { parseDomesticData } from "../kis/domestic-parser.js";
 import { fetchDomesticPrice } from "../kis/rest-price.js";
 import {
@@ -18,25 +23,49 @@ import {
 import {
   TR_ID_DOMESTIC,
   type DomesticStockSettings,
+  type StockData,
+  type StreamConnectionState,
 } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
 const INITIAL_PRICE_RETRY_DELAY_MS = 4000;
+const DOMESTIC_STALE_AFTER_MS = 20_000;
+const CONNECTION_STATE_MIN_HOLD_MS = 1_500;
+const CHANGE_RATE_PRECISION_DIGITS = 2;
+
+type DataSource = "live" | "backup";
 
 export class DomesticStockAction extends SingletonAction<DomesticStockSettings> {
   override readonly manifestId = "com.kis.streamdeck.domestic-stock";
 
   private callbackMap = new Map<
     string,
-    { trKey: string; callback: DataCallback; onSuccess?: SubscribeSuccessCallback }
+    {
+      trKey: string;
+      callback: DataCallback;
+      onSuccess?: SubscribeSuccessCallback;
+      onConnectionState?: ConnectionStateCallback;
+    }
   >();
   private hasInitialPrice = new Set<string>();
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private refreshInFlight = new Set<string>();
+  private staleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private stateTransitionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private actionRefMap = new Map<
+    string,
+    { setImage(image: string): Promise<void> | void }
+  >();
+  private lastRenderKeyByAction = new Map<string, string>();
+  private lastDataByAction = new Map<string, StockData>();
+  private lastDataAtByAction = new Map<string, number>();
+  private connectionStateByAction = new Map<string, StreamConnectionState>();
+  private connectionStateChangedAtByAction = new Map<string, number>();
 
   override async onWillAppear(
-    ev: WillAppearEvent<DomesticStockSettings>
+    ev: WillAppearEvent<DomesticStockSettings>,
   ): Promise<void> {
+    this.actionRefMap.set(ev.action.id, ev.action);
     const settings = ev.payload.settings;
     const stockCode = settings.stockCode?.trim();
     const stockName = settings.stockName?.trim() || stockCode || "";
@@ -44,11 +73,16 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     logger.info(`[국내] onWillAppear: code=${stockCode}, name=${stockName}`);
 
     if (!stockCode) {
-      await ev.action.setImage(svgToDataUri(renderSetupCard("종목코드를 설정하세요")));
+      this.resetActionRuntime(ev.action.id);
+      await ev.action.setImage(
+        svgToDataUri(renderSetupCard("종목코드를 설정하세요")),
+      );
       return;
     }
 
-    await ev.action.setImage(svgToDataUri(renderWaitingCard(stockName, "domestic")));
+    await ev.action.setImage(
+      svgToDataUri(renderWaitingCard(stockName, "domestic")),
+    );
 
     // 마지막 체결가를 먼저 표시한 뒤 WebSocket 구독
     const hasSnapshot = await this.fetchAndShowPrice(ev, stockCode, stockName);
@@ -62,21 +96,46 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     // WebSocket 구독
     const callback: DataCallback = (_trId, _trKey, fields) => {
       const data = parseDomesticData(fields, stockName);
-      const svg = renderStockCard(data, "domestic");
-      ev.action.setImage(svgToDataUri(svg));
+      this.applyConnectionState(ev.action.id, "LIVE");
+      this.renderStockData(ev.action.id, ev.action, data, {
+        source: "live",
+      });
     };
 
     const onSuccess: SubscribeSuccessCallback = () => {
       logger.info(`[국내] 구독 성공: ${stockCode}`);
+      this.applyConnectionState(ev.action.id, "LIVE");
       if (!this.hasInitialPrice.has(ev.action.id)) {
-        ev.action.setImage(svgToDataUri(renderConnectedCard(stockName, "domestic")));
+        ev.action.setImage(
+          svgToDataUri(renderConnectedCard(stockName, "domestic")),
+        );
       }
     };
 
-    this.callbackMap.set(ev.action.id, { trKey: stockCode, callback, onSuccess });
+    const onConnectionState: ConnectionStateCallback = (
+      _trId,
+      _trKey,
+      state,
+    ) => {
+      this.applyConnectionState(ev.action.id, state);
+      this.renderLastDataIfPossible(ev.action.id);
+    };
+
+    this.callbackMap.set(ev.action.id, {
+      trKey: stockCode,
+      callback,
+      onSuccess,
+      onConnectionState,
+    });
 
     try {
-      await kisWebSocket.subscribe(TR_ID_DOMESTIC, stockCode, callback, onSuccess);
+      await kisWebSocket.subscribe(
+        TR_ID_DOMESTIC,
+        stockCode,
+        callback,
+        onSuccess,
+        onConnectionState,
+      );
       logger.info(`[국내] 구독 요청 완료: ${stockCode}`);
     } catch (err) {
       logger.error(`[국내] 구독 실패: ${stockCode}`, err);
@@ -84,41 +143,57 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
   }
 
   override async onWillDisappear(
-    ev: WillDisappearEvent<DomesticStockSettings>
+    ev: WillDisappearEvent<DomesticStockSettings>,
   ): Promise<void> {
     const entry = this.callbackMap.get(ev.action.id);
     if (entry) {
-      kisWebSocket.unsubscribe(TR_ID_DOMESTIC, entry.trKey, entry.callback, entry.onSuccess);
-      this.callbackMap.delete(ev.action.id);
-      this.hasInitialPrice.delete(ev.action.id);
-      this.clearRetryTimer(ev.action.id);
+      kisWebSocket.unsubscribe(
+        TR_ID_DOMESTIC,
+        entry.trKey,
+        entry.callback,
+        entry.onSuccess,
+        entry.onConnectionState,
+      );
+      this.resetActionRuntime(ev.action.id);
       logger.info(`[국내] 구독 해제: ${entry.trKey}`);
     }
   }
 
   override async onDidReceiveSettings(
-    ev: DidReceiveSettingsEvent<DomesticStockSettings>
+    ev: DidReceiveSettingsEvent<DomesticStockSettings>,
   ): Promise<void> {
     const oldEntry = this.callbackMap.get(ev.action.id);
     if (oldEntry) {
-      kisWebSocket.unsubscribe(TR_ID_DOMESTIC, oldEntry.trKey, oldEntry.callback, oldEntry.onSuccess);
-      this.callbackMap.delete(ev.action.id);
+      kisWebSocket.unsubscribe(
+        TR_ID_DOMESTIC,
+        oldEntry.trKey,
+        oldEntry.callback,
+        oldEntry.onSuccess,
+        oldEntry.onConnectionState,
+      );
     }
-    this.clearRetryTimer(ev.action.id);
-    this.hasInitialPrice.delete(ev.action.id);
+    this.resetActionRuntime(ev.action.id);
+    this.actionRefMap.set(ev.action.id, ev.action);
 
     const settings = ev.payload.settings;
     const stockCode = settings.stockCode?.trim();
     const stockName = settings.stockName?.trim() || stockCode || "";
 
-    logger.info(`[국내] onDidReceiveSettings: code=${stockCode}, name=${stockName}`);
+    logger.info(
+      `[국내] onDidReceiveSettings: code=${stockCode}, name=${stockName}`,
+    );
 
     if (!stockCode) {
-      await ev.action.setImage(svgToDataUri(renderSetupCard("종목코드를 설정하세요")));
+      this.resetActionRuntime(ev.action.id);
+      await ev.action.setImage(
+        svgToDataUri(renderSetupCard("종목코드를 설정하세요")),
+      );
       return;
     }
 
-    await ev.action.setImage(svgToDataUri(renderWaitingCard(stockName, "domestic")));
+    await ev.action.setImage(
+      svgToDataUri(renderWaitingCard(stockName, "domestic")),
+    );
 
     // 마지막 체결가를 먼저 표시한 뒤 WebSocket 재구독
     const hasSnapshot = await this.fetchAndShowPrice(ev, stockCode, stockName);
@@ -131,28 +206,53 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
 
     const callback: DataCallback = (_trId, _trKey, fields) => {
       const data = parseDomesticData(fields, stockName);
-      const svg = renderStockCard(data, "domestic");
-      ev.action.setImage(svgToDataUri(svg));
+      this.applyConnectionState(ev.action.id, "LIVE");
+      this.renderStockData(ev.action.id, ev.action, data, {
+        source: "live",
+      });
     };
 
     const onSuccess: SubscribeSuccessCallback = () => {
       logger.info(`[국내] 재구독 성공: ${stockCode}`);
+      this.applyConnectionState(ev.action.id, "LIVE");
       if (!this.hasInitialPrice.has(ev.action.id)) {
-        ev.action.setImage(svgToDataUri(renderConnectedCard(stockName, "domestic")));
+        ev.action.setImage(
+          svgToDataUri(renderConnectedCard(stockName, "domestic")),
+        );
       }
     };
 
-    this.callbackMap.set(ev.action.id, { trKey: stockCode, callback, onSuccess });
+    const onConnectionState: ConnectionStateCallback = (
+      _trId,
+      _trKey,
+      state,
+    ) => {
+      this.applyConnectionState(ev.action.id, state);
+      this.renderLastDataIfPossible(ev.action.id);
+    };
+
+    this.callbackMap.set(ev.action.id, {
+      trKey: stockCode,
+      callback,
+      onSuccess,
+      onConnectionState,
+    });
 
     try {
-      await kisWebSocket.subscribe(TR_ID_DOMESTIC, stockCode, callback, onSuccess);
+      await kisWebSocket.subscribe(
+        TR_ID_DOMESTIC,
+        stockCode,
+        callback,
+        onSuccess,
+        onConnectionState,
+      );
     } catch (err) {
       logger.error(`[국내] 재구독 실패: ${stockCode}`, err);
     }
   }
 
   override async onKeyDown(
-    ev: KeyDownEvent<DomesticStockSettings>
+    ev: KeyDownEvent<DomesticStockSettings>,
   ): Promise<void> {
     const actionId = ev.action.id;
     if (this.refreshInFlight.has(actionId)) {
@@ -165,13 +265,16 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     const stockName = settings.stockName?.trim() || stockCode || "";
 
     if (!stockCode) {
-      await ev.action.setImage(svgToDataUri(renderSetupCard("종목코드를 설정하세요")));
+      this.resetActionRuntime(actionId);
+      await ev.action.setImage(
+        svgToDataUri(renderSetupCard("종목코드를 설정하세요")),
+      );
       return;
     }
 
     this.refreshInFlight.add(actionId);
     try {
-      const ok = await this.fetchAndShowPrice(ev, stockCode, stockName);
+      const ok = await this.fetchAndShowPrice(ev, stockCode, stockName, true);
       if (ok) {
         this.hasInitialPrice.add(actionId);
         logger.info(`[국내] 수동 새로고침 성공: ${stockCode}`);
@@ -189,15 +292,24 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
    * REST API로 현재가/종가를 조회하여 화면에 표시
    */
   private async fetchAndShowPrice(
-    ev: { action: { setImage(image: string): Promise<void> | void } },
+    ev: { action: { setImage(image: string): Promise<void> | void; id?: string } },
     stockCode: string,
-    stockName: string
+    stockName: string,
+    force = false,
   ): Promise<boolean> {
     try {
       const data = await fetchDomesticPrice(stockCode, stockName);
       if (data) {
-        const svg = renderStockCard(data, "domestic");
-        await ev.action.setImage(svgToDataUri(svg));
+        const actionId = ev.action.id;
+        if (actionId) {
+          await this.renderStockData(actionId, ev.action, data, {
+            source: "backup",
+            force,
+          });
+        } else {
+          const svg = renderStockCard(data, "domestic");
+          await ev.action.setImage(svgToDataUri(svg));
+        }
         logger.info(`[국내] REST 현재가 표시: ${stockCode} = ${data.price}`);
         return true;
       }
@@ -208,9 +320,11 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
   }
 
   private scheduleInitialPriceRetry(
-    ev: WillAppearEvent<DomesticStockSettings> | DidReceiveSettingsEvent<DomesticStockSettings>,
+    ev:
+      | WillAppearEvent<DomesticStockSettings>
+      | DidReceiveSettingsEvent<DomesticStockSettings>,
     stockCode: string,
-    stockName: string
+    stockName: string,
   ): void {
     const actionId = ev.action.id;
     this.clearRetryTimer(actionId);
@@ -218,7 +332,10 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     const timer = setTimeout(() => {
       this.retryTimers.delete(actionId);
 
-      if (!this.callbackMap.has(actionId) || this.hasInitialPrice.has(actionId)) {
+      if (
+        !this.callbackMap.has(actionId) ||
+        this.hasInitialPrice.has(actionId)
+      ) {
         return;
       }
 
@@ -243,5 +360,153 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     if (!timer) return;
     clearTimeout(timer);
     this.retryTimers.delete(actionId);
+  }
+
+  private clearStaleTimer(actionId: string): void {
+    const timer = this.staleTimers.get(actionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.staleTimers.delete(actionId);
+  }
+
+  private clearStateTransitionTimer(actionId: string): void {
+    const timer = this.stateTransitionTimers.get(actionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.stateTransitionTimers.delete(actionId);
+  }
+
+  private resetActionRuntime(actionId: string): void {
+    const entry = this.callbackMap.get(actionId);
+    if (entry) {
+      this.callbackMap.delete(actionId);
+    }
+    this.hasInitialPrice.delete(actionId);
+    this.refreshInFlight.delete(actionId);
+    this.actionRefMap.delete(actionId);
+    this.lastRenderKeyByAction.delete(actionId);
+    this.lastDataByAction.delete(actionId);
+    this.lastDataAtByAction.delete(actionId);
+    this.connectionStateByAction.delete(actionId);
+    this.connectionStateChangedAtByAction.delete(actionId);
+    this.clearRetryTimer(actionId);
+    this.clearStaleTimer(actionId);
+    this.clearStateTransitionTimer(actionId);
+  }
+
+  private applyConnectionState(
+    actionId: string,
+    nextState: StreamConnectionState,
+  ): void {
+    const currentState = this.connectionStateByAction.get(actionId);
+    if (currentState === nextState) return;
+
+    const now = Date.now();
+    const lastChangedAt = this.connectionStateChangedAtByAction.get(actionId) ?? 0;
+    const elapsed = now - lastChangedAt;
+
+    if (!currentState || elapsed >= CONNECTION_STATE_MIN_HOLD_MS) {
+      this.connectionStateByAction.set(actionId, nextState);
+      this.connectionStateChangedAtByAction.set(actionId, now);
+      this.clearStateTransitionTimer(actionId);
+      return;
+    }
+
+    this.clearStateTransitionTimer(actionId);
+    const timer = setTimeout(() => {
+      this.connectionStateByAction.set(actionId, nextState);
+      this.connectionStateChangedAtByAction.set(actionId, Date.now());
+      this.stateTransitionTimers.delete(actionId);
+      this.renderLastDataIfPossible(actionId);
+    }, CONNECTION_STATE_MIN_HOLD_MS - elapsed);
+    this.stateTransitionTimers.set(actionId, timer);
+  }
+
+  private getRenderConnectionState(
+    actionId: string,
+    source: DataSource,
+  ): StreamConnectionState | null {
+    const current = this.connectionStateByAction.get(actionId) ?? null;
+    if (source === "live") return "LIVE";
+    if (current === "LIVE") return "LIVE";
+    if (current === "BROKEN") return "BACKUP";
+    return "BACKUP";
+  }
+
+  private isStale(actionId: string): boolean {
+    const lastAt = this.lastDataAtByAction.get(actionId);
+    if (!lastAt) return false;
+    return Date.now() - lastAt >= DOMESTIC_STALE_AFTER_MS;
+  }
+
+  private scheduleStaleRender(
+    actionId: string,
+    action: { setImage(image: string): Promise<void> | void },
+  ): void {
+    this.clearStaleTimer(actionId);
+    const lastAt = this.lastDataAtByAction.get(actionId);
+    if (!lastAt) return;
+    const remaining = DOMESTIC_STALE_AFTER_MS - (Date.now() - lastAt);
+    if (remaining <= 0) {
+      this.renderLastDataIfPossible(actionId);
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.staleTimers.delete(actionId);
+      this.renderLastDataIfPossible(actionId);
+    }, remaining);
+    this.staleTimers.set(actionId, timer);
+    this.actionRefMap.set(actionId, action);
+  }
+
+  private renderLastDataIfPossible(actionId: string): void {
+    const data = this.lastDataByAction.get(actionId);
+    const action = this.actionRefMap.get(actionId);
+    if (!data || !action) return;
+    const source =
+      this.connectionStateByAction.get(actionId) === "LIVE" ? "live" : "backup";
+    this.renderStockData(actionId, action, data, { source }).catch((err) => {
+      logger.debug(`[국내] 마지막 데이터 재렌더 실패: ${err}`);
+    });
+  }
+
+  private makeRenderKey(
+    data: StockData,
+    connectionState: StreamConnectionState | null,
+    isStale: boolean,
+  ): string {
+    const normalizedRate = data.changeRate.toFixed(CHANGE_RATE_PRECISION_DIGITS);
+    return `${data.ticker}|${data.name}|${data.price}|${data.change}|${normalizedRate}|${data.sign}|${connectionState ?? "NONE"}|${isStale ? "STALE" : "FRESH"}`;
+  }
+
+  private async renderStockData(
+    actionId: string,
+    action: { setImage(image: string): Promise<void> | void },
+    data: StockData,
+    options: { source: DataSource; force?: boolean },
+  ): Promise<void> {
+    this.lastDataByAction.set(actionId, data);
+    this.lastDataAtByAction.set(actionId, Date.now());
+
+    const targetState = this.getRenderConnectionState(actionId, options.source);
+    if (targetState) {
+      this.applyConnectionState(actionId, targetState);
+    }
+    const connectionState = this.connectionStateByAction.get(actionId) ?? null;
+    const stale = this.isStale(actionId);
+    const renderKey = this.makeRenderKey(data, connectionState, stale);
+
+    if (!options.force && this.lastRenderKeyByAction.get(actionId) === renderKey) {
+      this.scheduleStaleRender(actionId, action);
+      return;
+    }
+
+    this.lastRenderKeyByAction.set(actionId, renderKey);
+    const svg = renderStockCard(data, "domestic", {
+      isStale: stale,
+      connectionState,
+    });
+    await action.setImage(svgToDataUri(svg));
+    this.scheduleStaleRender(actionId, action);
   }
 }

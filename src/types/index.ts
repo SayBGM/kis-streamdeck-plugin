@@ -49,6 +49,19 @@ export type MarketSession = "PRE" | "REG" | "AFT" | "CLOSED";
 
 export type Market = "domestic" | "overseas";
 
+/**
+ * 화면에 표시할 연결 상태
+ * - LIVE: WebSocket 실시간 데이터 수신 중
+ * - BACKUP: REST 스냅샷 등 대체 경로로 표시 중
+ * - BROKEN: 실시간/대체 경로 모두 정상 동작하지 않음
+ */
+export type StreamConnectionState = "LIVE" | "BACKUP" | "BROKEN";
+
+export interface StockCardRenderOptions {
+  isStale?: boolean;
+  connectionState?: StreamConnectionState | null;
+}
+
 // ─── WebSocket 관련 상수 ───
 export const KIS_WS_URL = "ws://ops.koreainvestment.com:21000";
 export const KIS_REST_BASE = "https://openapi.koreainvestment.com:9443";

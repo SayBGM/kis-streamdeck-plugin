@@ -4,6 +4,7 @@ import {
   KIS_WS_URL,
   TR_ID_DOMESTIC,
   TR_ID_OVERSEAS,
+  type StreamConnectionState,
   type GlobalSettings,
 } from "../types/index.js";
 import { logger } from "../utils/logger.js";
@@ -19,6 +20,11 @@ export type DataCallback = (
  * 구독 성공 시 호출되는 콜백
  */
 export type SubscribeSuccessCallback = (trId: string, trKey: string) => void;
+export type ConnectionStateCallback = (
+  trId: string,
+  trKey: string,
+  state: StreamConnectionState
+) => void;
 
 // ─── 구독 정보 ───
 interface Subscription {
@@ -26,6 +32,7 @@ interface Subscription {
   trKey: string;
   callbacks: Set<DataCallback>;
   successCallbacks: Set<SubscribeSuccessCallback>;
+  connectionStateCallbacks: Set<ConnectionStateCallback>;
 }
 
 // ─── 상수 ───
@@ -86,7 +93,8 @@ class KISWebSocketManager {
     trId: string,
     trKey: string,
     callback: DataCallback,
-    onSuccess?: SubscribeSuccessCallback
+    onSuccess?: SubscribeSuccessCallback,
+    onConnectionState?: ConnectionStateCallback
   ): Promise<void> {
     const key = this.makeKey(trId, trKey);
 
@@ -96,12 +104,14 @@ class KISWebSocketManager {
         trKey,
         callbacks: new Set(),
         successCallbacks: new Set(),
+        connectionStateCallbacks: new Set(),
       });
     }
 
     const sub = this.subscriptions.get(key)!;
     sub.callbacks.add(callback);
     if (onSuccess) sub.successCallbacks.add(onSuccess);
+    if (onConnectionState) sub.connectionStateCallbacks.add(onConnectionState);
 
     if (!this.approvalKey) {
       logger.info(`[WS] approval_key 대기, 구독 예약: ${trId}/${trKey}`);
@@ -120,7 +130,8 @@ class KISWebSocketManager {
     trId: string,
     trKey: string,
     callback: DataCallback,
-    onSuccess?: SubscribeSuccessCallback
+    onSuccess?: SubscribeSuccessCallback,
+    onConnectionState?: ConnectionStateCallback
   ): void {
     const key = this.makeKey(trId, trKey);
     const sub = this.subscriptions.get(key);
@@ -128,6 +139,7 @@ class KISWebSocketManager {
     if (sub) {
       sub.callbacks.delete(callback);
       if (onSuccess) sub.successCallbacks.delete(onSuccess);
+      if (onConnectionState) sub.connectionStateCallbacks.delete(onConnectionState);
       if (sub.callbacks.size === 0) {
         this.subscriptions.delete(key);
         this.sendUnsubscribe(trId, trKey);
@@ -186,6 +198,7 @@ class KISWebSocketManager {
       const timeout = setTimeout(() => {
         if (this.ws?.readyState !== WebSocket.OPEN) {
           logger.error("[WS] 연결 타임아웃 (10초)");
+          this.notifyConnectionStateForAll("BROKEN");
           this.safeDisconnect();
           this.isConnecting = false;
           this.connectPromise = null;
@@ -212,6 +225,7 @@ class KISWebSocketManager {
       this.ws.on("close", (code: number, reason: Buffer) => {
         clearTimeout(timeout);
         logger.info(`[WS] 연결 종료 (code=${code}, reason=${reason.toString()})`);
+        this.notifyConnectionStateForAll("BROKEN");
         this.isConnecting = false;
         this.connectPromise = null;
         this.ws = null;
@@ -221,6 +235,7 @@ class KISWebSocketManager {
       this.ws.on("error", (err: Error) => {
         clearTimeout(timeout);
         logger.error("[WS] WebSocket 에러:", err.message);
+        this.notifyConnectionStateForAll("BROKEN");
         this.isConnecting = false;
         this.connectPromise = null;
         reject(err);
@@ -253,6 +268,11 @@ class KISWebSocketManager {
           // 구독 성공 시 콜백 호출
           if ((msg_cd === "OPSP0000" || msg_cd === "OPSP0002") && trId) {
             this.notifySubscribeSuccess(trId, trKey);
+            if (trKey) {
+              this.notifyConnectionState(trId, trKey, "LIVE");
+            } else {
+              this.notifyConnectionStateForTrId(trId, "LIVE");
+            }
           }
         }
         return;
@@ -280,6 +300,9 @@ class KISWebSocketManager {
 
     const matchedSubscriptions = this.findSubscriptionsForData(trId, fields);
     for (const sub of matchedSubscriptions) {
+      for (const cb of sub.connectionStateCallbacks) {
+        cb(sub.trId, sub.trKey, "LIVE");
+      }
       for (const cb of sub.callbacks) {
         cb(trId, sub.trKey, fields);
       }
@@ -316,6 +339,38 @@ class KISWebSocketManager {
       output?: { tr_key?: string };
     };
     return bodyObj.output?.tr_key ?? bodyObj.input?.tr_key;
+  }
+
+  private notifyConnectionState(
+    trId: string,
+    trKey: string,
+    state: StreamConnectionState
+  ): void {
+    const sub = this.subscriptions.get(this.makeKey(trId, trKey));
+    if (!sub) return;
+    for (const cb of sub.connectionStateCallbacks) {
+      cb(sub.trId, sub.trKey, state);
+    }
+  }
+
+  private notifyConnectionStateForTrId(
+    trId: string,
+    state: StreamConnectionState
+  ): void {
+    for (const sub of this.subscriptions.values()) {
+      if (sub.trId !== trId) continue;
+      for (const cb of sub.connectionStateCallbacks) {
+        cb(sub.trId, sub.trKey, state);
+      }
+    }
+  }
+
+  private notifyConnectionStateForAll(state: StreamConnectionState): void {
+    for (const sub of this.subscriptions.values()) {
+      for (const cb of sub.connectionStateCallbacks) {
+        cb(sub.trId, sub.trKey, state);
+      }
+    }
   }
 
   private findSubscriptionsForData(trId: string, fields: string[]): Subscription[] {
