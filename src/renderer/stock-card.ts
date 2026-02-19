@@ -202,6 +202,7 @@ export function renderStockCard(
   const titleColor = renderOptions.isStale ? COLOR_TEXT_STALE : COLOR_TEXT;
   const connectionState = renderOptions.connectionState;
   const connectionColor = getConnectionColor(connectionState);
+  const connectionBadge = getConnectionBadgeSymbol(connectionState);
   const sessionTextX = connectionColor ? SESSION_TEXT_X_WITH_BADGE : SESSION_TEXT_X_DEFAULT;
 
   // 포맷된 문자열
@@ -221,7 +222,7 @@ export function renderStockCard(
   
   <!-- 장 상태 (우측 상단) -->
   <text x="${sessionTextX}" y="30" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="${sessionColor}" text-anchor="end">${session}</text>
-  ${connectionColor ? `<text x="${SESSION_BADGE_X}" y="${SESSION_BADGE_Y}" font-family="Arial, Helvetica, sans-serif" font-size="10" font-weight="bold" fill="${connectionColor}" text-anchor="middle">●</text>` : ""}
+  ${connectionColor ? `<text x="${SESSION_BADGE_X}" y="${SESSION_BADGE_Y}" font-family="Arial, Helvetica, sans-serif" font-size="10" font-weight="bold" fill="${connectionColor}" text-anchor="middle">${connectionBadge}</text>` : ""}
   
   <!-- 현재가 (중앙) -->
   <text x="72" y="80" font-family="Arial, Helvetica, sans-serif" font-size="${priceFontSize}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceStr)}</text>
@@ -270,6 +271,21 @@ function getConnectionColor(
       return COLOR_CONN_BROKEN;
     default:
       return null;
+  }
+}
+
+function getConnectionBadgeSymbol(
+  connectionState: StreamConnectionState | null | undefined
+): string {
+  switch (connectionState) {
+    case "LIVE":
+      return "●";
+    case "BACKUP":
+      return "◐";
+    case "BROKEN":
+      return "○";
+    default:
+      return "";
   }
 }
 
