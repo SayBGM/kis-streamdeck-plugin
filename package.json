@@ -7,6 +7,8 @@
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w",
+    "local:install": "npm run build && node ./scripts/install-local-plugin.mjs",
+    "package:plugin": "npm run build && node ./scripts/package-streamdeck-plugin.mjs",
     "version:sync-manifest": "node ./scripts/sync-manifest-version.mjs",
     "version": "npm run version:sync-manifest && git add manifest.json",
     "release:patch": "npm version patch",
