@@ -24,10 +24,13 @@ const COLOR_CONN_LIVE = "#00c853";
 const COLOR_CONN_BACKUP = "#ffd54f";
 const COLOR_CONN_BROKEN = "#ff1744";
 
-const SESSION_TEXT_X_DEFAULT = 132;
-const SESSION_TEXT_X_WITH_BADGE = 122;
-const SESSION_BADGE_X = 132;
-const SESSION_BADGE_Y = 30;
+const SESSION_ICON_X_DEFAULT = 130;
+const SESSION_ICON_Y = 30;
+const SESSION_ICON_FONT_SIZE = 18;
+const CONNECTION_LINE_X = 8;
+const CONNECTION_LINE_Y = 138;
+const CONNECTION_LINE_WIDTH = 128;
+const CONNECTION_LINE_HEIGHT = 4;
 
 const ARROW_UP = "\u25B2"; // ▲
 const ARROW_DOWN = "\u25BC"; // ▼
@@ -128,11 +131,12 @@ export function renderWaitingCard(
 ): string {
   const session = getMarketSession(market);
   const sessionColor = getSessionColor(session);
+  const sessionBadge = getSessionBadgeSymbol(session);
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   <text x="12" y="30" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(truncateName(name || "---", 6))}</text>
-  <text x="132" y="30" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="${sessionColor}" text-anchor="end">${session}</text>
+  <text x="${SESSION_ICON_X_DEFAULT}" y="${SESSION_ICON_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${SESSION_ICON_FONT_SIZE}" font-weight="bold" fill="${sessionColor}" text-anchor="middle">${sessionBadge}</text>
   <text x="72" y="80" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_FLAT}" text-anchor="middle">연결중...</text>
 </svg>`;
 }
@@ -157,13 +161,14 @@ export function renderConnectedCard(
 ): string {
   const session = getMarketSession(market);
   const sessionColor = getSessionColor(session);
+  const sessionBadge = getSessionBadgeSymbol(session);
   const statusText = session === "CLOSED" ? "장 마감" : "데이터 대기";
   const statusColor = session === "CLOSED" ? COLOR_SESSION_CLOSED : COLOR_FLAT;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   <text x="12" y="30" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(truncateName(name || "---", 6))}</text>
-  <text x="132" y="30" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="${sessionColor}" text-anchor="end">${session}</text>
+  <text x="${SESSION_ICON_X_DEFAULT}" y="${SESSION_ICON_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${SESSION_ICON_FONT_SIZE}" font-weight="bold" fill="${sessionColor}" text-anchor="middle">${sessionBadge}</text>
   <text x="72" y="74" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${statusColor}" text-anchor="middle">${statusText}</text>
   <text x="72" y="100" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="${COLOR_SESSION_REG}" text-anchor="middle">● 연결됨</text>
 </svg>`;
@@ -202,8 +207,8 @@ export function renderStockCard(
   const titleColor = renderOptions.isStale ? COLOR_TEXT_STALE : COLOR_TEXT;
   const connectionState = renderOptions.connectionState;
   const connectionColor = getConnectionColor(connectionState);
-  const connectionBadge = getConnectionBadgeSymbol(connectionState);
-  const sessionTextX = connectionColor ? SESSION_TEXT_X_WITH_BADGE : SESSION_TEXT_X_DEFAULT;
+  const sessionBadge = getSessionBadgeSymbol(session);
+  const sessionIconX = SESSION_ICON_X_DEFAULT;
 
   // 포맷된 문자열
   const priceStr = formatPrice(data.price, market);
@@ -220,9 +225,8 @@ export function renderStockCard(
   <!-- 종목명 (좌측 상단) -->
   <text x="12" y="30" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="${titleColor}">${escapeXml(displayName)}</text>
   
-  <!-- 장 상태 (우측 상단) -->
-  <text x="${sessionTextX}" y="30" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" fill="${sessionColor}" text-anchor="end">${session}</text>
-  ${connectionColor ? `<text x="${SESSION_BADGE_X}" y="${SESSION_BADGE_Y}" font-family="Arial, Helvetica, sans-serif" font-size="10" font-weight="bold" fill="${connectionColor}" text-anchor="middle">${connectionBadge}</text>` : ""}
+  <!-- 장 상태 아이콘 (우측 상단) -->
+  <text x="${sessionIconX}" y="${SESSION_ICON_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${SESSION_ICON_FONT_SIZE}" font-weight="bold" fill="${sessionColor}" text-anchor="middle">${sessionBadge}</text>
   
   <!-- 현재가 (중앙) -->
   <text x="72" y="80" font-family="Arial, Helvetica, sans-serif" font-size="${priceFontSize}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceStr)}</text>
@@ -232,6 +236,7 @@ export function renderStockCard(
   
   <!-- 변동률 (우측 하단) -->
   <text x="132" y="122" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}" text-anchor="end">${escapeXml(rateStr)}</text>
+  ${connectionColor ? `<rect x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${connectionColor}" />` : ""}
 </svg>`;
 }
 
@@ -274,18 +279,18 @@ function getConnectionColor(
   }
 }
 
-function getConnectionBadgeSymbol(
-  connectionState: StreamConnectionState | null | undefined
-): string {
-  switch (connectionState) {
-    case "LIVE":
+function getSessionBadgeSymbol(session: MarketSession): string {
+  switch (session) {
+    case "REG":
       return "●";
-    case "BACKUP":
+    case "PRE":
       return "◐";
-    case "BROKEN":
+    case "AFT":
+      return "◑";
+    case "CLOSED":
       return "○";
     default:
-      return "";
+      return "○";
   }
 }
 
