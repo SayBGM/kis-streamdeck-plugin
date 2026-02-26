@@ -145,6 +145,7 @@ All phases include @MX code annotation management:
 - **sync**: Validate MX tags, add missing annotations
 
 MX Tag Types:
+
 - `@MX:NOTE` - Context and intent delivery
 - `@MX:WARN` - Danger zone (requires @MX:REASON)
 - `@MX:ANCHOR` - Invariant contract (high fan_in functions)
@@ -165,6 +166,7 @@ For TRUST 5 framework details, see @.claude/rules/moai/core/moai-constitution.md
 MoAI-ADK implements LSP-based quality gates:
 
 **Phase-Specific Thresholds:**
+
 - **plan**: Capture LSP baseline at phase start
 - **run**: Zero errors, zero type errors, zero lint errors required
 - **sync**: Zero errors, max 10 warnings, clean LSP required
@@ -182,6 +184,7 @@ These rules ensure code quality, prevent regressions, and maintain predictable A
 **Rule 1: Approach-First Development**
 
 Before writing any non-trivial code:
+
 - Explain the implementation approach clearly
 - Describe which files will be modified and why
 - Get user approval before proceeding
@@ -190,6 +193,7 @@ Before writing any non-trivial code:
 **Rule 2: Multi-File Change Decomposition**
 
 When modifying 3 or more files:
+
 - Split work into logical units using TodoList
 - Execute changes file-by-file or by logical grouping
 - Analyze file dependencies before parallel execution
@@ -198,6 +202,7 @@ When modifying 3 or more files:
 **Rule 3: Post-Implementation Review**
 
 After writing code, always provide:
+
 - List of potential issues (edge cases, error scenarios, concurrency)
 - Suggested test cases to verify the implementation
 - Known limitations or assumptions made
@@ -206,6 +211,7 @@ After writing code, always provide:
 **Rule 4: Reproduction-First Bug Fixing**
 
 When fixing bugs:
+
 - Write a failing test that reproduces the bug first
 - Confirm the test fails before making changes
 - Fix the bug with minimal code changes
@@ -214,6 +220,7 @@ When fixing bugs:
 **Rule 5: No Refusal of Explicit Requests**
 
 When the user reports a bug or requests a specific fix:
+
 - Make the requested change first
 - Explain concerns or alternatives separately after the fix
 - Never argue that a reported bug is "by design"
@@ -413,12 +420,14 @@ MoAI-ADK supports CG Mode for 60-70% cost reduction on implementation-heavy task
 **Activation**: `moai cg` (requires tmux). Uses tmux session-level env isolation.
 
 **When to use**:
+
 - Implementation-heavy SPECs (run phase)
 - Code generation tasks
 - Test writing
 - Documentation generation
 
 **When NOT to use**:
+
 - Planning/architecture decisions (needs Opus reasoning)
 - Security reviews (needs Claude's security training)
 - Complex debugging (needs advanced reasoning)
@@ -450,6 +459,7 @@ Start from: [specific starting point]
 ### Context Sources
 
 When context is needed from previous sessions:
+
 1. Check SPEC document at `.moai/specs/SPEC-XXX/spec.md` for requirements
 2. Check git log for recent changes: `git log --oneline -20`
 3. Check MX scan progress: `.moai/cache/mx-scan-progress.json`
@@ -484,12 +494,12 @@ Or use the `/debug` command inside a session to inspect current session state, h
 
 ### Common Issues
 
-| Symptom | Cause | Solution |
-|---------|-------|---------|
-| TeammateIdle hook blocks teammate | LSP errors exceed threshold | Fix errors, or set `enforce_quality: false` in quality.yaml |
-| Agent Teams messages not delivered | Session was resumed after interrupt | Spawn new teammates; old teammates are orphaned |
-| `moai hook subagent-stop` fails | Binary not in PATH | Run `which moai` to verify installation |
-| settings.json not updated after `moai update` | Conflict with user modifications | Run `moai update -t` for template-only sync |
+| Symptom                                       | Cause                               | Solution                                                    |
+| --------------------------------------------- | ----------------------------------- | ----------------------------------------------------------- |
+| TeammateIdle hook blocks teammate             | LSP errors exceed threshold         | Fix errors, or set `enforce_quality: false` in quality.yaml |
+| Agent Teams messages not delivered            | Session was resumed after interrupt | Spawn new teammates; old teammates are orphaned             |
+| `moai hook subagent-stop` fails               | Binary not in PATH                  | Run `which moai` to verify installation                     |
+| settings.json not updated after `moai update` | Conflict with user modifications    | Run `moai update -t` for template-only sync                 |
 
 ### Reading Large PDFs
 
@@ -501,6 +511,13 @@ pages: "1-20"
 ```
 
 Large PDFs (>10 pages) return a lightweight reference when @-mentioned. Always specify page ranges for PDFs over 50 pages to avoid token waste.
+
+## Git Workflow
+
+- Commit after completing each feature or fix.
+- Use Conventional Commits (feat, fix, refactor, etc.).
+- Run tests/verify before committing.
+- Keep commits atomic.
 
 ---
 
