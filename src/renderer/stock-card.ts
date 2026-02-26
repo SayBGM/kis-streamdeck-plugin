@@ -34,7 +34,7 @@ const CONNECTION_LINE_HEIGHT = 4;
 
 const ARROW_UP = "\u25B2"; // ▲
 const ARROW_DOWN = "\u25BC"; // ▼
-const SVG_DATA_URI_CACHE_MAX_ENTRIES = 200;
+const SVG_DATA_URI_CACHE_MAX_ENTRIES = 500;
 
 // Intl 객체 생성 비용을 줄이기 위해 재사용합니다.
 const KR_INT_FORMAT = new Intl.NumberFormat("ko-KR", {
@@ -308,17 +308,19 @@ function escapeXml(str: string): string {
     .replace(/'/g, "&apos;");
 }
 
-export function svgToDataUri(svg: string): string {
-  const cached = svgDataUriCache.get(svg);
+// @MX:NOTE: [AUTO] semanticKey must be 1:1 with SVG content. Format for stock cards: "${ticker}|${price}|${change}|${changeRate}|${sign}|${connectionState}|${isStale}"
+// @MX:SPEC: SPEC-PERF-001 REQ-PERF-001-2.1.1, REQ-PERF-001-2.1.3
+export function svgToDataUri(svg: string, semanticKey: string): string {
+  const cached = svgDataUriCache.get(semanticKey);
   if (cached) {
     // LRU 갱신: 조회된 키를 최근 사용으로 이동
-    svgDataUriCache.delete(svg);
-    svgDataUriCache.set(svg, cached);
+    svgDataUriCache.delete(semanticKey);
+    svgDataUriCache.set(semanticKey, cached);
     return cached;
   }
 
   const dataUri = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
-  svgDataUriCache.set(svg, dataUri);
+  svgDataUriCache.set(semanticKey, dataUri);
 
   if (svgDataUriCache.size > SVG_DATA_URI_CACHE_MAX_ENTRIES) {
     const oldestKey = svgDataUriCache.keys().next().value;

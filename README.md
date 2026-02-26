@@ -18,6 +18,13 @@
 - 단일 WebSocket 연결 공유
   - 모든 버튼 구독을 하나의 연결에서 관리
   - 마지막 구독이 해제되면 자동 연결 종료
+- **연결 안정성 강화** (v1.2.0)
+  - `approval_key` 30분 자동 갱신 (만료로 인한 인증 실패 방지)
+  - 지수 백오프 재연결: 5초→10초→20초…최대 60초 (±10% 지터)
+- **렌더링 성능 최적화** (v1.2.0)
+  - SVG DataURI LRU 캐시 키를 의미론적 키로 변경 (캐시 적중률 향상)
+  - `setImage()` 호출 디바운싱 50ms (IPC 호출 횟수 대폭 감소)
+  - LRU 캐시 크기 200 → 500개
 - 장 상태 표시
   - `PRE` / `REG` / `AFT` / `CLOSED`
   - 국내(KST), 미국(ET) 기준으로 자동 판별
@@ -44,20 +51,24 @@
 ```text
 com.kis.streamdeck.sdPlugin/
 ├── manifest.json
+├── vitest.config.ts                  # 테스트 설정
 ├── src/
 │   ├── plugin.ts                     # 진입점, 액션 등록, 전역 설정 반영
 │   ├── actions/
 │   │   ├── domestic-stock.ts         # 국내 액션 라이프사이클/구독 관리
-│   │   └── overseas-stock.ts         # 미국 액션 라이프사이클/구독 관리
+│   │   ├── overseas-stock.ts         # 미국 액션 라이프사이클/구독 관리
+│   │   └── __tests__/               # 액션 특성 테스트
 │   ├── kis/
 │   │   ├── auth.ts                   # approval_key / access_token 발급
 │   │   ├── websocket-manager.ts      # 단일 WS 연결, 구독/해제, 재연결, PINGPONG
 │   │   ├── rest-price.ts             # 초기 REST 현재가 조회
 │   │   ├── domestic-parser.ts        # 국내 수신 데이터 파싱
 │   │   ├── overseas-parser.ts        # 미국 수신 데이터 파싱
-│   │   └── settings-store.ts         # 전역 설정 저장/대기
+│   │   ├── settings-store.ts         # 전역 설정 저장/대기
+│   │   └── __tests__/               # WebSocket 특성 테스트
 │   ├── renderer/
-│   │   └── stock-card.ts             # 144x144 SVG 카드 렌더링
+│   │   ├── stock-card.ts             # 144x144 SVG 카드 렌더링
+│   │   └── __tests__/               # 렌더러 특성 테스트
 │   ├── types/
 │   │   └── index.ts                  # 타입/상수/TR_ID 정의
 │   └── utils/
@@ -96,8 +107,11 @@ com.kis.streamdeck.sdPlugin/
 ## 개발
 
 ```bash
-npm run build
-npm run watch
+npm run build         # 프로덕션 빌드
+npm run watch         # 변경 감지 빌드
+npm test              # 유닛 테스트 실행
+npm run test:watch    # 테스트 감지 모드
+npm run test:coverage # 커버리지 리포트
 ```
 
 ## 제약 사항

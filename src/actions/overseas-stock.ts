@@ -37,6 +37,14 @@ const CONNECTION_STATE_MIN_HOLD_MS = 1_500;
 const PRICE_PRECISION_DIGITS = 2;
 const CHANGE_PRECISION_DIGITS = 2;
 const CHANGE_RATE_PRECISION_DIGITS = 2;
+const DEBOUNCE_RENDER_MS = 50;
+
+// REQ-PERF-001-2.2.4
+interface PendingRender {
+  action: { setImage(image: string): Promise<void> | void };
+  dataUri: string;
+  renderKey: string;
+}
 
 type DataSource = "live" | "backup";
 
@@ -66,6 +74,8 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
   private lastDataAtByAction = new Map<string, number>();
   private connectionStateByAction = new Map<string, StreamConnectionState>();
   private connectionStateChangedAtByAction = new Map<string, number>();
+  private pendingRenderByAction = new Map<string, PendingRender>();
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * 현재 시간 기반으로 주간/야간 자동 판별하여 tr_key 생성
@@ -95,11 +105,11 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
 
     if (!ticker) {
       this.resetActionRuntime(ev.action.id);
-      await ev.action.setImage(svgToDataUri(renderSetupCard("티커를 설정하세요")));
+      await ev.action.setImage(svgToDataUri(renderSetupCard("티커를 설정하세요"), "setup:no-ticker"));
       return;
     }
 
-    await ev.action.setImage(svgToDataUri(renderWaitingCard(stockName, "overseas")));
+    await ev.action.setImage(svgToDataUri(renderWaitingCard(stockName, "overseas"), `waiting:overseas:${stockName}`));
 
     // 마지막 체결가를 먼저 표시한 뒤 WebSocket 구독
     const hasSnapshot = await this.fetchAndShowPrice(ev, settings, stockName);
@@ -123,7 +133,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       logger.info(`[미국] 구독 성공: ${trKey}`);
       this.applyConnectionState(ev.action.id, "LIVE");
       if (!this.hasInitialPrice.has(ev.action.id)) {
-        ev.action.setImage(svgToDataUri(renderConnectedCard(stockName, "overseas")));
+        ev.action.setImage(svgToDataUri(renderConnectedCard(stockName, "overseas"), `connected:overseas:${stockName}`));
       }
     };
 
@@ -198,11 +208,11 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
 
     if (!ticker) {
       this.resetActionRuntime(ev.action.id);
-      await ev.action.setImage(svgToDataUri(renderSetupCard("티커를 설정하세요")));
+      await ev.action.setImage(svgToDataUri(renderSetupCard("티커를 설정하세요"), "setup:no-ticker"));
       return;
     }
 
-    await ev.action.setImage(svgToDataUri(renderWaitingCard(stockName, "overseas")));
+    await ev.action.setImage(svgToDataUri(renderWaitingCard(stockName, "overseas"), `waiting:overseas:${stockName}`));
 
     // 마지막 체결가를 먼저 표시한 뒤 WebSocket 재구독
     const hasSnapshot = await this.fetchAndShowPrice(ev, settings, stockName);
@@ -225,7 +235,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       logger.info(`[미국] 재구독 성공: ${trKey}`);
       this.applyConnectionState(ev.action.id, "LIVE");
       if (!this.hasInitialPrice.has(ev.action.id)) {
-        ev.action.setImage(svgToDataUri(renderConnectedCard(stockName, "overseas")));
+        ev.action.setImage(svgToDataUri(renderConnectedCard(stockName, "overseas"), `connected:overseas:${stockName}`));
       }
     };
 
@@ -273,7 +283,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
 
     if (!ticker) {
       this.resetActionRuntime(actionId);
-      await ev.action.setImage(svgToDataUri(renderSetupCard("티커를 설정하세요")));
+      await ev.action.setImage(svgToDataUri(renderSetupCard("티커를 설정하세요"), "setup:no-ticker"));
       return;
     }
 
@@ -313,7 +323,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
           });
         } else {
           const svg = renderStockCard(data, "overseas");
-          await ev.action.setImage(svgToDataUri(svg));
+          await ev.action.setImage(svgToDataUri(svg, `backup:overseas:${data.ticker}|${data.price}`));
         }
         logger.info(`[미국] REST 현재가 표시: ${settings.ticker} = ${data.price}`);
         return true;
@@ -389,6 +399,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     this.clearRetryTimer(actionId);
     this.clearStaleTimer(actionId);
     this.clearStateTransitionTimer(actionId);
+    this.pendingRenderByAction.delete(actionId);
   }
 
   private applyConnectionState(
@@ -505,7 +516,33 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       isStale: stale,
       connectionState,
     });
-    await action.setImage(svgToDataUri(svg));
+    // REQ-PERF-001-2.2.1: debounce setImage() IPC calls within 50ms window
+    this.scheduleRender(actionId, action, svgToDataUri(svg, renderKey), renderKey);
     this.scheduleStaleRender(actionId, action);
+  }
+
+  // @MX:NOTE: [AUTO] last-write-wins debounce flush — batches setImage() IPC calls within 50ms window to reduce Electron IPC overhead
+  // @MX:SPEC: SPEC-PERF-001 REQ-PERF-001-2.2.3
+  private flushPendingRenders(): void {
+    this.flushTimer = null;
+    for (const [, pending] of this.pendingRenderByAction) {
+      void Promise.resolve(pending.action.setImage(pending.dataUri)).catch((err: unknown) => {
+        logger.debug(`[미국] setImage flush 실패: ${err}`);
+      });
+    }
+    this.pendingRenderByAction.clear();
+  }
+
+  private scheduleRender(
+    actionId: string,
+    action: { setImage(image: string): Promise<void> | void },
+    dataUri: string,
+    renderKey: string,
+  ): void {
+    // REQ-PERF-001-2.2.2: last-write-wins — replace any pending render for this action
+    this.pendingRenderByAction.set(actionId, { action, dataUri, renderKey });
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => this.flushPendingRenders(), DEBOUNCE_RENDER_MS);
+    }
   }
 }

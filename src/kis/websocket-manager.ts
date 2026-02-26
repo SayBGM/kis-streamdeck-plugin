@@ -36,8 +36,12 @@ interface Subscription {
 }
 
 // ─── 상수 ───
-const RECONNECT_DELAY_MS = 5000;
+// @MX:NOTE: [AUTO] Exponential backoff constants — delay = min(BASE * 2^attempt, MAX) * (1 ± 0.1 jitter)
+// @MX:SPEC: SPEC-PERF-001 REQ-PERF-001-1.2.1, REQ-PERF-001-1.2.4
+const RECONNECT_BASE_DELAY_MS = 5000;
+const RECONNECT_MAX_DELAY_MS = 60000;
 const CONNECT_TIMEOUT_MS = 10000;
+const APPROVAL_KEY_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * KIS WebSocket 매니저
@@ -48,6 +52,9 @@ class KISWebSocketManager {
   private subscriptions = new Map<string, Subscription>();
   private globalSettings: GlobalSettings | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
+  private approvalKeyRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private approvalKeyRefreshInFlight: Promise<void> | null = null;
   private isConnecting = false;
   private connectPromise: Promise<void> | null = null;
   private isUpdating = false;
@@ -74,6 +81,16 @@ class KISWebSocketManager {
       logger.info("[WS] approval_key 발급 시작...");
       this.approvalKey = await getApprovalKey(settings);
       logger.info("[WS] approval_key 발급 완료");
+
+      // Setup auto-refresh timer (REQ-PERF-001-1.1.1)
+      if (this.approvalKeyRefreshTimer) {
+        clearInterval(this.approvalKeyRefreshTimer);
+      }
+      this.approvalKeyRefreshTimer = setInterval(() => {
+        this.refreshApprovalKey().catch((err) =>
+          logger.error("[WS] approval_key 자동 갱신 실패:", err)
+        );
+      }, APPROVAL_KEY_REFRESH_INTERVAL_MS);
 
       if (this.subscriptions.size > 0) {
         logger.info(`[WS] 대기 중인 구독 ${this.subscriptions.size}건 연결 시도`);
@@ -211,6 +228,7 @@ class KISWebSocketManager {
         logger.info("[WS] WebSocket 연결됨!");
         this.isConnecting = false;
         this.connectPromise = null;
+        this.reconnectAttempts = 0; // REQ-PERF-001-1.2.2: reset on successful connection
 
         for (const sub of this.subscriptions.values()) {
           this.sendSubscribe(sub.trId, sub.trKey);
@@ -451,6 +469,12 @@ class KISWebSocketManager {
       this.reconnectTimer = null;
     }
 
+    // REQ-PERF-001-1.1.4: clean up approval_key refresh timer
+    if (this.approvalKeyRefreshTimer) {
+      clearInterval(this.approvalKeyRefreshTimer);
+      this.approvalKeyRefreshTimer = null;
+    }
+
     if (this.ws) {
       try {
         this.ws.removeAllListeners();
@@ -466,19 +490,67 @@ class KISWebSocketManager {
     }
   }
 
+  // @MX:NOTE: [AUTO] Exponential backoff with ±10% jitter — prevents thundering herd on mass reconnect
+  // @MX:SPEC: SPEC-PERF-001 REQ-PERF-001-1.2.1
+  // Formula: delay = min(RECONNECT_BASE_DELAY_MS * 2^attempt, RECONNECT_MAX_DELAY_MS) * (1 ± 0.1)
   private scheduleReconnect(): void {
     if (this.subscriptions.size === 0) return;
     if (!this.approvalKey) return;
 
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
 
+    const baseDelay = Math.min(
+      RECONNECT_BASE_DELAY_MS * Math.pow(2, this.reconnectAttempts),
+      RECONNECT_MAX_DELAY_MS
+    );
+    const jitter = baseDelay * (Math.random() * 0.2 - 0.1);
+    const delay = Math.round(baseDelay + jitter);
+    this.reconnectAttempts++;
+
+    logger.info(`[WS] 재연결 예약 (attempt=${this.reconnectAttempts}, delay=${delay}ms)`);
+
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       logger.info("[WS] 재연결 시도...");
       this.connect().catch((err) => {
         logger.error("[WS] 재연결 실패:", err);
         this.scheduleReconnect();
       });
-    }, RECONNECT_DELAY_MS);
+    }, delay);
+  }
+
+  // @MX:ANCHOR: [AUTO] approval_key lifecycle manager — auto-refreshes every 30min to prevent silent auth failure
+  // @MX:REASON: [AUTO] Controls WebSocket authentication state; failure keeps existing key to avoid connection interruption (fan_in >= 3: setInterval, retry timer, updateSettings)
+  // @MX:SPEC: SPEC-PERF-001 REQ-PERF-001-1.1.1
+  private async refreshApprovalKey(): Promise<void> {
+    if (!this.globalSettings?.appKey || !this.globalSettings?.appSecret) return;
+
+    // REQ-PERF-001-1.1.2: in-flight deduplication (same pattern as auth.ts:151-153)
+    if (this.approvalKeyRefreshInFlight) {
+      return this.approvalKeyRefreshInFlight;
+    }
+
+    this.approvalKeyRefreshInFlight = (async () => {
+      try {
+        const newKey = await getApprovalKey(this.globalSettings!);
+        this.approvalKey = newKey;
+        logger.info("[WS] approval_key 자동 갱신 완료");
+      } catch (e) {
+        // REQ-PERF-001-1.1.3: keep existing key, retry after 30s
+        logger.error("[WS] approval_key 갱신 실패 (기존 키 유지, 30초 후 재시도):", e);
+        setTimeout(() => {
+          this.approvalKeyRefreshInFlight = null;
+          this.refreshApprovalKey().catch((err) =>
+            logger.error("[WS] approval_key 재시도 실패:", err)
+          );
+        }, 30_000);
+        return;
+      } finally {
+        this.approvalKeyRefreshInFlight = null;
+      }
+    })();
+
+    return this.approvalKeyRefreshInFlight;
   }
 }
 
