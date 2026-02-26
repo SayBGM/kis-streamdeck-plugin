@@ -1,174 +1,169 @@
-# KIS StreamDeck 실시간 주식 시세 플러그인 - 제품 개요
+# KIS StreamDeck Real-Time Stock Quotes Plugin - Product Overview
 
-## 프로젝트 이름 및 설명
+## Project Name and Description
 
-**KIS StreamDeck 실시간 주식 시세 플러그인**
+**KIS StreamDeck Real-Time Stock Quotes Plugin**
 
-- 버전: 1.1.0
-- 저자: SayBGM (광민)
-- 라이선스: 미지정
+- Version: 1.1.0
+- Author: SayBGM (Gwangmin)
+- License: Unspecified
 
-한국투자증권(KIS) Open API를 활용하여 Elgato Stream Deck에서 실시간 주식 시세를 표시하는 플러그인입니다. 국내 주식과 미국 주식의 현재가, 변동률, 거래량 등을 실시간으로 모니터링할 수 있습니다.
+This plugin uses the Korea Investment & Securities (KIS) Open API to show real-time stock quotes on Elgato Stream Deck. It supports both Korean and U.S. markets and displays current price, change rate, volume, and market/session state.
 
-## 대상 사용자
+## Target Users
 
-### 1차 대상: 증권 트레이더 및 투자자
-- 한국투자증권(KIS) 계좌를 보유한 활동적인 트레이더
-- 실시간 시세 모니터링이 필요한 전문 투자자
-- 다중 모니터 환경에서 주식 시세를 빠르게 확인하고 싶은 사용자
+### Primary: Traders and Investors
+- Active traders with a KIS account
+- Professional investors who need constant quote visibility
+- Users who want quick quote checks in multi-monitor setups
 
-### 2차 대상: 개발자 및 기술자
-- Stream Deck 플러그인 개발에 관심 있는 개발자
-- TypeScript/JavaScript 기반 WebSocket 통신 구현을 학습하려는 개발자
-- Open API 통합 및 OAuth2 인증 패턴을 참조하고 싶은 개발자
+### Secondary: Developers and Engineers
+- Developers interested in Stream Deck plugin development
+- Engineers learning TypeScript/JavaScript WebSocket implementations
+- Teams looking for OAuth2 + Open API integration patterns
 
-### 3차 대상: 금융 시스템 구축자
-- 자체 주식 모니터링 시스템을 구축하는 조직
-- Multi-source 실시간 데이터 처리 패턴이 필요한 팀
-- WebSocket 기반 스트리밍 아키텍처를 검토하는 설계자
+### Tertiary: Financial Platform Builders
+- Organizations building internal stock-monitoring systems
+- Teams that need multi-source real-time data handling patterns
+- Architects evaluating WebSocket-based streaming designs
 
-## 핵심 기능
+## Core Features
 
-### 1. 실시간 주식 시세 스트리밍
-- **WebSocket 기반 스트리밍**: KIS Open API WebSocket을 통한 실시간 데이터 수신
-- **국내 주식**: H0UNCNT0 데이터 필드 파싱으로 현재가, 고가, 저가, 거래량 추출
-- **미국 주식**: HDFSCNT0 데이터 필드 파싱으로 현재가, 변동률, 거래량 추출
-- **자동 갱신**: 데이터 수신 시 즉시 화면 업데이트
+### 1. Real-Time Stock Quote Streaming
+- **WebSocket streaming** from KIS Open API
+- **Korean stocks** parsed from `H0UNCNT0`
+- **U.S. stocks** parsed from `HDFSCNT0`
+- **Instant updates** when new ticks arrive
 
-### 2. 이중 데이터 소스 시스템
-- **Primary: WebSocket 스트리밍**: 실시간성 최우선
-- **Fallback: REST API**: 20초 이상 스트리밍 데이터 수신 불가 시 자동 전환
-- **상태 감시**: LIVE(스트리밍), BACKUP(REST API), BROKEN(오류) 상태 표시
-- **자동 복구**: 연결 복구 시 스트리밍으로 자동 복귀
+### 2. Dual Data Source System
+- **Primary:** WebSocket streaming for low latency
+- **Fallback:** REST API when streaming data is stale for 20+ seconds
+- **State model:** `LIVE`, `BACKUP`, `BROKEN`
+- **Automatic recovery** back to streaming once healthy
 
-### 3. 인증 및 토큰 관리
-- **OAuth2 인증**: KIS Open API 승인 키 기반 인증
-- **자동 토큰 갱신**: 24시간 만료 토큰 자동 갱신
-- **레이트 리미팅**: API 호출 제한 자동 처리
-- **안전한 저장**: 토큰을 메모리에만 유지하고 파일 저장 금지
+### 3. Authentication and Token Management
+- OAuth2-based authentication
+- Automatic token refresh for expiring tokens
+- Built-in rate-limit handling
+- In-memory token storage only (no file persistence)
 
-### 4. 연결 상태 관리
-- **상태 표시기**: SVG 카드에 연결 상태 시각화
-- **실시간 상태 추적**: LIVE(초록색), BACKUP(노랑색), BROKEN(빨강색)
-- **자동 재연결**: 연결 끊김 시 자동 재시도
-- **사용자 알림**: 상태 변경 시 Stream Deck 버튼 업데이트
+### 4. Connection Health Management
+- Visual status indicator on SVG cards
+- Continuous connection-state tracking (`LIVE`, `BACKUP`, `BROKEN`)
+- Automatic reconnect on disconnect
+- Stream Deck button updates on state changes
 
-### 5. 시장 세션 감지
-- **국내 시장**: 별도시간(PRE), 정규시간(REG), 시간외(AFT), 폐장(CLOSED)
-- **미국 시장**: Eastern Time(ET) 기반 영업 시간 감지
-- **DST 대응**: 미국 표준시/일광절약시 자동 전환
-- **세션별 표시**: 버튼에 현재 시장 세션 표시
+### 5. Market Session Detection
+- Korean sessions: PRE / REG / AFT / CLOSED
+- U.S. sessions based on Eastern Time (ET)
+- DST-aware conversion
+- Session label shown on card
 
-### 6. 단일 WebSocket 연결 공유
-- **중앙 관리**: 모든 버튼이 하나의 WebSocket 연결을 공유
-- **효율성**: 네트워크 연결 최소화 및 API 호출 제한 완화
-- **구독 관리**: 버튼별 종목 구독/구독 해제 자동 처리
-- **메모리 효율**: 필요한 메모리만 사용
+### 6. Shared Singleton WebSocket Connection
+- One central WebSocket connection shared by all actions
+- Lower network overhead and better API-limit usage
+- Automatic per-button subscribe/unsubscribe handling
+- Memory-efficient subscription lifecycle
 
-### 7. SVG 기반 UI 렌더링
-- **동적 카드**: 144x144 픽셀 SVG 카드 실시간 렌더링
-- **LRU 캐싱**: 빈번하게 사용되는 SVG 캐싱으로 성능 최적화
-- **상태 표시기**: 연결 상태, 시장 세션을 아이콘으로 표시
-- **반응형 디자인**: 다양한 해상도에 자동 맞춤
+### 7. SVG-Based UI Rendering
+- Dynamic 144x144 SVG card rendering
+- LRU cache for frequent card variants
+- Status/session icons in card UI
+- Resolution-friendly rendering behavior
 
-### 8. 설정 관리
-- **글로벌 설정 저장소**: 플러그인 전체에서 공유되는 설정
-- **Promise 기반 대기**: 설정 초기화 완료 시까지 대기 가능
-- **부팀 속성 검사기**: 각 버튼의 종목, API 키 등 개별 설정
+### 8. Settings Management
+- Global plugin settings shared across actions
+- Promise-based waiting for settings initialization
+- Per-button settings for symbol/ticker and display labels
 
-## 주요 사용 사례
+## Main Use Cases
 
-### 1. 전문 트레이더의 모니터링
-- 다중 시장(국내/미국) 모니터링: 국내 주식 5개, 미국 주식 3개 동시 감시
-- 빠른 시장 반응: 변동률 10% 초과 시 즉시 확인 가능
-- 포트폴리오 추적: 관심 종목 실시간 가격 변동 추적
+### 1. Professional Trading Monitoring
+- Watch Korean and U.S. symbols simultaneously
+- React faster to sudden market moves
+- Track watchlists and portfolios on dedicated keys
 
-### 2. 자동 거래 시스템 보조
-- 시스템 상태 모니터링: WebSocket 연결 상태, API 응답성 실시간 확인
-- 성능 감시: 데이터 수신 지연 감지 및 알림
-- 시장 세션 추적: 종료 전 자동 거래 중단 등 로직에 활용
+### 2. Support for Automated Trading Operations
+- Monitor WebSocket/API health in real time
+- Detect delayed feeds and failover behavior
+- Use session state to gate automation logic
 
-### 3. 금융 교육 및 학습
-- 실시간 데이터 관찰: 시장 움직임을 실제 데이터로 학습
-- WebSocket 기술 학습: Open API를 통한 스트리밍 구현 참조
-- 인증 패턴 학습: OAuth2 기반 API 통합 구현 사례
+### 3. Education and Technical Learning
+- Observe real tick behavior from live feeds
+- Study practical WebSocket data pipelines
+- Learn OAuth2-based API integration in production-like code
 
-## 통합 요구사항
+## Integration Requirements
 
-### 필수 조건
+### Required
 
-#### 1. KIS Open API 계정 및 인증
-- **한국투자증권 계좌**: 법인 또는 개인 트레이딩 계좌
-- **Open API 신청**: KIS 홈페이지에서 Open API 접근 권한 신청
-- **승인 키 발급**: 승인 키(app_key)와 비밀 키(app_secret) 발급
-- **예약 토큰 획득**: OAuth2 인증을 통한 접근 토큰 발급
+#### 1. KIS Open API Account and Credentials
+- KIS account (individual or corporate)
+- Open API access approval
+- `app_key` and `app_secret`
+- OAuth2 access token issuance
 
-#### 2. 운영 환경
-- **Elgato Stream Deck**: 최신 Stream Deck 또는 Stream Deck Nano
-- **macOS/Windows 지원**: Stream Deck 공식 지원 OS
-- **인터넷 연결**: 실시간 데이터 수신을 위한 안정적인 인터넷
+#### 2. Runtime Environment
+- Elgato Stream Deck device/software
+- macOS or Windows (supported by Stream Deck)
+- Stable internet connection
 
-#### 3. 개발 환경 (플러그인 수정 시)
-- **Node.js 20 이상**: npm 패키지 관리자 지원
-- **TypeScript 5.7.0**: 타입 안전성을 위한 빌드 언어
-- **npm 또는 yarn**: 의존성 관리
+#### 3. Development Environment (for plugin changes)
+- Node.js 20+
+- TypeScript 5.7.0
+- npm or yarn
 
-### 선택 사항
+### Optional
 
-#### 1. 향상된 기능
-- **외부 데이터 소스 통합**: 다른 증권사 API와 연계 가능
-- **알림 시스템**: Slack, Discord 등 외부 채팅 플랫폼 연동
+#### 1. Enhanced Features
+- Additional broker or market data integrations
+- External notification integrations (Slack/Discord)
 
-#### 2. 커스터마이제이션
-- **테마 변경**: SVG 색상, 폰트 커스터마이징
-- **추가 데이터 필드**: 기술적 지표(RSI, MACD) 추가 표시
+#### 2. Customization
+- Theme and typography customization in SVG
+- Extra indicators (e.g., RSI, MACD)
 
-## 기술 아키텍처
+## Technical Architecture
 
-### 아키텍처 패턴
-- **Event-Driven Singleton Pattern**: 중앙의 WebSocket Manager가 모든 연결 관리
-- **Observer Pattern**: 버튼이 데이터 변경 이벤트 구독
+### Architecture Patterns
+- Event-driven Singleton pattern for WebSocket lifecycle
+- Observer pattern for per-action data distribution
 
-### 핵심 모듈
-- **kis/websocket-manager.ts**: 단일 WebSocket 연결 중앙 관리 (486줄)
-- **kis/auth.ts**: OAuth2 토큰 관리 (235줄)
-- **kis/rest-price.ts**: REST API 폴백 가격 조회 (194줄)
-- **renderer/stock-card.ts**: SVG 렌더링 엔진 (332줄)
-- **actions/domestic-stock.ts**, **overseas-stock.ts**: 액션 구현 (각 512-513줄)
+### Core Modules
+- `kis/websocket-manager.ts`: central WebSocket lifecycle
+- `kis/auth.ts`: OAuth2 token lifecycle
+- `kis/rest-price.ts`: REST fallback quote fetch
+- `renderer/stock-card.ts`: SVG rendering engine
+- `actions/domestic-stock.ts`, `actions/overseas-stock.ts`: action implementations
 
-### 데이터 흐름
+### Data Flow
 ```
-Stream Deck 버튼 (UI)
-  ↓
-Action Handler (domestic-stock.ts / overseas-stock.ts)
-  ↓
-WebSocket Manager (중앙 관리)
-  ├→ WebSocket 스트리밍 (Primary)
-  └→ REST API (Fallback - 20초 이상 무응답 시)
-  ↓
-Parser (domestic-parser.ts / overseas-parser.ts)
-  ↓
-Card Renderer (SVG 생성 및 캐싱)
-  ↓
-Stream Deck 화면 업데이트
+Stream Deck Button UI
+  -> Action Handler
+  -> WebSocket Manager
+      -> Primary: WebSocket stream
+      -> Fallback: REST snapshot when stale
+  -> Parser
+  -> SVG Card Renderer
+  -> Stream Deck Icon Update
 ```
 
-## 버전 및 라이센스
+## Version and License
 
-- **현재 버전**: 1.1.0
-- **이전 버전**: 1.0.0 (기본 기능 구현)
-- **라이센스**: 미지정 (필요 시 MIT, Apache 2.0, GPL 등 검토 필요)
+- Current version: 1.1.0
+- Previous version: 1.0.0
+- License: Unspecified
 
-## 다음 단계
+## Next Steps
 
-### 개발자를 위한 시작 가이드
-1. `structure.md` 확인: 프로젝트 구조 및 모듈 이해
-2. `tech.md` 확인: 기술 스택 및 개발 환경 설정
-3. `src/plugin.ts` 리뷰: 플러그인 진입점 및 초기화 로직
-4. `src/kis/websocket-manager.ts` 학습: 핵심 아키텍처 이해
+### Developer Quick Start
+1. Read `structure.md` to understand module boundaries.
+2. Read `tech.md` for stack and setup details.
+3. Review `src/plugin.ts` for plugin bootstrap.
+4. Study `src/kis/websocket-manager.ts` for core architecture.
 
-### 사용자를 위한 시작 가이드
-1. KIS Open API 신청 및 인증 키 발급
-2. Stream Deck 플러그인 설치
-3. Stream Deck에 버튼 추가 및 종목 코드 설정
-4. 실시간 시세 모니터링 시작
+### User Quick Start
+1. Request KIS Open API credentials.
+2. Install the Stream Deck plugin.
+3. Add buttons and configure symbols/tickers.
+4. Start real-time monitoring.
