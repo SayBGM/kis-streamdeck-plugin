@@ -4,6 +4,21 @@
   <meta charset="utf-8">
   <title>미국주식 시세 설정</title>
   <link rel="stylesheet" href="sdpi.css">
+  <style>
+    .sdpi-error {
+      color: #ff5252;
+      font-size: 11px;
+      padding: 2px 8px 4px;
+      display: none;
+    }
+    .sdpi-test-result {
+      font-size: 12px;
+      padding: 4px 8px;
+      display: none;
+    }
+    .sdpi-test-result.success { color: #00c853; }
+    .sdpi-test-result.error { color: #ff5252; }
+  </style>
 </head>
 <body>
   <div class="sdpi-wrapper">
@@ -29,6 +44,13 @@
       <div class="sdpi-help">
         한국투자증권 Open API에서 발급받은 키를 입력하세요. 모든 버튼에 공통 적용됩니다.
       </div>
+
+      <!-- 연결 테스트 버튼 -->
+      <div class="sdpi-item">
+        <div class="sdpi-item-label">연결</div>
+        <button id="testConnectionBtn" class="sdpi-item-value">연결 테스트</button>
+      </div>
+      <div id="testConnectionResult" class="sdpi-test-result"></div>
     </div>
 
     <div class="sdpi-separator"></div>
@@ -43,6 +65,7 @@
           <input type="text" id="ticker" placeholder="AAPL">
         </div>
       </div>
+      <div id="tickerError" class="sdpi-error">1~6자 영문 티커를 입력하세요 (예: AAPL)</div>
       <div class="sdpi-help">미국주식 티커 심볼을 입력하세요 (예: AAPL, TSLA, MSFT)</div>
 
       <div class="sdpi-item">
@@ -73,6 +96,8 @@
 
   <script src="sdpi.js"></script>
   <script>
+    var tickerValid = true;
+
     // ─── 전역 설정 수신 ───
     document.addEventListener("piDidReceiveGlobalSettings", function (evt) {
       var settings = evt.detail || {};
@@ -86,6 +111,7 @@
       document.getElementById("ticker").value = settings.ticker || "";
       document.getElementById("exchange").value = settings.exchange || "NAS";
       document.getElementById("stockName").value = settings.stockName || "";
+      validateTicker(settings.ticker || "");
     });
 
     // ─── 전역 설정 저장 (App Key / App Secret 변경 시) ───
@@ -100,8 +126,27 @@
     document.getElementById("appKey").addEventListener("change", saveGlobalSettings);
     document.getElementById("appSecret").addEventListener("change", saveGlobalSettings);
 
+    // ─── 티커 실시간 검증 ───
+    function validateTicker(value) {
+      var isValid = /^[A-Z]{1,6}$/i.test(value);
+      var errorEl = document.getElementById("tickerError");
+      if (value.length > 0 && !isValid) {
+        errorEl.style.display = "block";
+        tickerValid = false;
+      } else {
+        errorEl.style.display = "none";
+        tickerValid = true;
+      }
+      return isValid || value.length === 0;
+    }
+
+    document.getElementById("ticker").addEventListener("input", function () {
+      validateTicker(this.value);
+    });
+
     // ─── 액션 설정 저장 (티커 / 거래소 / 종목명 변경 시) ───
     function saveActionSettings() {
+      if (!tickerValid) return;
       setSettings({
         ticker: document.getElementById("ticker").value.trim().toUpperCase(),
         exchange: document.getElementById("exchange").value,
@@ -110,9 +155,55 @@
       showStatus("종목 설정이 저장되었습니다", "success");
     }
 
-    document.getElementById("ticker").addEventListener("change", saveActionSettings);
+    document.getElementById("ticker").addEventListener("change", function () {
+      if (validateTicker(this.value)) {
+        saveActionSettings();
+      }
+    });
     document.getElementById("exchange").addEventListener("change", saveActionSettings);
     document.getElementById("stockName").addEventListener("change", saveActionSettings);
+
+    // ─── 연결 테스트 ───
+    document.getElementById("testConnectionBtn").addEventListener("click", function () {
+      var btn = document.getElementById("testConnectionBtn");
+      var resultEl = document.getElementById("testConnectionResult");
+      btn.disabled = true;
+      btn.textContent = "테스트 중...";
+      resultEl.style.display = "none";
+
+      sendToPlugin({ event: "testConnection" });
+    });
+
+    // ─── 연결 테스트 결과 수신 ───
+    document.addEventListener("sendToPropertyInspector", function (evt) {
+      var payload = evt.detail || {};
+      if (payload.event !== "testConnectionResult") return;
+
+      var btn = document.getElementById("testConnectionBtn");
+      var resultEl = document.getElementById("testConnectionResult");
+      btn.disabled = false;
+      btn.textContent = "연결 테스트";
+
+      if (payload.success) {
+        resultEl.textContent = "연결 성공";
+        resultEl.className = "sdpi-test-result success";
+        resultEl.style.display = "block";
+        setTimeout(function () { resultEl.style.display = "none"; }, 3000);
+      } else {
+        var errorMsg = "연결 실패";
+        if (payload.errorType === "AUTH_FAIL") {
+          errorMsg = "연결 실패: 인증 오류";
+        } else if (payload.errorType === "NETWORK_ERROR") {
+          errorMsg = "연결 실패: 네트워크 오류";
+        } else if (payload.errorType === "NO_CREDENTIAL") {
+          errorMsg = "연결 실패: API 키를 먼저 설정하세요";
+        }
+        resultEl.textContent = errorMsg;
+        resultEl.className = "sdpi-test-result error";
+        resultEl.style.display = "block";
+        setTimeout(function () { resultEl.style.display = "none"; }, 5000);
+      }
+    });
 
     // ─── 상태 메시지 표시 ───
     function showStatus(message, type) {

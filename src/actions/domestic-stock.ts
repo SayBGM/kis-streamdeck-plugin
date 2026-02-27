@@ -1,9 +1,10 @@
-import {
+import streamDeck, {
   SingletonAction,
   type WillAppearEvent,
   type WillDisappearEvent,
   type DidReceiveSettingsEvent,
   type KeyDownEvent,
+  type SendToPluginEvent,
 } from "@elgato/streamdeck";
 import {
   kisWebSocket,
@@ -13,19 +14,24 @@ import {
 } from "../kis/websocket-manager.js";
 import { parseDomesticData } from "../kis/domestic-parser.js";
 import { fetchDomesticPrice } from "../kis/rest-price.js";
+import { getAccessToken } from "../kis/auth.js";
 import {
   renderStockCard,
   renderWaitingCard,
   renderConnectedCard,
   renderSetupCard,
+  renderErrorCard,
+  renderRecoveryCard,
   svgToDataUri,
 } from "../renderer/stock-card.js";
 import {
   TR_ID_DOMESTIC,
+  ErrorType,
   type DomesticStockSettings,
   type StockData,
   type StreamConnectionState,
 } from "../types/index.js";
+import { kisGlobalSettings } from "../kis/settings-store.js";
 import { logger } from "../utils/logger.js";
 
 const INITIAL_PRICE_RETRY_DELAY_MS = 4000;
@@ -83,6 +89,16 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     const stockName = settings.stockName?.trim() || stockCode || "";
 
     logger.info(`[국내] onWillAppear: code=${stockCode}, name=${stockName}`);
+
+    // NO_CREDENTIAL 가드: appKey/appSecret 미설정 시 에러 카드 표시
+    const globalSettings = kisGlobalSettings.get();
+    if (!globalSettings?.appKey || !globalSettings?.appSecret) {
+      this.resetActionRuntime(ev.action.id);
+      await ev.action.setImage(
+        svgToDataUri(renderErrorCard(ErrorType.NO_CREDENTIAL), `error:${ErrorType.NO_CREDENTIAL}`),
+      );
+      return;
+    }
 
     if (!stockCode) {
       this.resetActionRuntime(ev.action.id);
@@ -195,6 +211,16 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       `[국내] onDidReceiveSettings: code=${stockCode}, name=${stockName}`,
     );
 
+    // NO_CREDENTIAL 가드: appKey/appSecret 미설정 시 에러 카드 표시
+    const globalSettings = kisGlobalSettings.get();
+    if (!globalSettings?.appKey || !globalSettings?.appSecret) {
+      this.resetActionRuntime(ev.action.id);
+      await ev.action.setImage(
+        svgToDataUri(renderErrorCard(ErrorType.NO_CREDENTIAL), `error:${ErrorType.NO_CREDENTIAL}`),
+      );
+      return;
+    }
+
     if (!stockCode) {
       this.resetActionRuntime(ev.action.id);
       await ev.action.setImage(
@@ -302,6 +328,8 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
 
   /**
    * REST API로 현재가/종가를 조회하여 화면에 표시
+   *
+   * 에러 시 에러 카드를 렌더링합니다 (SPEC-UI-001).
    */
   private async fetchAndShowPrice(
     ev: { action: { setImage(image: string): Promise<void> | void; id?: string } },
@@ -326,7 +354,16 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
         return true;
       }
     } catch (err) {
-      logger.debug(`[국내] REST 현재가 조회 실패 (WebSocket 대기): ${err}`);
+      // ErrorType enum 값이면 에러 카드를 표시
+      if (Object.values(ErrorType).includes(err as ErrorType)) {
+        const errorType = err as ErrorType;
+        logger.warn(`[국내] REST 현재가 에러 (${errorType}): ${stockCode}`);
+        await ev.action.setImage(
+          svgToDataUri(renderErrorCard(errorType), `error:${errorType}`),
+        );
+      } else {
+        logger.debug(`[국내] REST 현재가 조회 실패 (WebSocket 대기): ${err}`);
+      }
     }
     return false;
   }
@@ -414,6 +451,11 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     const currentState = this.connectionStateByAction.get(actionId);
     if (currentState === nextState) return;
 
+    // BROKEN/BACKUP → LIVE 전환 감지: 회복 알림 표시
+    const isRecovery =
+      nextState === "LIVE" &&
+      (currentState === "BROKEN" || currentState === "BACKUP");
+
     const now = Date.now();
     const lastChangedAt = this.connectionStateChangedAtByAction.get(actionId) ?? 0;
     const elapsed = now - lastChangedAt;
@@ -422,6 +464,9 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       this.connectionStateByAction.set(actionId, nextState);
       this.connectionStateChangedAtByAction.set(actionId, now);
       this.clearStateTransitionTimer(actionId);
+      if (isRecovery) {
+        this.showRecoveryNotification(actionId);
+      }
       return;
     }
 
@@ -430,9 +475,35 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       this.connectionStateByAction.set(actionId, nextState);
       this.connectionStateChangedAtByAction.set(actionId, Date.now());
       this.stateTransitionTimers.delete(actionId);
-      this.renderLastDataIfPossible(actionId);
+      if (isRecovery) {
+        this.showRecoveryNotification(actionId);
+      } else {
+        this.renderLastDataIfPossible(actionId);
+      }
     }, CONNECTION_STATE_MIN_HOLD_MS - elapsed);
     this.stateTransitionTimers.set(actionId, timer);
+  }
+
+  // @MX:NOTE: [AUTO] SPEC-UI-001 회복 알림: BROKEN/BACKUP→LIVE 전환 시 2초 표시 후 자동 복원
+  // @MX:SPEC: SPEC-UI-001 REQ-UI-001-7.1, REQ-UI-001-7.2
+  private showRecoveryNotification(actionId: string): void {
+    const action = this.actionRefMap.get(actionId);
+    if (!action) return;
+
+    const lastData = this.lastDataByAction.get(actionId);
+    const name = lastData?.name ?? "";
+
+    // 회복 카드를 직접 setImage (디바운스 큐 우회)
+    void Promise.resolve(
+      action.setImage(svgToDataUri(renderRecoveryCard(name), `recovery:${actionId}:${Date.now()}`)),
+    ).catch((err: unknown) => {
+      logger.debug(`[국내] 회복 알림 setImage 실패: ${err}`);
+    });
+
+    // 2초 후 일반 카드로 복원
+    setTimeout(() => {
+      this.renderLastDataIfPossible(actionId);
+    }, 2000);
   }
 
   private getRenderConnectionState(
@@ -525,6 +596,42 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     // REQ-PERF-001-2.2.1: debounce setImage() IPC calls within 50ms window
     this.scheduleRender(actionId, action, svgToDataUri(svg, renderKey), renderKey);
     this.scheduleStaleRender(actionId, action);
+  }
+
+  override async onSendToPlugin(
+    ev: SendToPluginEvent<{ event: string }, DomesticStockSettings>,
+  ): Promise<void> {
+    if (ev.payload.event !== "testConnection") return;
+
+    const globalSettings = kisGlobalSettings.get();
+    if (!globalSettings?.appKey || !globalSettings?.appSecret) {
+      await streamDeck.ui.current?.sendToPropertyInspector({
+        event: "testConnectionResult",
+        success: false,
+        errorType: ErrorType.NO_CREDENTIAL,
+      });
+      return;
+    }
+
+    try {
+      // 읽기 전용 토큰 조회 (캐시 무효화 없음)
+      await getAccessToken(globalSettings);
+      await streamDeck.ui.current?.sendToPropertyInspector({
+        event: "testConnectionResult",
+        success: true,
+      });
+    } catch (err) {
+      const errorType =
+        err instanceof Error && (err.message.includes("401") || err.message.includes("발급 실패"))
+          ? ErrorType.AUTH_FAIL
+          : ErrorType.NETWORK_ERROR;
+      logger.warn(`[국내] 연결 테스트 실패: ${err}`);
+      await streamDeck.ui.current?.sendToPropertyInspector({
+        event: "testConnectionResult",
+        success: false,
+        errorType,
+      });
+    }
   }
 
   // @MX:NOTE: [AUTO] last-write-wins debounce flush — batches setImage() IPC calls within 50ms window to reduce Electron IPC overhead

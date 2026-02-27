@@ -4,6 +4,21 @@
   <meta charset="utf-8">
   <title>국내주식 시세 설정</title>
   <link rel="stylesheet" href="sdpi.css">
+  <style>
+    .sdpi-error {
+      color: #ff5252;
+      font-size: 11px;
+      padding: 2px 8px 4px;
+      display: none;
+    }
+    .sdpi-test-result {
+      font-size: 12px;
+      padding: 4px 8px;
+      display: none;
+    }
+    .sdpi-test-result.success { color: #00c853; }
+    .sdpi-test-result.error { color: #ff5252; }
+  </style>
 </head>
 <body>
   <div class="sdpi-wrapper">
@@ -29,6 +44,13 @@
       <div class="sdpi-help">
         한국투자증권 Open API에서 발급받은 키를 입력하세요. 모든 버튼에 공통 적용됩니다.
       </div>
+
+      <!-- 연결 테스트 버튼 -->
+      <div class="sdpi-item">
+        <div class="sdpi-item-label">연결</div>
+        <button id="testConnectionBtn" class="sdpi-item-value">연결 테스트</button>
+      </div>
+      <div id="testConnectionResult" class="sdpi-test-result"></div>
     </div>
 
     <div class="sdpi-separator"></div>
@@ -43,6 +65,7 @@
           <input type="text" id="stockCode" placeholder="005930">
         </div>
       </div>
+      <div id="stockCodeError" class="sdpi-error">6자리 숫자를 입력하세요 (예: 005930)</div>
       <div class="sdpi-help">6자리 종목코드를 입력하세요 (예: 삼성전자 005930)</div>
 
       <div class="sdpi-item">
@@ -61,6 +84,8 @@
 
   <script src="sdpi.js"></script>
   <script>
+    var stockCodeValid = true;
+
     // ─── 전역 설정 수신 ───
     document.addEventListener("piDidReceiveGlobalSettings", function (evt) {
       var settings = evt.detail || {};
@@ -73,6 +98,7 @@
       var settings = evt.detail || {};
       document.getElementById("stockCode").value = settings.stockCode || "";
       document.getElementById("stockName").value = settings.stockName || "";
+      validateStockCode(settings.stockCode || "");
     });
 
     // ─── 전역 설정 저장 (App Key / App Secret 변경 시) ───
@@ -87,8 +113,27 @@
     document.getElementById("appKey").addEventListener("change", saveGlobalSettings);
     document.getElementById("appSecret").addEventListener("change", saveGlobalSettings);
 
+    // ─── 종목코드 실시간 검증 ───
+    function validateStockCode(value) {
+      var isValid = /^\d{6}$/.test(value);
+      var errorEl = document.getElementById("stockCodeError");
+      if (value.length > 0 && !isValid) {
+        errorEl.style.display = "block";
+        stockCodeValid = false;
+      } else {
+        errorEl.style.display = "none";
+        stockCodeValid = true;
+      }
+      return isValid || value.length === 0;
+    }
+
+    document.getElementById("stockCode").addEventListener("input", function () {
+      validateStockCode(this.value);
+    });
+
     // ─── 액션 설정 저장 (종목코드 / 종목명 변경 시) ───
     function saveActionSettings() {
+      if (!stockCodeValid) return;
       setSettings({
         stockCode: document.getElementById("stockCode").value.trim(),
         stockName: document.getElementById("stockName").value.trim(),
@@ -96,8 +141,54 @@
       showStatus("종목 설정이 저장되었습니다", "success");
     }
 
-    document.getElementById("stockCode").addEventListener("change", saveActionSettings);
+    document.getElementById("stockCode").addEventListener("change", function () {
+      if (validateStockCode(this.value)) {
+        saveActionSettings();
+      }
+    });
     document.getElementById("stockName").addEventListener("change", saveActionSettings);
+
+    // ─── 연결 테스트 ───
+    document.getElementById("testConnectionBtn").addEventListener("click", function () {
+      var btn = document.getElementById("testConnectionBtn");
+      var resultEl = document.getElementById("testConnectionResult");
+      btn.disabled = true;
+      btn.textContent = "테스트 중...";
+      resultEl.style.display = "none";
+
+      sendToPlugin({ event: "testConnection" });
+    });
+
+    // ─── 연결 테스트 결과 수신 ───
+    document.addEventListener("sendToPropertyInspector", function (evt) {
+      var payload = evt.detail || {};
+      if (payload.event !== "testConnectionResult") return;
+
+      var btn = document.getElementById("testConnectionBtn");
+      var resultEl = document.getElementById("testConnectionResult");
+      btn.disabled = false;
+      btn.textContent = "연결 테스트";
+
+      if (payload.success) {
+        resultEl.textContent = "연결 성공";
+        resultEl.className = "sdpi-test-result success";
+        resultEl.style.display = "block";
+        setTimeout(function () { resultEl.style.display = "none"; }, 3000);
+      } else {
+        var errorMsg = "연결 실패";
+        if (payload.errorType === "AUTH_FAIL") {
+          errorMsg = "연결 실패: 인증 오류";
+        } else if (payload.errorType === "NETWORK_ERROR") {
+          errorMsg = "연결 실패: 네트워크 오류";
+        } else if (payload.errorType === "NO_CREDENTIAL") {
+          errorMsg = "연결 실패: API 키를 먼저 설정하세요";
+        }
+        resultEl.textContent = errorMsg;
+        resultEl.className = "sdpi-test-result error";
+        resultEl.style.display = "block";
+        setTimeout(function () { resultEl.style.display = "none"; }, 5000);
+      }
+    });
 
     // ─── 상태 메시지 표시 ───
     function showStatus(message, type) {

@@ -110,3 +110,11 @@ export function isOverseasDayTrading(): boolean {
 // ─── REST API TR_ID 상수 ───
 export const REST_TR_DOMESTIC_PRICE = "FHKST01010100"; // 국내주식 현재가 시세
 export const REST_TR_OVERSEAS_PRICE = "HHDFS00000300"; // 해외주식 현재체결가
+
+// ─── 에러 타입 (SPEC-UI-001) ───
+export enum ErrorType {
+  NO_CREDENTIAL = "NO_CREDENTIAL",
+  AUTH_FAIL = "AUTH_FAIL",
+  NETWORK_ERROR = "NETWORK_ERROR",
+  INVALID_STOCK = "INVALID_STOCK",
+}

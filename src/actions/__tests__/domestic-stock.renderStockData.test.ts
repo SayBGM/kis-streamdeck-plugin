@@ -39,9 +39,13 @@ vi.mock("../../renderer/stock-card.js", () => ({
   getMarketSession: vi.fn().mockReturnValue("REG"),
 }));
 
-vi.mock("../../types/index.js", () => ({
-  TR_ID_DOMESTIC: "H0STCNT0",
-}));
+vi.mock("../../types/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../types/index.js")>();
+  return {
+    ...actual,
+    TR_ID_DOMESTIC: "H0STCNT0",
+  };
+});
 
 vi.mock("../../utils/logger.js", () => ({
   logger: {

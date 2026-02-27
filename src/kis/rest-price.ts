@@ -3,6 +3,7 @@ import {
   KIS_REST_BASE,
   REST_TR_DOMESTIC_PRICE,
   REST_TR_OVERSEAS_PRICE,
+  ErrorType,
   type GlobalSettings,
   type StockData,
   type PriceSign,
@@ -30,6 +31,37 @@ async function getSettingsWithWait(): Promise<GlobalSettings | null> {
   return null;
 }
 
+// @MX:WARN: [AUTO] 기존 null 반환에서 throw로 변경됨. 모든 호출 사이트는 catch로 에러 처리 필요
+// @MX:REASON: [AUTO] SPEC-UI-001 에러 UI 표시를 위해 에러 타입을 액션 레이어까지 전달해야 함
+// @MX:SPEC: SPEC-UI-001
+/**
+ * fetch 에러를 ErrorType으로 분류하는 헬퍼
+ *
+ * - TypeError (fetch 실패): NETWORK_ERROR
+ * - HTTP 401: AUTH_FAIL
+ * - 인증 에러 메시지 (발급 실패/401 포함): AUTH_FAIL
+ * - 기타 HTTP 오류: NETWORK_ERROR
+ * - 빈 응답 / rt_cd !== "0": INVALID_STOCK (호출 측에서 처리)
+ */
+export function classifyFetchError(err: unknown, status?: number): ErrorType {
+  if (err instanceof TypeError) {
+    return ErrorType.NETWORK_ERROR;
+  }
+  if (status === 401) {
+    return ErrorType.AUTH_FAIL;
+  }
+  if (err instanceof Error) {
+    const msg = err.message;
+    if (msg.includes("발급 실패") || msg.includes("401")) {
+      return ErrorType.AUTH_FAIL;
+    }
+  }
+  if (status !== undefined && status !== 200) {
+    return ErrorType.NETWORK_ERROR;
+  }
+  return ErrorType.NETWORK_ERROR;
+}
+
 /**
  * 전일 대비 부호 변환 (REST API도 1~5 코드 사용)
  */
@@ -51,6 +83,8 @@ function parseSign(signCode: string): PriceSign {
  *
  * 장 마감 시에도 마지막 종가를 반환합니다.
  * API: GET /uapi/domestic-stock/v1/quotations/inquire-price
+ *
+ * @throws {ErrorType} 에러 발생 시 ErrorType enum 값을 throw합니다.
  */
 export async function fetchDomesticPrice(
   stockCode: string,
@@ -59,6 +93,7 @@ export async function fetchDomesticPrice(
   const settings = await getSettingsWithWait();
   if (!settings) return null;
 
+  let response: Response | undefined;
   try {
     const token = await getAccessToken(settings);
 
@@ -68,7 +103,7 @@ export async function fetchDomesticPrice(
     url.searchParams.set("FID_COND_MRKT_DIV_CODE", "UN");
     url.searchParams.set("FID_INPUT_ISCD", stockCode);
 
-    const response = await fetch(url.toString(), {
+    response = await fetch(url.toString(), {
       method: "GET",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -81,7 +116,7 @@ export async function fetchDomesticPrice(
 
     if (!response.ok) {
       logger.error(`[REST] 국내주식 현재가 조회 실패: ${response.status}`);
-      return null;
+      throw classifyFetchError(new Error(`HTTP ${response.status}`), response.status);
     }
 
     const json = (await response.json()) as {
@@ -94,7 +129,9 @@ export async function fetchDomesticPrice(
     };
 
     const o = json.output;
-    if (!o?.stck_prpr) return null;
+    if (!o?.stck_prpr) {
+      throw ErrorType.INVALID_STOCK;
+    }
 
     const sign = parseSign(o.prdy_vrss_sign);
     const change = parseInt(o.prdy_vrss, 10) || 0;
@@ -109,8 +146,12 @@ export async function fetchDomesticPrice(
       sign,
     };
   } catch (err) {
+    // ErrorType enum 값은 그대로 re-throw
+    if (Object.values(ErrorType).includes(err as ErrorType)) {
+      throw err;
+    }
     logger.error("[REST] 국내주식 현재가 조회 에러:", err);
-    return null;
+    throw classifyFetchError(err, response?.status);
   }
 }
 
@@ -119,6 +160,8 @@ export async function fetchDomesticPrice(
  *
  * 장 마감 시에도 마지막 종가를 반환합니다.
  * API: GET /uapi/overseas-price/v1/quotations/price
+ *
+ * @throws {ErrorType} 에러 발생 시 ErrorType enum 값을 throw합니다.
  */
 export async function fetchOverseasPrice(
   exchange: string,
@@ -128,6 +171,7 @@ export async function fetchOverseasPrice(
   const settings = await getSettingsWithWait();
   if (!settings) return null;
 
+  let response: Response | undefined;
   try {
     const token = await getAccessToken(settings);
 
@@ -146,7 +190,7 @@ export async function fetchOverseasPrice(
     url.searchParams.set("EXCD", excd);
     url.searchParams.set("SYMB", ticker.toUpperCase());
 
-    const response = await fetch(url.toString(), {
+    response = await fetch(url.toString(), {
       method: "GET",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -159,7 +203,7 @@ export async function fetchOverseasPrice(
 
     if (!response.ok) {
       logger.error(`[REST] 해외주식 현재가 조회 실패: ${response.status}`);
-      return null;
+      throw classifyFetchError(new Error(`HTTP ${response.status}`), response.status);
     }
 
     const json = (await response.json()) as {
@@ -172,7 +216,9 @@ export async function fetchOverseasPrice(
     };
 
     const o = json.output;
-    if (!o?.last) return null;
+    if (!o?.last) {
+      throw ErrorType.INVALID_STOCK;
+    }
 
     const sign = parseSign(o.sign);
     const change = parseFloat(o.diff) || 0;
@@ -187,7 +233,11 @@ export async function fetchOverseasPrice(
       sign,
     };
   } catch (err) {
+    // ErrorType enum 값은 그대로 re-throw
+    if (Object.values(ErrorType).includes(err as ErrorType)) {
+      throw err;
+    }
     logger.error("[REST] 해외주식 현재가 조회 에러:", err);
-    return null;
+    throw classifyFetchError(err, response?.status);
   }
 }

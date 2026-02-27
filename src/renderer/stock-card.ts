@@ -5,6 +5,7 @@ import type {
   StreamConnectionState,
   StockCardRenderOptions,
 } from "../types/index.js";
+import { ErrorType } from "../types/index.js";
 import { getETTotalMinutes, getKSTTotalMinutes } from "../utils/timezone.js";
 
 // ─── 디자인 상수 ───
@@ -141,14 +142,41 @@ export function renderWaitingCard(
 </svg>`;
 }
 
+// @MX:NOTE: [AUTO] SPEC-UI-001에서 ErrorType 기반으로 시그니처 변경 (기존: string message). 호출 사이트 0개였으므로 하위 호환성 없음
+// @MX:SPEC: SPEC-UI-001 REQ-UI-001-3.1, REQ-UI-001-3.2
 /**
- * 에러 상태 화면
+ * 에러 상태 화면 (ErrorType 기반)
+ *
+ * 에러 카드에는 연결 바를 표시하지 않습니다 (REQ-UI-001-3.2).
  */
-export function renderErrorCard(message: string): string {
+export function renderErrorCard(errorType: ErrorType): string {
+  const errorMap: Record<ErrorType, { icon: string; label: string }> = {
+    [ErrorType.NO_CREDENTIAL]: { icon: "⚙", label: "설정 필요" },
+    [ErrorType.AUTH_FAIL]: { icon: "✕", label: "인증 실패" },
+    [ErrorType.NETWORK_ERROR]: { icon: "!", label: "연결 오류" },
+    [ErrorType.INVALID_STOCK]: { icon: "?", label: "종목 오류" },
+  };
+  const { icon, label } = errorMap[errorType];
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
-  <text x="72" y="60" font-family="Arial, Helvetica, sans-serif" font-size="20" fill="${COLOR_FALL}" text-anchor="middle">오류</text>
-  <text x="72" y="90" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${COLOR_FLAT}" text-anchor="middle">${escapeXml(message)}</text>
+  <text x="72" y="62" font-family="Arial, Helvetica, sans-serif" font-size="36" fill="${COLOR_FALL}" text-anchor="middle">${icon}</text>
+  <text x="72" y="98" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_FLAT}" text-anchor="middle">${escapeXml(label)}</text>
+</svg>`;
+}
+
+/**
+ * 연결 회복 알림 카드 (2초 임시 표시)
+ *
+ * BROKEN/BACKUP → LIVE 전환 시 표시됩니다 (REQ-UI-001-7.1).
+ */
+export function renderRecoveryCard(name: string): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
+  <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="#1b4332"/>
+  <text x="12" y="30" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(truncateName(name || "---", 6))}</text>
+  <text x="72" y="72" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="${COLOR_RISE}" text-anchor="middle">✓</text>
+  <text x="72" y="102" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${COLOR_RISE}" text-anchor="middle">연결 회복</text>
+  <rect x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${COLOR_CONN_LIVE}" />
 </svg>`;
 }
 
@@ -219,21 +247,26 @@ export function renderStockCard(
   // 종목명 (길이 제한)
   const displayName = truncateName(data.name, 6);
 
+  // @MX:NOTE: [AUTO] BACKUP+isStale 동시 조건일 때만 "지연" 텍스트 표시. 연결 바는 독립적으로 유지
+  // @MX:SPEC: SPEC-UI-001 REQ-UI-001-6.1, REQ-UI-001-6.2
+  const showStaleText = renderOptions.isStale && connectionState === "BACKUP";
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
-  
+
   <!-- 종목명 (좌측 상단) -->
   <text x="12" y="30" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="${titleColor}">${escapeXml(displayName)}</text>
-  
+
   <!-- 장 상태 아이콘 (우측 상단) -->
   <text x="${sessionIconX}" y="${SESSION_ICON_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${SESSION_ICON_FONT_SIZE}" font-weight="bold" fill="${sessionColor}" text-anchor="middle">${sessionBadge}</text>
-  
+  ${showStaleText ? `<!-- 지연 텍스트 (우측 상단, 장 상태 아이콘 아래) -->\n  <text x="132" y="48" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_STALE}" text-anchor="end">지연</text>` : ""}
+
   <!-- 현재가 (중앙) -->
   <text x="72" y="80" font-family="Arial, Helvetica, sans-serif" font-size="${priceFontSize}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceStr)}</text>
-  
+
   <!-- 변동량 + 화살표 (좌측 하단) -->
   <text x="12" y="122" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}">${escapeXml(changeStr)}</text>
-  
+
   <!-- 변동률 (우측 하단) -->
   <text x="132" y="122" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}" text-anchor="end">${escapeXml(rateStr)}</text>
   ${connectionColor ? `<rect x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${connectionColor}" />` : ""}
