@@ -1,6 +1,6 @@
 {
   "name": "com.kis.streamdeck",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "한국투자증권 실시간 주식 시세 Stream Deck 플러그인",
   "type": "module",
   "main": "bin/plugin.js",
