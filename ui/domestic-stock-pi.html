@@ -160,7 +160,7 @@
     });
 
     // ─── 연결 테스트 결과 수신 ───
-    document.addEventListener("sendToPropertyInspector", function (evt) {
+    document.addEventListener("piDidReceiveMessage", function (evt) {
       var payload = evt.detail || {};
       if (payload.event !== "testConnectionResult") return;
 
