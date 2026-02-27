@@ -1,7 +1,7 @@
 ---
 id: SPEC-UI-001
 version: "1.0.0"
-status: draft
+status: completed
 created: 2026-02-27
 updated: 2026-02-27
 author: SayBGM
@@ -218,3 +218,21 @@ PI (HTML) ← 결과 수신 → 상태 메시지 표시
 | REQ-UI-001-5.1~5.5 | `ui/domestic-stock-pi.html`, `ui/overseas-stock-pi.html`, `src/actions/domestic-stock.ts`, `src/actions/overseas-stock.ts` | SPEC-UI-001 |
 | REQ-UI-001-6.1~6.2 | `src/renderer/stock-card.ts` | SPEC-UI-001 |
 | REQ-UI-001-7.1~7.2 | `src/actions/domestic-stock.ts`, `src/actions/overseas-stock.ts` | SPEC-UI-001 |
+
+---
+
+## Implementation Notes
+
+구현 완료일: 2026-02-27
+커밋: f3105fa
+방법론: DDD (ANALYZE-PRESERVE-IMPROVE)
+
+### 계획 대비 실제 구현 차이
+
+- `sendToPropertyInspector()` 호출 방식: `ev.action`이 아닌 `streamDeck.ui.current?.sendToPropertyInspector()` 사용 (SDK API 확인 후 수정)
+- `rest-price.ts` 에러 전파: null 반환에서 ErrorType throw로 변경하여 액션 레이어까지 에러 타입 전달
+- 회복 알림: 기존 디바운스 큐를 우회하여 `setImage` 직접 호출
+
+### 달성된 인수 기준
+
+REQ-UI-001-1.1 through REQ-UI-001-7.2 모두 구현 완료
