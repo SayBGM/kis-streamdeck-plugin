@@ -86,11 +86,32 @@
   <script>
     var stockCodeValid = true;
 
+    // ─── 연결 성공 표시 ───
+    function showConnectionSuccess(persistent) {
+      var resultEl = document.getElementById("testConnectionResult");
+      resultEl.textContent = "연결 성공";
+      resultEl.className = "sdpi-test-result success";
+      resultEl.style.display = "block";
+      if (!persistent) {
+        setTimeout(function () { resultEl.style.display = "none"; }, 3000);
+      }
+    }
+
     // ─── 전역 설정 수신 ───
     document.addEventListener("piDidReceiveGlobalSettings", function (evt) {
       var settings = evt.detail || {};
       document.getElementById("appKey").value = settings.appKey || "";
       document.getElementById("appSecret").value = settings.appSecret || "";
+
+      // 유효한 캐시 토큰이 있으면 연결 성공 상태 자동 표시 (지속)
+      var TOKEN_SAFETY_MS = 3600 * 1000; // 1시간 안전 마진
+      if (
+        settings.accessToken &&
+        typeof settings.accessTokenExpiry === "number" &&
+        settings.accessTokenExpiry > Date.now() + TOKEN_SAFETY_MS
+      ) {
+        showConnectionSuccess(true);
+      }
     });
 
     // ─── 액션 설정 수신 ───
@@ -170,10 +191,7 @@
       btn.textContent = "연결 테스트";
 
       if (payload.success) {
-        resultEl.textContent = "연결 성공";
-        resultEl.className = "sdpi-test-result success";
-        resultEl.style.display = "block";
-        setTimeout(function () { resultEl.style.display = "none"; }, 3000);
+        showConnectionSuccess(true);
       } else {
         var errorMsg = "연결 실패";
         if (payload.errorType === "AUTH_FAIL") {
