@@ -60,6 +60,33 @@
       <div class="sdpi-group-label">국내주식 설정</div>
 
       <div class="sdpi-item">
+        <div class="sdpi-item-label">업데이트</div>
+        <div class="sdpi-item-value">
+          <select id="updateMode">
+            <option value="websocket">실시간 (WebSocket)</option>
+            <option value="hybrid">WebSocket + 쓰로틀</option>
+            <option value="poll">주기적 (폴링)</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="pollIntervalRow" class="sdpi-item" style="display:none;">
+        <div class="sdpi-item-label">간격(초)</div>
+        <div class="sdpi-item-value">
+          <input type="number" id="pollIntervalSec" min="1" max="3600" placeholder="30">
+        </div>
+      </div>
+      <div id="pollIntervalError" class="sdpi-error">1~3600 사이의 숫자를 입력하세요</div>
+
+      <div id="throttleMsRow" class="sdpi-item" style="display:none;">
+        <div class="sdpi-item-label">쓰로틀(ms)</div>
+        <div class="sdpi-item-value">
+          <input type="number" id="throttleMs" min="200" placeholder="1000">
+        </div>
+      </div>
+      <div id="throttleMsError" class="sdpi-error">최솟값은 200ms입니다</div>
+
+      <div class="sdpi-item">
         <div class="sdpi-item-label">종목코드</div>
         <div class="sdpi-item-value">
           <input type="text" id="stockCode" placeholder="005930">
@@ -117,6 +144,12 @@
     // ─── 액션 설정 수신 ───
     document.addEventListener("piDidReceiveSettings", function (evt) {
       var settings = evt.detail || {};
+      var mode = settings.updateMode || "websocket";
+      document.getElementById("updateMode").value = mode;
+      document.getElementById("pollIntervalSec").value = settings.pollIntervalSec || "30";
+      document.getElementById("throttleMs").value = settings.throttleMs || "1000";
+      document.getElementById("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
+      document.getElementById("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
       document.getElementById("stockCode").value = settings.stockCode || "";
       document.getElementById("stockName").value = settings.stockName || "";
       validateStockCode(settings.stockCode || "");
@@ -152,15 +185,63 @@
       validateStockCode(this.value);
     });
 
+    // ─── 폴링 간격 유효성 검사 ───
+    function validatePollInterval(value) {
+      var n = parseInt(value, 10);
+      var isValid = !isNaN(n) && n >= 1 && n <= 3600;
+      document.getElementById("pollIntervalError").style.display =
+        value.length > 0 && !isValid ? "block" : "none";
+      return isValid || value.length === 0;
+    }
+
+    // ─── 쓰로틀 유효성 검사 ───
+    function validateThrottleMs(value) {
+      var n = parseInt(value, 10);
+      var isValid = !isNaN(n) && n >= 200;
+      document.getElementById("throttleMsError").style.display =
+        value.length > 0 && !isValid ? "block" : "none";
+      return isValid || value.length === 0;
+    }
+
     // ─── 액션 설정 저장 (종목코드 / 종목명 변경 시) ───
     function saveActionSettings() {
       if (!stockCodeValid) return;
       setSettings({
         stockCode: document.getElementById("stockCode").value.trim(),
         stockName: document.getElementById("stockName").value.trim(),
+        updateMode: document.getElementById("updateMode").value,
+        pollIntervalSec: document.getElementById("pollIntervalSec").value || "30",
+        throttleMs: document.getElementById("throttleMs").value || "1000",
       });
       showStatus("종목 설정이 저장되었습니다", "success");
     }
+
+    document.getElementById("updateMode").addEventListener("change", function () {
+      var mode = this.value;
+      document.getElementById("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
+      document.getElementById("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
+      saveActionSettings();
+    });
+    document.getElementById("pollIntervalSec").addEventListener("input", function () {
+      validatePollInterval(this.value);
+    });
+    document.getElementById("pollIntervalSec").addEventListener("change", function () {
+      if (validatePollInterval(this.value)) saveActionSettings();
+    });
+    document.getElementById("throttleMs").addEventListener("input", function () {
+      validateThrottleMs(this.value);
+    });
+    document.getElementById("throttleMs").addEventListener("blur", function () {
+      var n = parseInt(this.value, 10);
+      if (!isNaN(n) && n < 200) {
+        this.value = "200";
+        document.getElementById("throttleMsError").style.display = "none";
+        saveActionSettings();
+      }
+    });
+    document.getElementById("throttleMs").addEventListener("change", function () {
+      if (validateThrottleMs(this.value)) saveActionSettings();
+    });
 
     document.getElementById("stockCode").addEventListener("change", function () {
       if (validateStockCode(this.value)) {

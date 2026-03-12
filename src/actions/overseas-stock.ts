@@ -82,6 +82,11 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
   private connectionStateChangedAtByAction = new Map<string, number>();
   private pendingRenderByAction = new Map<string, PendingRender>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private staleAfterByAction = new Map<string, number>();
+  private throttleMsByAction = new Map<string, number>();
+  private lastRenderAtByAction = new Map<string, number>();
+  private throttleFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
    * 현재 시간 기반으로 주간/야간 자동 판별하여 tr_key 생성
@@ -136,12 +141,45 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       this.scheduleInitialPriceRetry(ev, settings, stockName);
     }
 
+    const updateMode = settings.updateMode || "websocket";
+    const pollIntervalSec = Math.max(1, Math.min(3600,
+      parseInt(settings.pollIntervalSec || "30", 10)
+    ));
+    const throttleMs = Math.max(200,
+      parseInt(settings.throttleMs || "1000", 10)
+    );
+
+    if (updateMode === "poll") {
+      const staleThreshold = Math.max(pollIntervalSec * 2 * 1000, OVERSEAS_STALE_AFTER_MS);
+      this.staleAfterByAction.set(ev.action.id, staleThreshold);
+      this.applyConnectionState(ev.action.id, "BACKUP");
+      this.hasInitialPrice.add(ev.action.id);
+      this.startPolling(ev.action.id, ev, settings, stockName, pollIntervalSec * 1000);
+      return;
+    }
+
+    if (updateMode === "hybrid") {
+      this.throttleMsByAction.set(ev.action.id, throttleMs);
+      this.lastRenderAtByAction.set(ev.action.id, 0);
+    }
+
     // WebSocket 구독
     const trKey = this.makeTrKey(settings);
 
     const callback: DataCallback = (_trId, _trKey, fields) => {
       const data = parseOverseasData(fields, stockName);
       this.applyConnectionState(ev.action.id, "LIVE");
+      const throttleMsVal = this.throttleMsByAction.get(ev.action.id);
+      if (throttleMsVal !== undefined) {
+        const lastAt = this.lastRenderAtByAction.get(ev.action.id) ?? 0;
+        if (Date.now() - lastAt < throttleMsVal) {
+          this.lastDataByAction.set(ev.action.id, data);
+          this.lastDataAtByAction.set(ev.action.id, Date.now());
+          this.scheduleThrottleFlush(ev.action.id, throttleMsVal, lastAt);
+          return;
+        }
+        this.lastRenderAtByAction.set(ev.action.id, Date.now());
+      }
       this.renderStockData(ev.action.id, ev.action, data, { source: "live" });
     };
 
@@ -249,11 +287,44 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       this.scheduleInitialPriceRetry(ev, settings, stockName);
     }
 
+    const updateMode = settings.updateMode || "websocket";
+    const pollIntervalSec = Math.max(1, Math.min(3600,
+      parseInt(settings.pollIntervalSec || "30", 10)
+    ));
+    const throttleMs = Math.max(200,
+      parseInt(settings.throttleMs || "1000", 10)
+    );
+
+    if (updateMode === "poll") {
+      const staleThreshold = Math.max(pollIntervalSec * 2 * 1000, OVERSEAS_STALE_AFTER_MS);
+      this.staleAfterByAction.set(ev.action.id, staleThreshold);
+      this.applyConnectionState(ev.action.id, "BACKUP");
+      this.hasInitialPrice.add(ev.action.id);
+      this.startPolling(ev.action.id, ev, settings, stockName, pollIntervalSec * 1000);
+      return;
+    }
+
+    if (updateMode === "hybrid") {
+      this.throttleMsByAction.set(ev.action.id, throttleMs);
+      this.lastRenderAtByAction.set(ev.action.id, 0);
+    }
+
     const trKey = this.makeTrKey(settings);
 
     const callback: DataCallback = (_trId, _trKey, fields) => {
       const data = parseOverseasData(fields, stockName);
       this.applyConnectionState(ev.action.id, "LIVE");
+      const throttleMsVal = this.throttleMsByAction.get(ev.action.id);
+      if (throttleMsVal !== undefined) {
+        const lastAt = this.lastRenderAtByAction.get(ev.action.id) ?? 0;
+        if (Date.now() - lastAt < throttleMsVal) {
+          this.lastDataByAction.set(ev.action.id, data);
+          this.lastDataAtByAction.set(ev.action.id, Date.now());
+          this.scheduleThrottleFlush(ev.action.id, throttleMsVal, lastAt);
+          return;
+        }
+        this.lastRenderAtByAction.set(ev.action.id, Date.now());
+      }
       this.renderStockData(ev.action.id, ev.action, data, { source: "live" });
     };
 
@@ -437,6 +508,56 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     this.clearStaleTimer(actionId);
     this.clearStateTransitionTimer(actionId);
     this.pendingRenderByAction.delete(actionId);
+    this.stopPolling(actionId);
+    this.staleAfterByAction.delete(actionId);
+    this.throttleMsByAction.delete(actionId);
+    this.lastRenderAtByAction.delete(actionId);
+    const flushTimer = this.throttleFlushTimers.get(actionId);
+    if (flushTimer !== undefined) {
+      clearTimeout(flushTimer);
+      this.throttleFlushTimers.delete(actionId);
+    }
+  }
+
+  private stopPolling(actionId: string): void {
+    const timer = this.pollTimers.get(actionId);
+    if (timer !== undefined) {
+      clearInterval(timer);
+      this.pollTimers.delete(actionId);
+    }
+  }
+
+  private scheduleThrottleFlush(
+    actionId: string,
+    throttleMs: number,
+    lastRenderAt: number,
+  ): void {
+    if (this.throttleFlushTimers.has(actionId)) return;
+    const remaining = Math.max(0, throttleMs - (Date.now() - lastRenderAt));
+    const timer = setTimeout(() => {
+      this.throttleFlushTimers.delete(actionId);
+      this.lastRenderAtByAction.set(actionId, Date.now());
+      this.renderLastDataIfPossible(actionId);
+    }, remaining);
+    this.throttleFlushTimers.set(actionId, timer);
+  }
+
+  private startPolling(
+    actionId: string,
+    ev: { action: { setImage(image: string): Promise<void> | void; id?: string } },
+    settings: OverseasStockSettings,
+    stockName: string,
+    intervalMs: number,
+  ): void {
+    this.stopPolling(actionId);
+    const timer = setInterval(() => {
+      if (this.refreshInFlight.has(actionId)) return;
+      this.refreshInFlight.add(actionId);
+      this.fetchAndShowPrice(ev, settings, stockName)
+        .catch((err) => { logger.debug(`[미국] 폴링 조회 실패: ${err}`); })
+        .finally(() => { this.refreshInFlight.delete(actionId); });
+    }, intervalMs);
+    this.pollTimers.set(actionId, timer);
   }
 
   private applyConnectionState(
@@ -551,7 +672,8 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
   private isStale(actionId: string): boolean {
     const lastAt = this.lastDataAtByAction.get(actionId);
     if (!lastAt) return false;
-    return Date.now() - lastAt >= OVERSEAS_STALE_AFTER_MS;
+    const threshold = this.staleAfterByAction.get(actionId) ?? OVERSEAS_STALE_AFTER_MS;
+    return Date.now() - lastAt >= threshold;
   }
 
   private scheduleStaleRender(
@@ -561,7 +683,8 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     this.clearStaleTimer(actionId);
     const lastAt = this.lastDataAtByAction.get(actionId);
     if (!lastAt) return;
-    const remaining = OVERSEAS_STALE_AFTER_MS - (Date.now() - lastAt);
+    const threshold = this.staleAfterByAction.get(actionId) ?? OVERSEAS_STALE_AFTER_MS;
+    const remaining = threshold - (Date.now() - lastAt);
     if (remaining <= 0) {
       this.renderLastDataIfPossible(actionId);
       return;
