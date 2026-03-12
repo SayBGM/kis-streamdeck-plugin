@@ -33,6 +33,8 @@ interface Subscription {
   callbacks: Set<DataCallback>;
   successCallbacks: Set<SubscribeSuccessCallback>;
   connectionStateCallbacks: Set<ConnectionStateCallback>;
+  isSubscribed: boolean;
+  isSubscribePending: boolean;
 }
 
 // ─── 상수 ───
@@ -41,6 +43,8 @@ interface Subscription {
 const RECONNECT_BASE_DELAY_MS = 5000;
 const RECONNECT_MAX_DELAY_MS = 60000;
 const CONNECT_TIMEOUT_MS = 10000;
+const HEARTBEAT_INTERVAL_MS = 15000;
+const HEARTBEAT_TIMEOUT_MS = 5000;
 const APPROVAL_KEY_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
@@ -55,6 +59,9 @@ class KISWebSocketManager {
   private reconnectAttempts = 0;
   private approvalKeyRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private approvalKeyRefreshInFlight: Promise<void> | null = null;
+  private heartbeatIntervalTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private awaitingHeartbeatPong = false;
   private isConnecting = false;
   private connectPromise: Promise<void> | null = null;
   private isUpdating = false;
@@ -94,7 +101,7 @@ class KISWebSocketManager {
 
       if (this.subscriptions.size > 0) {
         logger.info(`[WS] 대기 중인 구독 ${this.subscriptions.size}건 연결 시도`);
-        this.safeDisconnect();
+        this.disconnectSocket();
         await this.connect();
       } else {
         logger.info("[WS] 대기 중인 구독 없음, 연결 보류");
@@ -122,6 +129,8 @@ class KISWebSocketManager {
         callbacks: new Set(),
         successCallbacks: new Set(),
         connectionStateCallbacks: new Set(),
+        isSubscribed: false,
+        isSubscribePending: false,
       });
     }
 
@@ -137,7 +146,7 @@ class KISWebSocketManager {
 
     try {
       await this.ensureConnected();
-      this.sendSubscribe(trId, trKey);
+      this.requestSubscribe(sub);
     } catch (err) {
       logger.error(`[WS] 구독 연결 실패: ${trId}/${trKey}`, err);
     }
@@ -159,7 +168,9 @@ class KISWebSocketManager {
       if (onConnectionState) sub.connectionStateCallbacks.delete(onConnectionState);
       if (sub.callbacks.size === 0) {
         this.subscriptions.delete(key);
-        this.sendUnsubscribe(trId, trKey);
+        if (sub.isSubscribed || sub.isSubscribePending) {
+          this.sendUnsubscribe(trId, trKey);
+        }
       }
     }
 
@@ -215,10 +226,7 @@ class KISWebSocketManager {
       const timeout = setTimeout(() => {
         if (this.ws?.readyState !== WebSocket.OPEN) {
           logger.error("[WS] 연결 타임아웃 (10초)");
-          this.notifyConnectionStateForAll("BROKEN");
-          this.safeDisconnect();
-          this.isConnecting = false;
-          this.connectPromise = null;
+          this.recoverConnection("연결 타임아웃");
           reject(new Error("연결 타임아웃"));
         }
       }, CONNECT_TIMEOUT_MS);
@@ -229,20 +237,31 @@ class KISWebSocketManager {
         this.isConnecting = false;
         this.connectPromise = null;
         this.reconnectAttempts = 0; // REQ-PERF-001-1.2.2: reset on successful connection
+        this.startHeartbeat();
 
         for (const sub of this.subscriptions.values()) {
-          this.sendSubscribe(sub.trId, sub.trKey);
+          sub.isSubscribed = false;
+          sub.isSubscribePending = false;
+          this.requestSubscribe(sub);
         }
         resolve();
       });
 
       this.ws.on("message", (data: WebSocket.Data) => {
+        this.markSocketActivity();
         this.handleMessage(data.toString());
+      });
+
+      this.ws.on("pong", () => {
+        this.markSocketActivity();
+        logger.debug("[WS] heartbeat pong 수신");
       });
 
       this.ws.on("close", (code: number, reason: Buffer) => {
         clearTimeout(timeout);
+        this.stopHeartbeat();
         logger.info(`[WS] 연결 종료 (code=${code}, reason=${reason.toString()})`);
+        this.markAllSubscriptionsDisconnected();
         this.notifyConnectionStateForAll("BROKEN");
         this.isConnecting = false;
         this.connectPromise = null;
@@ -253,9 +272,7 @@ class KISWebSocketManager {
       this.ws.on("error", (err: Error) => {
         clearTimeout(timeout);
         logger.error("[WS] WebSocket 에러:", err.message);
-        this.notifyConnectionStateForAll("BROKEN");
-        this.isConnecting = false;
-        this.connectPromise = null;
+        this.recoverConnection(`WebSocket 에러: ${err.message}`);
         reject(err);
       });
     });
@@ -330,18 +347,26 @@ class KISWebSocketManager {
   private notifySubscribeSuccess(trId: string, trKey?: string): void {
     if (trKey) {
       const exact = this.subscriptions.get(this.makeKey(trId, trKey));
-      if (exact && exact.successCallbacks.size > 0) {
-        for (const cb of exact.successCallbacks) {
-          cb(exact.trId, exact.trKey);
+      if (exact) {
+        exact.isSubscribed = true;
+        exact.isSubscribePending = false;
+        if (exact.successCallbacks.size > 0) {
+          for (const cb of exact.successCallbacks) {
+            cb(exact.trId, exact.trKey);
+          }
         }
         return;
       }
     }
 
     for (const sub of this.subscriptions.values()) {
-      if (sub.trId === trId && sub.successCallbacks.size > 0) {
-        for (const cb of sub.successCallbacks) {
-          cb(sub.trId, sub.trKey);
+      if (sub.trId === trId) {
+        sub.isSubscribed = true;
+        sub.isSubscribePending = false;
+        if (sub.successCallbacks.size > 0) {
+          for (const cb of sub.successCallbacks) {
+            cb(sub.trId, sub.trKey);
+          }
         }
       }
     }
@@ -443,6 +468,14 @@ class KISWebSocketManager {
     logger.info(`[WS] 구독 요청 전송: ${trId} / ${trKey}`);
   }
 
+  private requestSubscribe(sub: Subscription): void {
+    if (sub.isSubscribed || sub.isSubscribePending) return;
+    if (this.ws?.readyState !== WebSocket.OPEN || !this.approvalKey) return;
+
+    sub.isSubscribePending = true;
+    this.sendSubscribe(sub.trId, sub.trKey);
+  }
+
   private sendUnsubscribe(trId: string, trKey: string): void {
     if (this.ws?.readyState !== WebSocket.OPEN || !this.approvalKey) return;
 
@@ -472,10 +505,18 @@ class KISWebSocketManager {
       this.approvalKeyRefreshTimer = null;
     }
 
+    this.disconnectSocket();
+  }
+
+  private disconnectSocket(force = false): void {
+    this.stopHeartbeat();
+
     if (this.ws) {
       try {
         this.ws.removeAllListeners();
-        if (this.ws.readyState === WebSocket.OPEN) {
+        if (force) {
+          this.ws.terminate();
+        } else if (this.ws.readyState === WebSocket.OPEN) {
           this.ws.close();
         } else {
           this.ws.terminate();
@@ -485,6 +526,67 @@ class KISWebSocketManager {
       }
       this.ws = null;
     }
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.awaitingHeartbeatPong = false;
+
+    this.heartbeatIntervalTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (this.awaitingHeartbeatPong) return;
+
+      try {
+        this.awaitingHeartbeatPong = true;
+        this.ws.ping();
+        this.heartbeatTimeoutTimer = setTimeout(() => {
+          this.recoverConnection("heartbeat pong timeout");
+        }, HEARTBEAT_TIMEOUT_MS);
+      } catch (err) {
+        logger.error("[WS] heartbeat ping 실패:", err);
+        this.recoverConnection("heartbeat ping failure");
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private stopHeartbeat(): void {
+    this.awaitingHeartbeatPong = false;
+
+    if (this.heartbeatIntervalTimer) {
+      clearInterval(this.heartbeatIntervalTimer);
+      this.heartbeatIntervalTimer = null;
+    }
+
+    if (this.heartbeatTimeoutTimer) {
+      clearTimeout(this.heartbeatTimeoutTimer);
+      this.heartbeatTimeoutTimer = null;
+    }
+  }
+
+  private markSocketActivity(): void {
+    this.awaitingHeartbeatPong = false;
+
+    if (this.heartbeatTimeoutTimer) {
+      clearTimeout(this.heartbeatTimeoutTimer);
+      this.heartbeatTimeoutTimer = null;
+    }
+  }
+
+  private markAllSubscriptionsDisconnected(): void {
+    for (const sub of this.subscriptions.values()) {
+      sub.isSubscribed = false;
+      sub.isSubscribePending = false;
+    }
+  }
+
+  private recoverConnection(reason: string): void {
+    logger.warn(`[WS] 연결 복구 시작: ${reason}`);
+    this.markAllSubscriptionsDisconnected();
+    this.notifyConnectionStateForAll("BROKEN");
+    this.isConnecting = false;
+    this.connectPromise = null;
+    this.disconnectSocket(true);
+    this.scheduleReconnect();
   }
 
   // @MX:NOTE: [AUTO] Exponential backoff with ±10% jitter — prevents thundering herd on mass reconnect

@@ -174,15 +174,10 @@ describe("KISWebSocketManager.scheduleReconnect() — characterization tests", (
     manager.scheduleReconnect();
     expect(manager.reconnectTimer).not.toBeNull();
 
-    // Advance timers — the callback should fire
-    // Original code uses RECONNECT_DELAY_MS = 5000
-    // After TASK-003 it uses exponential backoff, but for characterization we just check timer fires
-    vi.runAllTimers();
+    // Advance only the currently pending timer so recursive reconnect scheduling
+    // does not loop forever under fake timers.
+    vi.runOnlyPendingTimers();
 
-    // After timer fires, reconnectTimer is cleared inside the callback
-    // (a new scheduleReconnect may or may not be called depending on connect result)
-    // The important characterization: timer was set and fired
-    // Reconnect timer is reset to null inside the callback when connect resolves/rejects
-    // Since connect will fail (no real WS), scheduleReconnect is called again
+    // The important characterization: the initially scheduled reconnect timer fired.
   });
 });
