@@ -318,9 +318,6 @@ class KISWebSocketManager {
 
     const matchedSubscriptions = this.findSubscriptionsForData(trId, fields);
     for (const sub of matchedSubscriptions) {
-      for (const cb of sub.connectionStateCallbacks) {
-        cb(sub.trId, sub.trKey, "LIVE");
-      }
       for (const cb of sub.callbacks) {
         cb(trId, sub.trKey, fields);
       }

@@ -199,7 +199,9 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       state
     ) => {
       this.applyConnectionState(ev.action.id, state);
-      this.renderLastDataIfPossible(ev.action.id);
+      if (state !== "LIVE") {
+        this.renderLastDataIfPossible(ev.action.id);
+      }
     };
 
     this.callbackMap.set(ev.action.id, {
@@ -346,7 +348,9 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       state
     ) => {
       this.applyConnectionState(ev.action.id, state);
-      this.renderLastDataIfPossible(ev.action.id);
+      if (state !== "LIVE") {
+        this.renderLastDataIfPossible(ev.action.id);
+      }
     };
 
     this.callbackMap.set(ev.action.id, {
