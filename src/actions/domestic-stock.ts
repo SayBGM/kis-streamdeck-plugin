@@ -4,7 +4,6 @@ import streamDeck, {
   type WillDisappearEvent,
   type DidReceiveSettingsEvent,
   type KeyDownEvent,
-  type SendToPluginEvent,
 } from "@elgato/streamdeck";
 import {
   kisWebSocket,
@@ -14,7 +13,6 @@ import {
 } from "../kis/websocket-manager.js";
 import { parseDomesticData } from "../kis/domestic-parser.js";
 import { fetchDomesticPrice } from "../kis/rest-price.js";
-import { getAccessToken } from "../kis/auth.js";
 import {
   renderStockCard,
   renderWaitingCard,
@@ -734,42 +732,6 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     // REQ-PERF-001-2.2.1: debounce setImage() IPC calls within 50ms window
     this.scheduleRender(actionId, action, svgToDataUri(svg, renderKey), renderKey);
     this.scheduleStaleRender(actionId, action);
-  }
-
-  override async onSendToPlugin(
-    ev: SendToPluginEvent<{ event: string }, DomesticStockSettings>,
-  ): Promise<void> {
-    if (ev.payload.event !== "testConnection") return;
-
-    const globalSettings = kisGlobalSettings.get();
-    if (!globalSettings?.appKey || !globalSettings?.appSecret) {
-      await streamDeck.ui.current?.sendToPropertyInspector({
-        event: "testConnectionResult",
-        success: false,
-        errorType: ErrorType.NO_CREDENTIAL,
-      });
-      return;
-    }
-
-    try {
-      // 읽기 전용 토큰 조회 (캐시 무효화 없음)
-      await getAccessToken(globalSettings);
-      await streamDeck.ui.current?.sendToPropertyInspector({
-        event: "testConnectionResult",
-        success: true,
-      });
-    } catch (err) {
-      const errorType =
-        err instanceof Error && (err.message.includes("401") || err.message.includes("발급 실패"))
-          ? ErrorType.AUTH_FAIL
-          : ErrorType.NETWORK_ERROR;
-      logger.warn(`[국내] 연결 테스트 실패: ${err}`);
-      await streamDeck.ui.current?.sendToPropertyInspector({
-        event: "testConnectionResult",
-        success: false,
-        errorType,
-      });
-    }
   }
 
   // @MX:NOTE: [AUTO] last-write-wins debounce flush — batches setImage() IPC calls within 50ms window to reduce Electron IPC overhead

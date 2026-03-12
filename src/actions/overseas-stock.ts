@@ -4,7 +4,6 @@ import streamDeck, {
   type WillDisappearEvent,
   type DidReceiveSettingsEvent,
   type KeyDownEvent,
-  type SendToPluginEvent,
 } from "@elgato/streamdeck";
 import {
   kisWebSocket,
@@ -14,7 +13,6 @@ import {
 } from "../kis/websocket-manager.js";
 import { parseOverseasData } from "../kis/overseas-parser.js";
 import { fetchOverseasPrice } from "../kis/rest-price.js";
-import { getAccessToken } from "../kis/auth.js";
 import {
   renderStockCard,
   renderWaitingCard,
@@ -635,42 +633,6 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     setTimeout(() => {
       this.renderLastDataIfPossible(actionId);
     }, 2000);
-  }
-
-  override async onSendToPlugin(
-    ev: SendToPluginEvent<{ event: string }, OverseasStockSettings>,
-  ): Promise<void> {
-    if (ev.payload.event !== "testConnection") return;
-
-    const globalSettings = kisGlobalSettings.get();
-    if (!globalSettings?.appKey || !globalSettings?.appSecret) {
-      await streamDeck.ui.current?.sendToPropertyInspector({
-        event: "testConnectionResult",
-        success: false,
-        errorType: ErrorType.NO_CREDENTIAL,
-      });
-      return;
-    }
-
-    try {
-      // 읽기 전용 토큰 조회 (캐시 무효화 없음)
-      await getAccessToken(globalSettings);
-      await streamDeck.ui.current?.sendToPropertyInspector({
-        event: "testConnectionResult",
-        success: true,
-      });
-    } catch (err) {
-      const errorType =
-        err instanceof Error && (err.message.includes("401") || err.message.includes("발급 실패"))
-          ? ErrorType.AUTH_FAIL
-          : ErrorType.NETWORK_ERROR;
-      logger.warn(`[미국] 연결 테스트 실패: ${err}`);
-      await streamDeck.ui.current?.sendToPropertyInspector({
-        event: "testConnectionResult",
-        success: false,
-        errorType,
-      });
-    }
   }
 
   private getRenderConnectionState(
