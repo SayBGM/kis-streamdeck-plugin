@@ -51,14 +51,10 @@
         <button id="testConnectionBtn" class="sdpi-item-value">연결 테스트</button>
       </div>
       <div id="testConnectionResult" class="sdpi-test-result"></div>
-    </div>
 
-    <div class="sdpi-separator"></div>
+      <div class="sdpi-separator-thin"></div>
 
-    <!-- ─── 미국주식 설정 (액션별) ─── -->
-    <div class="sdpi-group">
-      <div class="sdpi-group-label">미국주식 설정</div>
-
+      <!-- 업데이트 방식 (전역 공통) -->
       <div class="sdpi-item">
         <div class="sdpi-item-label">업데이트</div>
         <div class="sdpi-item-value">
@@ -85,6 +81,13 @@
         </div>
       </div>
       <div id="throttleMsError" class="sdpi-error">최솟값은 200ms입니다</div>
+    </div>
+
+    <div class="sdpi-separator"></div>
+
+    <!-- ─── 미국주식 설정 (액션별) ─── -->
+    <div class="sdpi-group">
+      <div class="sdpi-group-label">미국주식 설정</div>
 
       <div class="sdpi-item">
         <div class="sdpi-item-label">티커 심볼</div>
@@ -142,6 +145,13 @@
       document.getElementById("appKey").value = settings.appKey || "";
       document.getElementById("appSecret").value = settings.appSecret || "";
 
+      var mode = settings.updateMode || "websocket";
+      document.getElementById("updateMode").value = mode;
+      document.getElementById("pollIntervalSec").value = settings.pollIntervalSec || "30";
+      document.getElementById("throttleMs").value = settings.throttleMs || "1000";
+      document.getElementById("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
+      document.getElementById("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
+
       // 유효한 캐시 토큰이 있으면 연결 성공 상태 자동 표시 (지속)
       var TOKEN_SAFETY_MS = 3600 * 1000; // 1시간 안전 마진
       if (
@@ -156,23 +166,20 @@
     // ─── 액션 설정 수신 ───
     document.addEventListener("piDidReceiveSettings", function (evt) {
       var settings = evt.detail || {};
-      var mode = settings.updateMode || "websocket";
-      document.getElementById("updateMode").value = mode;
-      document.getElementById("pollIntervalSec").value = settings.pollIntervalSec || "30";
-      document.getElementById("throttleMs").value = settings.throttleMs || "1000";
-      document.getElementById("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
-      document.getElementById("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
       document.getElementById("ticker").value = settings.ticker || "";
       document.getElementById("exchange").value = settings.exchange || "NAS";
       document.getElementById("stockName").value = settings.stockName || "";
       validateTicker(settings.ticker || "");
     });
 
-    // ─── 전역 설정 저장 (App Key / App Secret 변경 시) ───
+    // ─── 전역 설정 저장 ───
     function saveGlobalSettings() {
       setGlobalSettings({
         appKey: document.getElementById("appKey").value.trim(),
         appSecret: document.getElementById("appSecret").value.trim(),
+        updateMode: document.getElementById("updateMode").value,
+        pollIntervalSec: document.getElementById("pollIntervalSec").value || "30",
+        throttleMs: document.getElementById("throttleMs").value || "1000",
       });
       showStatus("API 설정이 저장되었습니다", "success");
     }
@@ -223,9 +230,6 @@
         ticker: document.getElementById("ticker").value.trim().toUpperCase(),
         exchange: document.getElementById("exchange").value,
         stockName: document.getElementById("stockName").value.trim(),
-        updateMode: document.getElementById("updateMode").value,
-        pollIntervalSec: document.getElementById("pollIntervalSec").value || "30",
-        throttleMs: document.getElementById("throttleMs").value || "1000",
       });
       showStatus("종목 설정이 저장되었습니다", "success");
     }
@@ -234,13 +238,13 @@
       var mode = this.value;
       document.getElementById("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
       document.getElementById("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
-      saveActionSettings();
+      saveGlobalSettings();
     });
     document.getElementById("pollIntervalSec").addEventListener("input", function () {
       validatePollInterval(this.value);
     });
     document.getElementById("pollIntervalSec").addEventListener("change", function () {
-      if (validatePollInterval(this.value)) saveActionSettings();
+      if (validatePollInterval(this.value)) saveGlobalSettings();
     });
     document.getElementById("throttleMs").addEventListener("input", function () {
       validateThrottleMs(this.value);
@@ -250,11 +254,11 @@
       if (!isNaN(n) && n < 200) {
         this.value = "200";
         document.getElementById("throttleMsError").style.display = "none";
-        saveActionSettings();
+        saveGlobalSettings();
       }
     });
     document.getElementById("throttleMs").addEventListener("change", function () {
-      if (validateThrottleMs(this.value)) saveActionSettings();
+      if (validateThrottleMs(this.value)) saveGlobalSettings();
     });
 
     document.getElementById("ticker").addEventListener("change", function () {
@@ -288,6 +292,7 @@
 
       if (payload.success) {
         showConnectionSuccess(true);
+        saveActionSettings(); // onDidReceiveSettings 트리거 → 버튼 재초기화
       } else {
         var errorMsg = "연결 실패";
         if (payload.errorType === "AUTH_FAIL") {

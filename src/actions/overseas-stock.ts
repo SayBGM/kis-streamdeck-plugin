@@ -141,12 +141,13 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       this.scheduleInitialPriceRetry(ev, settings, stockName);
     }
 
-    const updateMode = settings.updateMode || "websocket";
+    const gs = kisGlobalSettings.get();
+    const updateMode = gs?.updateMode || "websocket";
     const pollIntervalSec = Math.max(1, Math.min(3600,
-      parseInt(settings.pollIntervalSec || "30", 10)
+      parseInt(gs?.pollIntervalSec || "30", 10)
     ));
     const throttleMs = Math.max(200,
-      parseInt(settings.throttleMs || "1000", 10)
+      parseInt(gs?.throttleMs || "1000", 10)
     );
 
     if (updateMode === "poll") {
@@ -175,6 +176,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
         if (Date.now() - lastAt < throttleMsVal) {
           this.lastDataByAction.set(ev.action.id, data);
           this.lastDataAtByAction.set(ev.action.id, Date.now());
+          this.actionRefMap.set(ev.action.id, ev.action);
           this.scheduleThrottleFlush(ev.action.id, throttleMsVal, lastAt);
           return;
         }
@@ -287,12 +289,13 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       this.scheduleInitialPriceRetry(ev, settings, stockName);
     }
 
-    const updateMode = settings.updateMode || "websocket";
+    const gs = kisGlobalSettings.get();
+    const updateMode = gs?.updateMode || "websocket";
     const pollIntervalSec = Math.max(1, Math.min(3600,
-      parseInt(settings.pollIntervalSec || "30", 10)
+      parseInt(gs?.pollIntervalSec || "30", 10)
     ));
     const throttleMs = Math.max(200,
-      parseInt(settings.throttleMs || "1000", 10)
+      parseInt(gs?.throttleMs || "1000", 10)
     );
 
     if (updateMode === "poll") {
@@ -320,6 +323,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
         if (Date.now() - lastAt < throttleMsVal) {
           this.lastDataByAction.set(ev.action.id, data);
           this.lastDataAtByAction.set(ev.action.id, Date.now());
+          this.actionRefMap.set(ev.action.id, ev.action);
           this.scheduleThrottleFlush(ev.action.id, throttleMsVal, lastAt);
           return;
         }
@@ -537,7 +541,14 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     const timer = setTimeout(() => {
       this.throttleFlushTimers.delete(actionId);
       this.lastRenderAtByAction.set(actionId, Date.now());
-      this.renderLastDataIfPossible(actionId);
+      // source="live" 직접 지정 — connectionState 조회에 의존하지 않음
+      const data = this.lastDataByAction.get(actionId);
+      const action = this.actionRefMap.get(actionId);
+      if (data && action) {
+        this.renderStockData(actionId, action, data, { source: "live" }).catch((err) => {
+          logger.debug(`[미국] hybrid flush 렌더 실패: ${err}`);
+        });
+      }
     }, remaining);
     this.throttleFlushTimers.set(actionId, timer);
   }

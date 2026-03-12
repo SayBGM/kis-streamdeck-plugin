@@ -14,6 +14,12 @@ export type GlobalSettings = {
   accessToken?: string;
   /** epoch ms */
   accessTokenExpiry?: number;
+  /** 업데이트 방식: 모든 버튼에 공통 적용 */
+  updateMode?: "websocket" | "hybrid" | "poll";
+  /** 폴링 간격(초) — updateMode="poll" 시 사용 */
+  pollIntervalSec?: string;
+  /** 쓰로틀 윈도우(ms) — updateMode="hybrid" 시 사용 */
+  throttleMs?: string;
   [key: string]: JsonValue;
 };
 
