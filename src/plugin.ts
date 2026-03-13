@@ -3,13 +3,19 @@ import { kisWebSocket } from "./kis/websocket-manager.js";
 import { kisGlobalSettings } from "./kis/settings-store.js";
 import { DomesticStockAction } from "./actions/domestic-stock.js";
 import { OverseasStockAction } from "./actions/overseas-stock.js";
-import type { GlobalSettings } from "./types/index.js";
+import { ErrorType, type GlobalSettings } from "./types/index.js";
 import { logger } from "./utils/logger.js";
 import {
   clearAccessTokenCache,
   hydrateAccessTokenFromGlobalSettings,
   onAccessTokenUpdated,
 } from "./kis/auth.js";
+import { runConnectionTest } from "./property-inspector/connection-test.js";
+import {
+  CONNECTION_TEST_RESULT_TYPE,
+  isConnectionTestRequestPayload,
+  type ConnectionTestResultPayload,
+} from "./property-inspector/message-contract.js";
 
 // 로깅 설정
 streamDeck.logger.setLevel(LogLevel.DEBUG);
@@ -26,6 +32,18 @@ function credentialKey(settings: { appKey: string; appSecret: string }): string 
 
 let lastAppliedCredentialKey: string | null = null;
 let isInternalGlobalSettingsWrite = false;
+
+async function sendToCurrentPropertyInspector(
+  payload: ConnectionTestResultPayload
+): Promise<void> {
+  const inspector = streamDeck.ui.current;
+  if (!inspector) {
+    logger.warn("[Plugin] 응답할 Property Inspector가 없습니다");
+    return;
+  }
+
+  await inspector.sendToPropertyInspector(payload);
+}
 
 /**
  * 전역 설정 적용 (공통)
@@ -100,6 +118,31 @@ streamDeck.settings.onDidReceiveGlobalSettings<GlobalSettings>((ev) => {
   }
 
   applyGlobalSettings(settings);
+});
+
+streamDeck.ui.onSendToPlugin((ev) => {
+  const payload = ev.payload;
+  if (!isConnectionTestRequestPayload(payload)) {
+    return;
+  }
+
+  void (async () => {
+    try {
+      const globalSettings =
+        await streamDeck.settings.getGlobalSettings<GlobalSettings>();
+      const result = await runConnectionTest(payload, globalSettings);
+      await sendToCurrentPropertyInspector(result);
+    } catch (error) {
+      logger.error("[Plugin] Property Inspector 메시지 처리 실패:", error);
+      await sendToCurrentPropertyInspector({
+        type: CONNECTION_TEST_RESULT_TYPE,
+        requestId: payload.requestId,
+        ok: false,
+        errorType: ErrorType.NETWORK_ERROR,
+        message: "연결 테스트를 완료하지 못했습니다. 잠시 후 다시 시도하세요.",
+      });
+    }
+  })();
 });
 
 // ─── 액션 등록 ───

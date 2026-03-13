@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const onDidReceiveGlobalSettings = vi.fn();
+const onSendToPlugin = vi.fn();
 const registerAction = vi.fn();
 const getGlobalSettings = vi.fn();
 const setGlobalSettings = vi.fn();
@@ -23,6 +24,10 @@ vi.mock("@elgato/streamdeck", () => ({
     },
     actions: {
       registerAction,
+    },
+    ui: {
+      onSendToPlugin,
+      current: undefined,
     },
     connect,
   },
@@ -72,6 +77,7 @@ describe("plugin global settings handling", () => {
     vi.resetModules();
     onDidReceiveGlobalSettings.mockReset();
     registerAction.mockReset();
+    onSendToPlugin.mockReset();
     getGlobalSettings.mockReset();
     setGlobalSettings.mockReset();
     connect.mockReset();
@@ -85,6 +91,7 @@ describe("plugin global settings handling", () => {
     connect.mockResolvedValue(undefined);
     getGlobalSettings.mockResolvedValue({});
     onDidReceiveGlobalSettings.mockImplementation((handler: unknown) => handler);
+    onSendToPlugin.mockImplementation((handler: unknown) => handler);
   });
 
   afterEach(() => {
@@ -92,7 +99,7 @@ describe("plugin global settings handling", () => {
   });
 
   it("clears cached auth and websocket state when credentials are removed", async () => {
-    await import("../plugin.ts");
+    await import("../plugin.js");
     await Promise.resolve();
 
     const handler = onDidReceiveGlobalSettings.mock.calls[0]?.[0] as (ev: unknown) => void;

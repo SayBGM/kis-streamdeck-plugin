@@ -85,6 +85,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
   private throttleMsByAction = new Map<string, number>();
   private lastRenderAtByAction = new Map<string, number>();
   private throttleFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private manualRefreshByAction = new Set<string>();
 
   /**
    * 현재 시간 기반으로 주간/야간 자동 판별하여 tr_key 생성
@@ -391,6 +392,8 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     }
 
     this.refreshInFlight.add(actionId);
+    this.manualRefreshByAction.add(actionId);
+    this.renderLastDataIfPossible(actionId);
     try {
       const ok = await this.fetchAndShowPrice(ev, settings, stockName, true);
       if (ok) {
@@ -402,7 +405,9 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     } catch (err) {
       logger.debug(`[미국] 수동 새로고침 실패: ${ticker} / ${err}`);
     } finally {
+      this.manualRefreshByAction.delete(actionId);
       this.refreshInFlight.delete(actionId);
+      this.renderLastDataIfPossible(actionId);
     }
   }
 
@@ -518,6 +523,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     this.staleAfterByAction.delete(actionId);
     this.throttleMsByAction.delete(actionId);
     this.lastRenderAtByAction.delete(actionId);
+    this.manualRefreshByAction.delete(actionId);
     const flushTimer = this.throttleFlushTimers.get(actionId);
     if (flushTimer !== undefined) {
       clearTimeout(flushTimer);
@@ -644,8 +650,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
   ): StreamConnectionState | null {
     const current = this.connectionStateByAction.get(actionId) ?? null;
     if (source === "live") return "LIVE";
-    if (current === "LIVE") return "LIVE";
-    if (current === "BROKEN") return "BACKUP";
+    if (current === "LIVE" || current === "BROKEN") return current;
     return "BACKUP";
   }
 
@@ -730,6 +735,7 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     const svg = renderStockCard(data, "overseas", {
       isStale: stale,
       connectionState,
+      isRefreshing: this.manualRefreshByAction.has(actionId),
     });
     // REQ-PERF-001-2.2.1: debounce setImage() IPC calls within 50ms window
     this.scheduleRender(actionId, action, svgToDataUri(svg, renderKey), renderKey);

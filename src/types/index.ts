@@ -66,6 +66,7 @@ export type StreamConnectionState = "LIVE" | "BACKUP" | "BROKEN";
 export interface StockCardRenderOptions {
   isStale?: boolean;
   connectionState?: StreamConnectionState | null;
+  isRefreshing?: boolean;
 }
 
 // ─── WebSocket 관련 상수 ───

@@ -15,10 +15,14 @@
 </head>
 <body>
   <div class="sdpi-wrapper">
-
-    <!-- ─── KIS API 설정 (전역) ─── -->
     <div class="sdpi-group">
-      <div class="sdpi-group-label">KIS API 설정 (공통)</div>
+      <div class="sdpi-group-label">
+        <span>KIS API 설정</span>
+        <span class="sdpi-badge">모든 버튼 공통</span>
+      </div>
+      <div class="sdpi-note">
+        여기서 저장한 App Key, App Secret, 업데이트 방식은 모든 주식 버튼에 공통 적용됩니다.
+      </div>
 
       <div class="sdpi-item">
         <div class="sdpi-item-label">App Key</div>
@@ -37,10 +41,6 @@
       <div class="sdpi-help">
         한국투자증권 Open API에서 발급받은 키를 입력하세요. 모든 버튼에 공통 적용됩니다.
       </div>
-
-      <div class="sdpi-separator-thin"></div>
-
-      <!-- 업데이트 방식 (전역 공통) -->
       <div class="sdpi-item">
         <div class="sdpi-item-label">업데이트</div>
         <div class="sdpi-item-value">
@@ -67,13 +67,22 @@
         </div>
       </div>
       <div id="throttleMsError" class="sdpi-error">최솟값은 200ms입니다</div>
+
+      <div class="sdpi-actions">
+        <button type="button" id="saveGlobalButton" class="sdpi-button primary" disabled>공통 설정 저장</button>
+        <button type="button" id="testConnectionButton" class="sdpi-button secondary">연결 테스트</button>
+      </div>
+      <div id="globalStatusMessage" class="sdpi-status info"></div>
     </div>
 
-    <div class="sdpi-separator"></div>
-
-    <!-- ─── 미국주식 설정 (액션별) ─── -->
     <div class="sdpi-group">
-      <div class="sdpi-group-label">미국주식 설정</div>
+      <div class="sdpi-group-label">
+        <span>미국주식 설정</span>
+        <span class="sdpi-badge">현재 버튼만</span>
+      </div>
+      <div class="sdpi-note">
+        이 섹션은 현재 선택한 버튼에만 저장됩니다. 유효한 값은 입력 후 자동 저장됩니다.
+      </div>
 
       <div class="sdpi-item">
         <div class="sdpi-item-label">티커 심볼</div>
@@ -103,59 +112,111 @@
         </div>
       </div>
       <div class="sdpi-help">Stream Deck 키에 표시할 종목명을 입력하세요</div>
+
+      <div id="actionStatusMessage" class="sdpi-status info"></div>
     </div>
-
-    <!-- 상태 메시지 -->
-    <div id="statusMessage" class="sdpi-status info" style="display:none;"></div>
-
   </div>
 
   <script src="sdpi.js"></script>
   <script>
-    var tickerValid = true;
+    var CONNECTION_TEST_REQUEST_TYPE = "kis.connectionTest";
+    var CONNECTION_TEST_RESULT_TYPE = "kis.connectionTestResult";
+    var ACTION_SAVE_DEBOUNCE_MS = 350;
 
-    // ─── 전역 설정 수신 ───
+    var tickerValid = true;
+    var globalDirty = false;
+    var actionSaveTimer = null;
+    var pendingConnectionTestId = null;
+
+    function byId(id) {
+      return document.getElementById(id);
+    }
+
+    function setStatus(targetId, message, type) {
+      var el = byId(targetId);
+      if (!message) {
+        el.textContent = "";
+        el.className = "sdpi-status info";
+        return;
+      }
+
+      el.textContent = message;
+      el.className = "sdpi-status " + type + " visible";
+    }
+
+    function updateModeRows(mode) {
+      byId("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
+      byId("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
+    }
+
+    function getGlobalSettingsPayload() {
+      return {
+        appKey: byId("appKey").value.trim(),
+        appSecret: byId("appSecret").value.trim(),
+        updateMode: byId("updateMode").value,
+        pollIntervalSec: byId("pollIntervalSec").value || "30",
+        throttleMs: byId("throttleMs").value || "1000",
+      };
+    }
+
+    function setGlobalDirty(message) {
+      globalDirty = true;
+      updateGlobalControls();
+      if (message) {
+        setStatus("globalStatusMessage", message, "info");
+      }
+    }
+
+    function isGlobalSettingsValid() {
+      var mode = byId("updateMode").value;
+      var pollValid = mode !== "poll" || validatePollInterval(byId("pollIntervalSec").value);
+      var throttleValid = mode !== "hybrid" || validateThrottleMs(byId("throttleMs").value);
+      return pollValid && throttleValid;
+    }
+
+    function updateGlobalControls() {
+      byId("saveGlobalButton").disabled = !globalDirty || !isGlobalSettingsValid();
+      byId("testConnectionButton").disabled = pendingConnectionTestId !== null;
+    }
+
     document.addEventListener("piDidReceiveGlobalSettings", function (evt) {
       var settings = evt.detail || {};
-      document.getElementById("appKey").value = settings.appKey || "";
-      document.getElementById("appSecret").value = settings.appSecret || "";
+      byId("appKey").value = settings.appKey || "";
+      byId("appSecret").value = settings.appSecret || "";
 
       var mode = settings.updateMode || "websocket";
-      document.getElementById("updateMode").value = mode;
-      document.getElementById("pollIntervalSec").value = settings.pollIntervalSec || "30";
-      document.getElementById("throttleMs").value = settings.throttleMs || "1000";
-      document.getElementById("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
-      document.getElementById("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
+      byId("updateMode").value = mode;
+      byId("pollIntervalSec").value = settings.pollIntervalSec || "30";
+      byId("throttleMs").value = settings.throttleMs || "1000";
+      updateModeRows(mode);
+      globalDirty = false;
+      updateGlobalControls();
     });
 
-    // ─── 액션 설정 수신 ───
     document.addEventListener("piDidReceiveSettings", function (evt) {
       var settings = evt.detail || {};
-      document.getElementById("ticker").value = settings.ticker || "";
-      document.getElementById("exchange").value = settings.exchange || "NAS";
-      document.getElementById("stockName").value = settings.stockName || "";
+      byId("ticker").value = settings.ticker || "";
+      byId("exchange").value = settings.exchange || "NAS";
+      byId("stockName").value = settings.stockName || "";
       validateTicker(settings.ticker || "");
     });
 
-    // ─── 전역 설정 저장 ───
     function saveGlobalSettings() {
-      setGlobalSettings({
-        appKey: document.getElementById("appKey").value.trim(),
-        appSecret: document.getElementById("appSecret").value.trim(),
-        updateMode: document.getElementById("updateMode").value,
-        pollIntervalSec: document.getElementById("pollIntervalSec").value || "30",
-        throttleMs: document.getElementById("throttleMs").value || "1000",
-      });
-      showStatus("API 설정이 저장되었습니다", "success");
+      if (!isGlobalSettingsValid()) {
+        setStatus("globalStatusMessage", "공통 설정 값을 확인하세요.", "error");
+        updateGlobalControls();
+        return;
+      }
+
+      setGlobalSettings(getGlobalSettingsPayload());
+      globalDirty = false;
+      updateGlobalControls();
+      setStatus("globalStatusMessage", "공통 설정이 저장되었습니다. 모든 버튼에 적용됩니다.", "success");
     }
 
-    document.getElementById("appKey").addEventListener("change", saveGlobalSettings);
-    document.getElementById("appSecret").addEventListener("change", saveGlobalSettings);
-
-    // ─── 티커 실시간 검증 ───
     function validateTicker(value) {
       var isValid = /^[A-Z]{1,6}$/i.test(value);
-      var errorEl = document.getElementById("tickerError");
+      var errorEl = byId("tickerError");
       if (value.length > 0 && !isValid) {
         errorEl.style.display = "block";
         tickerValid = false;
@@ -166,84 +227,128 @@
       return isValid || value.length === 0;
     }
 
-    document.getElementById("ticker").addEventListener("input", function () {
-      validateTicker(this.value);
-    });
-
-    // ─── 폴링 간격 유효성 검사 ───
     function validatePollInterval(value) {
       var n = parseInt(value, 10);
       var isValid = !isNaN(n) && n >= 1 && n <= 3600;
-      document.getElementById("pollIntervalError").style.display =
+      byId("pollIntervalError").style.display =
         value.length > 0 && !isValid ? "block" : "none";
       return isValid || value.length === 0;
     }
 
-    // ─── 쓰로틀 유효성 검사 ───
     function validateThrottleMs(value) {
       var n = parseInt(value, 10);
       var isValid = !isNaN(n) && n >= 200;
-      document.getElementById("throttleMsError").style.display =
+      byId("throttleMsError").style.display =
         value.length > 0 && !isValid ? "block" : "none";
       return isValid || value.length === 0;
     }
 
-    // ─── 액션 설정 저장 (티커 / 거래소 / 종목명 변경 시) ───
     function saveActionSettings() {
-      if (!tickerValid) return;
+      if (!tickerValid) {
+        setStatus("actionStatusMessage", "티커는 1~6자 영문이어야 합니다.", "error");
+        return;
+      }
+
       setSettings({
-        ticker: document.getElementById("ticker").value.trim().toUpperCase(),
-        exchange: document.getElementById("exchange").value,
-        stockName: document.getElementById("stockName").value.trim(),
+        ticker: byId("ticker").value.trim().toUpperCase(),
+        exchange: byId("exchange").value,
+        stockName: byId("stockName").value.trim(),
       });
-      showStatus("종목 설정이 저장되었습니다", "success");
+      setStatus("actionStatusMessage", "현재 버튼 설정이 저장되었습니다.", "success");
     }
 
-    document.getElementById("updateMode").addEventListener("change", function () {
-      var mode = this.value;
-      document.getElementById("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
-      document.getElementById("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
-      saveGlobalSettings();
+    function queueActionSave() {
+      if (!tickerValid) {
+        if (actionSaveTimer) {
+          clearTimeout(actionSaveTimer);
+          actionSaveTimer = null;
+        }
+        setStatus("actionStatusMessage", "티커는 1~6자 영문이어야 합니다.", "error");
+        return;
+      }
+
+      if (actionSaveTimer) {
+        clearTimeout(actionSaveTimer);
+      }
+      setStatus("actionStatusMessage", "현재 버튼 설정을 저장하는 중입니다...", "info");
+      actionSaveTimer = setTimeout(function () {
+        actionSaveTimer = null;
+        saveActionSettings();
+      }, ACTION_SAVE_DEBOUNCE_MS);
+    }
+
+    function runConnectionTest() {
+      if (pendingConnectionTestId !== null) return;
+
+      pendingConnectionTestId = "connection-test-" + Date.now();
+      updateGlobalControls();
+      byId("testConnectionButton").textContent = "연결 확인 중...";
+      setStatus("globalStatusMessage", "KIS API 자격증명을 확인하는 중입니다...", "info");
+      sendToPlugin({
+        type: CONNECTION_TEST_REQUEST_TYPE,
+        requestId: pendingConnectionTestId,
+        appKey: byId("appKey").value.trim(),
+        appSecret: byId("appSecret").value.trim(),
+      });
+    }
+
+    document.addEventListener("piDidReceiveMessage", function (evt) {
+      var payload = evt.detail || {};
+      if (payload.type !== CONNECTION_TEST_RESULT_TYPE) {
+        return;
+      }
+      if (payload.requestId && pendingConnectionTestId && payload.requestId !== pendingConnectionTestId) {
+        return;
+      }
+
+      pendingConnectionTestId = null;
+      byId("testConnectionButton").textContent = "연결 테스트";
+      updateGlobalControls();
+      setStatus("globalStatusMessage", payload.message, payload.ok ? "success" : "error");
     });
-    document.getElementById("pollIntervalSec").addEventListener("input", function () {
+
+    byId("saveGlobalButton").addEventListener("click", saveGlobalSettings);
+    byId("testConnectionButton").addEventListener("click", runConnectionTest);
+
+    byId("appKey").addEventListener("input", function () {
+      setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
+    });
+    byId("appSecret").addEventListener("input", function () {
+      setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
+    });
+
+    byId("updateMode").addEventListener("change", function () {
+      updateModeRows(this.value);
+      setGlobalDirty("업데이트 방식이 변경되었습니다. 저장 후 모든 버튼에 반영됩니다.");
+    });
+    byId("pollIntervalSec").addEventListener("input", function () {
       validatePollInterval(this.value);
+      setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
     });
-    document.getElementById("pollIntervalSec").addEventListener("change", function () {
-      if (validatePollInterval(this.value)) saveGlobalSettings();
-    });
-    document.getElementById("throttleMs").addEventListener("input", function () {
+    byId("throttleMs").addEventListener("input", function () {
       validateThrottleMs(this.value);
+      setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
     });
-    document.getElementById("throttleMs").addEventListener("blur", function () {
+    byId("throttleMs").addEventListener("blur", function () {
       var n = parseInt(this.value, 10);
       if (!isNaN(n) && n < 200) {
         this.value = "200";
-        document.getElementById("throttleMsError").style.display = "none";
-        saveGlobalSettings();
+        byId("throttleMsError").style.display = "none";
+        setGlobalDirty("쓰로틀 값을 200ms로 보정했습니다. 저장 버튼으로 적용하세요.");
       }
     });
-    document.getElementById("throttleMs").addEventListener("change", function () {
-      if (validateThrottleMs(this.value)) saveGlobalSettings();
-    });
 
-    document.getElementById("ticker").addEventListener("change", function () {
-      if (validateTicker(this.value)) {
-        saveActionSettings();
-      }
+    byId("ticker").addEventListener("input", function () {
+      this.value = this.value.toUpperCase();
+      validateTicker(this.value);
+      queueActionSave();
     });
-    document.getElementById("exchange").addEventListener("change", saveActionSettings);
-    document.getElementById("stockName").addEventListener("change", saveActionSettings);
-
-    // ─── 상태 메시지 표시 ───
-    function showStatus(message, type) {
-      var el = document.getElementById("statusMessage");
-      el.textContent = message;
-      el.className = "sdpi-status " + type;
-      el.style.display = "block";
-      setTimeout(function () {
-        el.style.display = "none";
-      }, 2000);
-    }
+    byId("exchange").addEventListener("change", function () {
+      queueActionSave();
+    });
+    byId("stockName").addEventListener("input", function () {
+      queueActionSave();
+    });
   </script>
 </body>
 </html>

@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { StockData } from "../../types/index.js";
+import { renderStockCard } from "../../renderer/stock-card.js";
 
 // Mock all external dependencies
 vi.mock("@elgato/streamdeck", () => ({
@@ -81,6 +82,7 @@ type PrivateAction = {
   pendingRenderByAction: Map<string, { action: { setImage(image: string): Promise<void> | void }; dataUri: string; renderKey: string }>;
   flushTimer: ReturnType<typeof setTimeout> | null;
   flushPendingRenders: () => void;
+  manualRefreshByAction: Set<string>;
 };
 
 describe("DomesticStockAction.renderStockData() — characterization tests", () => {
@@ -98,6 +100,46 @@ describe("DomesticStockAction.renderStockData() — characterization tests", () 
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+  });
+
+  it("preserves BROKEN connection state when backup data is rendered", async () => {
+    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
+    const data = makeStockData(75400);
+    const mockedRenderStockCard = vi.mocked(renderStockCard);
+
+    action.connectionStateByAction.set("action-1", "BROKEN");
+
+    await action.renderStockData("action-1", mockAction, data, { source: "backup" });
+    vi.advanceTimersByTime(50);
+
+    expect(mockedRenderStockCard).toHaveBeenLastCalledWith(
+      data,
+      "domestic",
+      expect.objectContaining({
+        connectionState: "BROKEN",
+      })
+    );
+  });
+
+  it("passes manual refresh state through to the renderer", async () => {
+    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
+    const data = makeStockData(75400);
+    const mockedRenderStockCard = vi.mocked(renderStockCard);
+
+    action.connectionStateByAction.set("action-1", "LIVE");
+    action.manualRefreshByAction.add("action-1");
+
+    await action.renderStockData("action-1", mockAction, data, { source: "live" });
+    vi.advanceTimersByTime(50);
+
+    expect(mockedRenderStockCard).toHaveBeenLastCalledWith(
+      data,
+      "domestic",
+      expect.objectContaining({
+        connectionState: "LIVE",
+        isRefreshing: true,
+      })
+    );
   });
 
   it("should enqueue setImage in debounce queue and NOT call immediately", async () => {

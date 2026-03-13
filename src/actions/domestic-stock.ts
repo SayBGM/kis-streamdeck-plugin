@@ -82,6 +82,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
   private throttleMsByAction = new Map<string, number>();
   private lastRenderAtByAction = new Map<string, number>();
   private throttleFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private manualRefreshByAction = new Set<string>();
 
   override async onWillAppear(
     ev: WillAppearEvent<DomesticStockSettings>,
@@ -388,6 +389,8 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     }
 
     this.refreshInFlight.add(actionId);
+    this.manualRefreshByAction.add(actionId);
+    this.renderLastDataIfPossible(actionId);
     try {
       const ok = await this.fetchAndShowPrice(ev, stockCode, stockName, true);
       if (ok) {
@@ -399,7 +402,9 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     } catch (err) {
       logger.debug(`[국내] 수동 새로고침 실패: ${stockCode} / ${err}`);
     } finally {
+      this.manualRefreshByAction.delete(actionId);
       this.refreshInFlight.delete(actionId);
+      this.renderLastDataIfPossible(actionId);
     }
   }
 
@@ -523,6 +528,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     this.staleAfterByAction.delete(actionId);
     this.throttleMsByAction.delete(actionId);
     this.lastRenderAtByAction.delete(actionId);
+    this.manualRefreshByAction.delete(actionId);
     const flushTimer = this.throttleFlushTimers.get(actionId);
     if (flushTimer !== undefined) {
       clearTimeout(flushTimer);
@@ -649,8 +655,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
   ): StreamConnectionState | null {
     const current = this.connectionStateByAction.get(actionId) ?? null;
     if (source === "live") return "LIVE";
-    if (current === "LIVE") return "LIVE";
-    if (current === "BROKEN") return "BACKUP";
+    if (current === "LIVE" || current === "BROKEN") return current;
     return "BACKUP";
   }
 
@@ -736,6 +741,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     const svg = renderStockCard(data, "domestic", {
       isStale: stale,
       connectionState,
+      isRefreshing: this.manualRefreshByAction.has(actionId),
     });
     // REQ-PERF-001-2.2.1: debounce setImage() IPC calls within 50ms window
     this.scheduleRender(actionId, action, svgToDataUri(svg, renderKey), renderKey);
