@@ -224,6 +224,13 @@ select:focus {
   display: block;
 }
 
+.sdpi-error {
+  display: none;
+  padding: 2px 8px 4px;
+  font-size: 11px;
+  color: #ff5252;
+}
+
 /* ─── 구분선 ─── */
 .sdpi-separator {
   height: 1px;

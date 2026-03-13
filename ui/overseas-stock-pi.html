@@ -4,350 +4,58 @@
   <meta charset="utf-8">
   <title>미국주식 시세 설정</title>
   <link rel="stylesheet" href="sdpi.css">
-  <style>
-    .sdpi-error {
-      color: #ff5252;
-      font-size: 11px;
-      padding: 2px 8px 4px;
-      display: none;
-    }
-  </style>
 </head>
 <body>
-  <div class="sdpi-wrapper">
-    <div class="sdpi-group">
-      <div class="sdpi-group-label">
-        <span>KIS API 설정</span>
-        <span class="sdpi-badge">모든 버튼 공통</span>
-      </div>
-      <div class="sdpi-note">
-        여기서 저장한 App Key, App Secret, 업데이트 방식은 모든 주식 버튼에 공통 적용됩니다.
-      </div>
-
-      <div class="sdpi-item">
-        <div class="sdpi-item-label">App Key</div>
-        <div class="sdpi-item-value">
-          <input type="password" id="appKey" placeholder="App Key 입력">
-        </div>
-      </div>
-
-      <div class="sdpi-item">
-        <div class="sdpi-item-label">App Secret</div>
-        <div class="sdpi-item-value">
-          <input type="password" id="appSecret" placeholder="App Secret 입력">
-        </div>
-      </div>
-
-      <div class="sdpi-help">
-        한국투자증권 Open API에서 발급받은 키를 입력하세요. 모든 버튼에 공통 적용됩니다.
-      </div>
-      <div class="sdpi-item">
-        <div class="sdpi-item-label">업데이트</div>
-        <div class="sdpi-item-value">
-          <select id="updateMode">
-            <option value="websocket">실시간 (WebSocket)</option>
-            <option value="hybrid">WebSocket + 쓰로틀</option>
-            <option value="poll">주기적 (폴링)</option>
-          </select>
-        </div>
-      </div>
-
-      <div id="pollIntervalRow" class="sdpi-item" style="display:none;">
-        <div class="sdpi-item-label">간격(초)</div>
-        <div class="sdpi-item-value">
-          <input type="number" id="pollIntervalSec" min="1" max="3600" placeholder="30">
-        </div>
-      </div>
-      <div id="pollIntervalError" class="sdpi-error">1~3600 사이의 숫자를 입력하세요</div>
-
-      <div id="throttleMsRow" class="sdpi-item" style="display:none;">
-        <div class="sdpi-item-label">쓰로틀(ms)</div>
-        <div class="sdpi-item-value">
-          <input type="number" id="throttleMs" min="200" placeholder="1000">
-        </div>
-      </div>
-      <div id="throttleMsError" class="sdpi-error">최솟값은 200ms입니다</div>
-
-      <div class="sdpi-actions">
-        <button type="button" id="saveGlobalButton" class="sdpi-button primary" disabled>공통 설정 저장</button>
-        <button type="button" id="testConnectionButton" class="sdpi-button secondary">연결 테스트</button>
-      </div>
-      <div id="globalStatusMessage" class="sdpi-status info"></div>
-    </div>
-
-    <div class="sdpi-group">
-      <div class="sdpi-group-label">
-        <span>미국주식 설정</span>
-        <span class="sdpi-badge">현재 버튼만</span>
-      </div>
-      <div class="sdpi-note">
-        이 섹션은 현재 선택한 버튼에만 저장됩니다. 유효한 값은 입력 후 자동 저장됩니다.
-      </div>
-
-      <div class="sdpi-item">
-        <div class="sdpi-item-label">티커 심볼</div>
-        <div class="sdpi-item-value">
-          <input type="text" id="ticker" placeholder="AAPL">
-        </div>
-      </div>
-      <div id="tickerError" class="sdpi-error">1~6자 영문 티커를 입력하세요 (예: AAPL)</div>
-      <div class="sdpi-help">미국주식 티커 심볼을 입력하세요 (예: AAPL, TSLA, MSFT)</div>
-
-      <div class="sdpi-item">
-        <div class="sdpi-item-label">거래소</div>
-        <div class="sdpi-item-value">
-          <select id="exchange">
-            <option value="NAS">NASDAQ</option>
-            <option value="NYS">NYSE</option>
-            <option value="AMS">AMEX</option>
-          </select>
-        </div>
-      </div>
-      <div class="sdpi-help">종목이 상장된 거래소를 선택하세요</div>
-
-      <div class="sdpi-item">
-        <div class="sdpi-item-label">종목명</div>
-        <div class="sdpi-item-value">
-          <input type="text" id="stockName" placeholder="Apple">
-        </div>
-      </div>
-      <div class="sdpi-help">Stream Deck 키에 표시할 종목명을 입력하세요</div>
-
-      <div id="actionStatusMessage" class="sdpi-status info"></div>
-    </div>
-  </div>
+  <div id="piRoot"></div>
 
   <script src="sdpi.js"></script>
+  <script src="stock-pi-shared.js"></script>
   <script>
-    var CONNECTION_TEST_REQUEST_TYPE = "kis.connectionTest";
-    var CONNECTION_TEST_RESULT_TYPE = "kis.connectionTestResult";
-    var ACTION_SAVE_DEBOUNCE_MS = 350;
-
-    var tickerValid = true;
-    var globalDirty = false;
-    var actionSaveTimer = null;
-    var pendingConnectionTestId = null;
-
-    function byId(id) {
-      return document.getElementById(id);
-    }
-
-    function setStatus(targetId, message, type) {
-      var el = byId(targetId);
-      if (!message) {
-        el.textContent = "";
-        el.className = "sdpi-status info";
-        return;
-      }
-
-      el.textContent = message;
-      el.className = "sdpi-status " + type + " visible";
-    }
-
-    function updateModeRows(mode) {
-      byId("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
-      byId("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
-    }
-
-    function getGlobalSettingsPayload() {
-      return {
-        appKey: byId("appKey").value.trim(),
-        appSecret: byId("appSecret").value.trim(),
-        updateMode: byId("updateMode").value,
-        pollIntervalSec: byId("pollIntervalSec").value || "30",
-        throttleMs: byId("throttleMs").value || "1000",
-      };
-    }
-
-    function setGlobalDirty(message) {
-      globalDirty = true;
-      updateGlobalControls();
-      if (message) {
-        setStatus("globalStatusMessage", message, "info");
-      }
-    }
-
-    function isGlobalSettingsValid() {
-      var mode = byId("updateMode").value;
-      var pollValid = mode !== "poll" || validatePollInterval(byId("pollIntervalSec").value);
-      var throttleValid = mode !== "hybrid" || validateThrottleMs(byId("throttleMs").value);
-      return pollValid && throttleValid;
-    }
-
-    function updateGlobalControls() {
-      byId("saveGlobalButton").disabled = !globalDirty || !isGlobalSettingsValid();
-      byId("testConnectionButton").disabled = pendingConnectionTestId !== null;
-    }
-
-    document.addEventListener("piDidReceiveGlobalSettings", function (evt) {
-      var settings = evt.detail || {};
-      byId("appKey").value = settings.appKey || "";
-      byId("appSecret").value = settings.appSecret || "";
-
-      var mode = settings.updateMode || "websocket";
-      byId("updateMode").value = mode;
-      byId("pollIntervalSec").value = settings.pollIntervalSec || "30";
-      byId("throttleMs").value = settings.throttleMs || "1000";
-      updateModeRows(mode);
-      globalDirty = false;
-      updateGlobalControls();
-    });
-
-    document.addEventListener("piDidReceiveSettings", function (evt) {
-      var settings = evt.detail || {};
-      byId("ticker").value = settings.ticker || "";
-      byId("exchange").value = settings.exchange || "NAS";
-      byId("stockName").value = settings.stockName || "";
-      validateTicker(settings.ticker || "");
-    });
-
-    function saveGlobalSettings() {
-      if (!isGlobalSettingsValid()) {
-        setStatus("globalStatusMessage", "공통 설정 값을 확인하세요.", "error");
-        updateGlobalControls();
-        return;
-      }
-
-      setGlobalSettings(getGlobalSettingsPayload());
-      globalDirty = false;
-      updateGlobalControls();
-      setStatus("globalStatusMessage", "공통 설정이 저장되었습니다. 모든 버튼에 적용됩니다.", "success");
-    }
-
-    function validateTicker(value) {
-      var isValid = /^[A-Z]{1,6}$/i.test(value);
-      var errorEl = byId("tickerError");
-      if (value.length > 0 && !isValid) {
-        errorEl.style.display = "block";
-        tickerValid = false;
-      } else {
-        errorEl.style.display = "none";
-        tickerValid = true;
-      }
-      return isValid || value.length === 0;
-    }
-
-    function validatePollInterval(value) {
-      var n = parseInt(value, 10);
-      var isValid = !isNaN(n) && n >= 1 && n <= 3600;
-      byId("pollIntervalError").style.display =
-        value.length > 0 && !isValid ? "block" : "none";
-      return isValid || value.length === 0;
-    }
-
-    function validateThrottleMs(value) {
-      var n = parseInt(value, 10);
-      var isValid = !isNaN(n) && n >= 200;
-      byId("throttleMsError").style.display =
-        value.length > 0 && !isValid ? "block" : "none";
-      return isValid || value.length === 0;
-    }
-
-    function saveActionSettings() {
-      if (!tickerValid) {
-        setStatus("actionStatusMessage", "티커는 1~6자 영문이어야 합니다.", "error");
-        return;
-      }
-
-      setSettings({
-        ticker: byId("ticker").value.trim().toUpperCase(),
-        exchange: byId("exchange").value,
-        stockName: byId("stockName").value.trim(),
-      });
-      setStatus("actionStatusMessage", "현재 버튼 설정이 저장되었습니다.", "success");
-    }
-
-    function queueActionSave() {
-      if (!tickerValid) {
-        if (actionSaveTimer) {
-          clearTimeout(actionSaveTimer);
-          actionSaveTimer = null;
+    window.KISStockPI.bootstrap({
+      actionTitle: "미국주식 설정",
+      fields: [
+        {
+          id: "ticker",
+          label: "티커 심볼",
+          placeholder: "AAPL",
+          help: "미국주식 티커 심볼을 입력하세요 (예: AAPL, TSLA, MSFT)",
+          errorMessage: "1~6자 영문 티커를 입력하세요 (예: AAPL)",
+          invalidStatusMessage: "티커는 1~6자 영문이어야 합니다.",
+          validate: function (value) {
+            return /^[A-Z]{1,6}$/i.test(value);
+          },
+          normalizeInput: function (value) {
+            return value.toUpperCase();
+          },
+          normalizeReceived: function (value) {
+            return value.toUpperCase();
+          },
+          serialize: function (value) {
+            return value.trim().toUpperCase();
+          }
+        },
+        {
+          id: "exchange",
+          type: "select",
+          label: "거래소",
+          help: "종목이 상장된 거래소를 선택하세요",
+          defaultValue: "NAS",
+          options: [
+            { value: "NAS", label: "NASDAQ" },
+            { value: "NYS", label: "NYSE" },
+            { value: "AMS", label: "AMEX" }
+          ]
+        },
+        {
+          id: "stockName",
+          label: "종목명",
+          placeholder: "Apple",
+          help: "Stream Deck 키에 표시할 종목명을 입력하세요",
+          serialize: function (value) {
+            return value.trim();
+          }
         }
-        setStatus("actionStatusMessage", "티커는 1~6자 영문이어야 합니다.", "error");
-        return;
-      }
-
-      if (actionSaveTimer) {
-        clearTimeout(actionSaveTimer);
-      }
-      setStatus("actionStatusMessage", "현재 버튼 설정을 저장하는 중입니다...", "info");
-      actionSaveTimer = setTimeout(function () {
-        actionSaveTimer = null;
-        saveActionSettings();
-      }, ACTION_SAVE_DEBOUNCE_MS);
-    }
-
-    function runConnectionTest() {
-      if (pendingConnectionTestId !== null) return;
-
-      pendingConnectionTestId = "connection-test-" + Date.now();
-      updateGlobalControls();
-      byId("testConnectionButton").textContent = "연결 확인 중...";
-      setStatus("globalStatusMessage", "KIS API 자격증명을 확인하는 중입니다...", "info");
-      sendToPlugin({
-        type: CONNECTION_TEST_REQUEST_TYPE,
-        requestId: pendingConnectionTestId,
-        appKey: byId("appKey").value.trim(),
-        appSecret: byId("appSecret").value.trim(),
-      });
-    }
-
-    document.addEventListener("piDidReceiveMessage", function (evt) {
-      var payload = evt.detail || {};
-      if (payload.type !== CONNECTION_TEST_RESULT_TYPE) {
-        return;
-      }
-      if (payload.requestId && pendingConnectionTestId && payload.requestId !== pendingConnectionTestId) {
-        return;
-      }
-
-      pendingConnectionTestId = null;
-      byId("testConnectionButton").textContent = "연결 테스트";
-      updateGlobalControls();
-      setStatus("globalStatusMessage", payload.message, payload.ok ? "success" : "error");
-    });
-
-    byId("saveGlobalButton").addEventListener("click", saveGlobalSettings);
-    byId("testConnectionButton").addEventListener("click", runConnectionTest);
-
-    byId("appKey").addEventListener("input", function () {
-      setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
-    });
-    byId("appSecret").addEventListener("input", function () {
-      setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
-    });
-
-    byId("updateMode").addEventListener("change", function () {
-      updateModeRows(this.value);
-      setGlobalDirty("업데이트 방식이 변경되었습니다. 저장 후 모든 버튼에 반영됩니다.");
-    });
-    byId("pollIntervalSec").addEventListener("input", function () {
-      validatePollInterval(this.value);
-      setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
-    });
-    byId("throttleMs").addEventListener("input", function () {
-      validateThrottleMs(this.value);
-      setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
-    });
-    byId("throttleMs").addEventListener("blur", function () {
-      var n = parseInt(this.value, 10);
-      if (!isNaN(n) && n < 200) {
-        this.value = "200";
-        byId("throttleMsError").style.display = "none";
-        setGlobalDirty("쓰로틀 값을 200ms로 보정했습니다. 저장 버튼으로 적용하세요.");
-      }
-    });
-
-    byId("ticker").addEventListener("input", function () {
-      this.value = this.value.toUpperCase();
-      validateTicker(this.value);
-      queueActionSave();
-    });
-    byId("exchange").addEventListener("change", function () {
-      queueActionSave();
-    });
-    byId("stockName").addEventListener("input", function () {
-      queueActionSave();
+      ]
     });
   </script>
 </body>

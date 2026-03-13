@@ -1,25 +1,50 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorType } from "../types/index.js";
 
-const onDidReceiveGlobalSettings = vi.fn();
-const onSendToPlugin = vi.fn();
-const registerAction = vi.fn();
-const getGlobalSettings = vi.fn();
-const setGlobalSettings = vi.fn();
-const connect = vi.fn();
-const setLevel = vi.fn();
-const sendToPropertyInspector = vi.fn();
+const {
+  onDidReceiveGlobalSettings,
+  onDidAppear,
+  onSendToPlugin,
+  registerAction,
+  getGlobalSettings,
+  setGlobalSettings,
+  connect,
+  setLevel,
+  clearAccessTokenCache,
+  hydrateAccessTokenFromGlobalSettings,
+  onAccessTokenUpdated,
+  clearCredentials,
+  updateSettings,
+  runConnectionTest,
+} = vi.hoisted(() => ({
+  onDidReceiveGlobalSettings: vi.fn(),
+  onDidAppear: vi.fn(),
+  onSendToPlugin: vi.fn(),
+  registerAction: vi.fn(),
+  getGlobalSettings: vi.fn(),
+  setGlobalSettings: vi.fn(),
+  connect: vi.fn(),
+  setLevel: vi.fn(),
+  clearAccessTokenCache: vi.fn(),
+  hydrateAccessTokenFromGlobalSettings: vi.fn(),
+  onAccessTokenUpdated: vi.fn(),
+  clearCredentials: vi.fn(),
+  updateSettings: vi.fn(),
+  runConnectionTest: vi.fn(),
+}));
 
-const clearAccessTokenCache = vi.fn();
-const hydrateAccessTokenFromGlobalSettings = vi.fn();
-const onAccessTokenUpdated = vi.fn();
-const getApprovalKey = vi.fn();
-const clearCredentials = vi.fn();
-const updateSettings = vi.fn();
+type PropertyInspectorMock = {
+  action: { id: string };
+  sendToPropertyInspector: ReturnType<typeof vi.fn>;
+};
 
-let currentPropertyInspector:
-  | { sendToPropertyInspector: typeof sendToPropertyInspector }
-  | undefined;
+type ActionMock = {
+  id: string;
+  manifestId: string;
+  getSettings: ReturnType<typeof vi.fn>;
+};
+
+let currentPropertyInspector: PropertyInspectorMock | undefined;
 
 vi.mock("@elgato/streamdeck", () => ({
   default: {
@@ -33,6 +58,7 @@ vi.mock("@elgato/streamdeck", () => ({
       registerAction,
     },
     ui: {
+      onDidAppear,
       onSendToPlugin,
       get current() {
         return currentPropertyInspector;
@@ -68,9 +94,12 @@ vi.mock("../kis/settings-store.js", () => ({
 
 vi.mock("../kis/auth.js", () => ({
   clearAccessTokenCache,
-  getApprovalKey,
   hydrateAccessTokenFromGlobalSettings,
   onAccessTokenUpdated,
+}));
+
+vi.mock("../property-inspector/connection-test.js", () => ({
+  runConnectionTest,
 }));
 
 vi.mock("../utils/logger.js", () => ({
@@ -82,153 +111,237 @@ vi.mock("../utils/logger.js", () => ({
   },
 }));
 
+function createAction(
+  id: string,
+  manifestId: string,
+  settings: Record<string, unknown>
+): ActionMock {
+  return {
+    id,
+    manifestId,
+    getSettings: vi.fn().mockResolvedValue(settings),
+  };
+}
+
 async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+
+  return { promise, resolve, reject };
+}
+
 describe("plugin property inspector messaging", () => {
   beforeEach(() => {
     vi.resetModules();
     onDidReceiveGlobalSettings.mockReset();
+    onDidAppear.mockReset();
     onSendToPlugin.mockReset();
     registerAction.mockReset();
     getGlobalSettings.mockReset();
     setGlobalSettings.mockReset();
     connect.mockReset();
     setLevel.mockReset();
-    sendToPropertyInspector.mockReset();
     clearAccessTokenCache.mockReset();
     hydrateAccessTokenFromGlobalSettings.mockReset();
     onAccessTokenUpdated.mockReset();
-    getApprovalKey.mockReset();
     clearCredentials.mockReset();
     updateSettings.mockReset();
+    runConnectionTest.mockReset();
 
-    currentPropertyInspector = { sendToPropertyInspector };
+    currentPropertyInspector = undefined;
 
     connect.mockResolvedValue(undefined);
     getGlobalSettings.mockResolvedValue({});
-    getApprovalKey.mockResolvedValue("approval-key");
-    onDidReceiveGlobalSettings.mockImplementation((handler: unknown) => handler);
-    onSendToPlugin.mockImplementation((handler: unknown) => handler);
-  });
-
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("validates explicit credentials from the PI and responds with success", async () => {
-    await import("../plugin.js");
-    await flushMicrotasks();
-
-    const handler = onSendToPlugin.mock.calls[0]?.[0] as (ev: unknown) => void;
-    expect(typeof handler).toBe("function");
-
-    handler({
-      payload: {
-        type: "kis.connectionTest",
-        requestId: "req-1",
-        appKey: " app-key ",
-        appSecret: " secret-key ",
-      },
-    });
-    await flushMicrotasks();
-
-    expect(getApprovalKey).toHaveBeenCalledWith({
-      appKey: "app-key",
-      appSecret: "secret-key",
-    });
-    expect(sendToPropertyInspector).toHaveBeenCalledWith({
+    runConnectionTest.mockResolvedValue({
       type: "kis.connectionTestResult",
       requestId: "req-1",
       ok: true,
-      errorType: undefined,
-      message: "KIS API 자격증명을 확인했습니다.",
+      message: "ok",
     });
+    onDidReceiveGlobalSettings.mockImplementation((handler: unknown) => handler);
+    onDidAppear.mockImplementation((handler: unknown) => handler);
+    onSendToPlugin.mockImplementation((handler: unknown) => handler);
   });
 
-  it("falls back to saved global settings when the payload omits credentials", async () => {
-    getGlobalSettings.mockResolvedValue({
-      appKey: "saved-key",
-      appSecret: "saved-secret",
-    });
-
+  it("passes the PI payload into the connection test and replies to the matching inspector", async () => {
     await import("../plugin.js");
     await flushMicrotasks();
 
-    getApprovalKey.mockClear();
-    sendToPropertyInspector.mockClear();
+    const inspectSend = vi.fn();
+    currentPropertyInspector = {
+      action: { id: "action-1" },
+      sendToPropertyInspector: inspectSend,
+    };
 
-    const handler = onSendToPlugin.mock.calls[0]?.[0] as (ev: unknown) => void;
+    const handler = onSendToPlugin.mock.calls[0]?.[0] as (ev: {
+      action: ActionMock;
+      payload: Record<string, unknown>;
+    }) => void;
+
     handler({
+      action: createAction(
+        "action-1",
+        "com.kis.streamdeck.domestic-stock",
+        { stockCode: "005930" }
+      ),
       payload: {
         type: "kis.connectionTest",
-        requestId: "req-2",
+        requestId: "req-1",
+        stockCode: "005930",
       },
     });
     await flushMicrotasks();
 
-    expect(getApprovalKey).toHaveBeenCalledWith({
-      appKey: "saved-key",
-      appSecret: "saved-secret",
-    });
-    expect(sendToPropertyInspector).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "kis.connectionTestResult",
-        requestId: "req-2",
-        ok: true,
-      })
+    expect(runConnectionTest).toHaveBeenCalledWith(
+      {
+        type: "kis.connectionTest",
+        requestId: "req-1",
+        stockCode: "005930",
+      },
+      {},
+      {
+        actionManifestId: "com.kis.streamdeck.domestic-stock",
+        actionSettings: { stockCode: "005930" },
+      }
     );
-  });
-
-  it("returns a no-credential error when neither payload nor globals contain credentials", async () => {
-    await import("../plugin.js");
-    await flushMicrotasks();
-
-    const handler = onSendToPlugin.mock.calls[0]?.[0] as (ev: unknown) => void;
-    handler({
-      payload: {
-        type: "kis.connectionTest",
-        requestId: "req-3",
-      },
-    });
-    await flushMicrotasks();
-
-    expect(getApprovalKey).not.toHaveBeenCalled();
-    expect(sendToPropertyInspector).toHaveBeenCalledWith({
+    expect(inspectSend).toHaveBeenCalledWith({
       type: "kis.connectionTestResult",
-      requestId: "req-3",
-      ok: false,
-      errorType: ErrorType.NO_CREDENTIAL,
-      message: "App Key와 App Secret을 입력한 뒤 다시 시도하세요.",
+      requestId: "req-1",
+      ok: true,
+      message: "ok",
     });
   });
 
-  it("maps approval key auth failures to AUTH_FAIL", async () => {
-    getApprovalKey.mockRejectedValue(new Error("approval_key 발급 실패 (401): invalid"));
+  it("queues the response when ui.current changes and flushes it when the origin inspector returns", async () => {
+    const deferred = createDeferred<{
+      type: string;
+      requestId: string;
+      ok: boolean;
+      message: string;
+    }>();
+    runConnectionTest.mockReturnValue(deferred.promise);
 
     await import("../plugin.js");
     await flushMicrotasks();
 
-    const handler = onSendToPlugin.mock.calls[0]?.[0] as (ev: unknown) => void;
+    const firstInspectorSend = vi.fn();
+    const secondInspectorSend = vi.fn();
+
+    currentPropertyInspector = {
+      action: { id: "action-1" },
+      sendToPropertyInspector: firstInspectorSend,
+    };
+
+    const handler = onSendToPlugin.mock.calls[0]?.[0] as (ev: {
+      action: ActionMock;
+      payload: Record<string, unknown>;
+    }) => void;
+
     handler({
+      action: createAction(
+        "action-1",
+        "com.kis.streamdeck.domestic-stock",
+        { stockCode: "005930" }
+      ),
       payload: {
         type: "kis.connectionTest",
-        requestId: "req-4",
-        appKey: "bad-key",
-        appSecret: "bad-secret",
+        requestId: "req-routing",
       },
     });
     await flushMicrotasks();
 
-    expect(sendToPropertyInspector).toHaveBeenCalledWith({
+    currentPropertyInspector = {
+      action: { id: "action-2" },
+      sendToPropertyInspector: secondInspectorSend,
+    };
+
+    deferred.resolve({
       type: "kis.connectionTestResult",
-      requestId: "req-4",
+      requestId: "req-routing",
+      ok: true,
+      message: "ok",
+    });
+    await flushMicrotasks();
+
+    expect(firstInspectorSend).not.toHaveBeenCalled();
+    expect(secondInspectorSend).not.toHaveBeenCalled();
+
+    currentPropertyInspector = {
+      action: { id: "action-1" },
+      sendToPropertyInspector: firstInspectorSend,
+    };
+
+    const didAppearHandler = onDidAppear.mock.calls[0]?.[0] as (ev: {
+      action: { id: string };
+    }) => void;
+    didAppearHandler({ action: { id: "action-1" } });
+    await flushMicrotasks();
+
+    expect(firstInspectorSend).toHaveBeenCalledWith({
+      type: "kis.connectionTestResult",
+      requestId: "req-routing",
+      ok: true,
+      message: "ok",
+    });
+    expect(secondInspectorSend).not.toHaveBeenCalled();
+  });
+
+  it("queues a network error when the inspector is absent and flushes it on appear", async () => {
+    runConnectionTest.mockRejectedValue(new Error("boom"));
+
+    await import("../plugin.js");
+    await flushMicrotasks();
+
+    const inspectSend = vi.fn();
+    currentPropertyInspector = undefined;
+
+    const handler = onSendToPlugin.mock.calls[0]?.[0] as (ev: {
+      action: ActionMock;
+      payload: Record<string, unknown>;
+    }) => void;
+
+    handler({
+      action: createAction(
+        "action-1",
+        "com.kis.streamdeck.overseas-stock",
+        { ticker: "AAPL", exchange: "NAS" }
+      ),
+      payload: {
+        type: "kis.connectionTest",
+        requestId: "req-error",
+      },
+    });
+    await flushMicrotasks();
+
+    expect(inspectSend).not.toHaveBeenCalled();
+
+    currentPropertyInspector = {
+      action: { id: "action-1" },
+      sendToPropertyInspector: inspectSend,
+    };
+
+    const didAppearHandler = onDidAppear.mock.calls[0]?.[0] as (ev: {
+      action: { id: string };
+    }) => void;
+    didAppearHandler({ action: { id: "action-1" } });
+    await flushMicrotasks();
+
+    expect(inspectSend).toHaveBeenCalledWith({
+      type: "kis.connectionTestResult",
+      requestId: "req-error",
       ok: false,
-      errorType: ErrorType.AUTH_FAIL,
-      message: "App Key 또는 App Secret을 확인하세요.",
+      errorType: ErrorType.NETWORK_ERROR,
+      message: "연결 테스트를 완료하지 못했습니다. 잠시 후 다시 시도하세요.",
     });
   });
 });

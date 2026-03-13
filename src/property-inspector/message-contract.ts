@@ -1,4 +1,9 @@
-import { ErrorType, type GlobalSettings, type JsonValue } from "../types/index.js";
+import {
+  ErrorType,
+  type GlobalSettings,
+  type JsonValue,
+  type OverseasExchange,
+} from "../types/index.js";
 
 export const CONNECTION_TEST_REQUEST_TYPE = "kis.connectionTest";
 export const CONNECTION_TEST_RESULT_TYPE = "kis.connectionTestResult";
@@ -8,6 +13,9 @@ export type ConnectionTestRequestPayload = {
   requestId?: string;
   appKey?: string;
   appSecret?: string;
+  stockCode?: string;
+  ticker?: string;
+  exchange?: OverseasExchange;
 };
 
 export type ConnectionTestResultPayload = {

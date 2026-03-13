@@ -93,6 +93,18 @@ export async function fetchDomesticPrice(
   const settings = await getSettingsWithWait();
   if (!settings) return null;
 
+  return fetchDomesticPriceForSettings(settings, stockCode, displayName);
+}
+
+export async function fetchDomesticPriceForSettings(
+  settings: GlobalSettings,
+  stockCode: string,
+  displayName: string,
+): Promise<StockData | null> {
+  if (!settings.appKey?.trim() || !settings.appSecret?.trim()) {
+    return null;
+  }
+
   let response: Response | undefined;
   try {
     const token = await getAccessToken(settings);
@@ -170,6 +182,19 @@ export async function fetchOverseasPrice(
 ): Promise<StockData | null> {
   const settings = await getSettingsWithWait();
   if (!settings) return null;
+
+  return fetchOverseasPriceForSettings(settings, exchange, ticker, displayName);
+}
+
+export async function fetchOverseasPriceForSettings(
+  settings: GlobalSettings,
+  exchange: string,
+  ticker: string,
+  displayName: string,
+): Promise<StockData | null> {
+  if (!settings.appKey?.trim() || !settings.appSecret?.trim()) {
+    return null;
+  }
 
   let response: Response | undefined;
   try {

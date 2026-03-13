@@ -33,17 +33,80 @@ function credentialKey(settings: { appKey: string; appSecret: string }): string 
 let lastAppliedCredentialKey: string | null = null;
 let isInternalGlobalSettingsWrite = false;
 
-async function sendToCurrentPropertyInspector(
+type PropertyInspectorRef = {
+  action?: { id: string };
+  sendToPropertyInspector(payload: ConnectionTestResultPayload): Promise<void>;
+};
+
+const pendingPropertyInspectorPayloads = new Map<
+  string,
+  ConnectionTestResultPayload[]
+>();
+
+function getMatchingPropertyInspector(actionId: string): PropertyInspectorRef | undefined {
+  const current = streamDeck.ui.current as PropertyInspectorRef | undefined;
+  return current?.action?.id === actionId ? current : undefined;
+}
+
+function enqueuePropertyInspectorPayload(
+  actionId: string,
   payload: ConnectionTestResultPayload
-): Promise<void> {
-  const inspector = streamDeck.ui.current;
-  if (!inspector) {
-    logger.warn("[Plugin] 응답할 Property Inspector가 없습니다");
+): void {
+  const queue = pendingPropertyInspectorPayloads.get(actionId);
+  if (queue) {
+    queue.push(payload);
     return;
   }
 
-  await inspector.sendToPropertyInspector(payload);
+  pendingPropertyInspectorPayloads.set(actionId, [payload]);
 }
+
+async function flushPropertyInspectorPayloads(actionId: string): Promise<void> {
+  const queue = pendingPropertyInspectorPayloads.get(actionId);
+  if (!queue?.length) {
+    return;
+  }
+
+  while (queue.length > 0) {
+    const inspector = getMatchingPropertyInspector(actionId);
+    if (!inspector) {
+      return;
+    }
+
+    try {
+      await inspector.sendToPropertyInspector(queue[0]);
+      queue.shift();
+    } catch (error) {
+      logger.debug(
+        `[Plugin] Property Inspector 응답 전송을 보류합니다: actionId=${actionId}`,
+        error
+      );
+      return;
+    }
+  }
+
+  pendingPropertyInspectorPayloads.delete(actionId);
+}
+
+async function queuePropertyInspectorPayload(
+  actionId: string,
+  payload: ConnectionTestResultPayload
+): Promise<void> {
+  enqueuePropertyInspectorPayload(actionId, payload);
+
+  if (!getMatchingPropertyInspector(actionId)) {
+    logger.warn(
+      `[Plugin] Property Inspector 응답을 대기열에 보관합니다: actionId=${actionId}`
+    );
+    return;
+  }
+
+  await flushPropertyInspectorPayloads(actionId);
+}
+
+streamDeck.ui.onDidAppear((ev) => {
+  void flushPropertyInspectorPayloads(ev.action.id);
+});
 
 /**
  * 전역 설정 적용 (공통)
@@ -128,13 +191,21 @@ streamDeck.ui.onSendToPlugin((ev) => {
 
   void (async () => {
     try {
-      const globalSettings =
-        await streamDeck.settings.getGlobalSettings<GlobalSettings>();
-      const result = await runConnectionTest(payload, globalSettings);
-      await sendToCurrentPropertyInspector(result);
+      const [globalSettings, actionSettings] = await Promise.all([
+        streamDeck.settings.getGlobalSettings<GlobalSettings>(),
+        ev.action.getSettings().catch((error) => {
+          logger.debug("[Plugin] 액션 설정 조회 실패, stock 검증은 생략될 수 있습니다:", error);
+          return undefined;
+        }),
+      ]);
+      const result = await runConnectionTest(payload, globalSettings, {
+        actionManifestId: ev.action.manifestId,
+        actionSettings,
+      });
+      await queuePropertyInspectorPayload(ev.action.id, result);
     } catch (error) {
       logger.error("[Plugin] Property Inspector 메시지 처리 실패:", error);
-      await sendToCurrentPropertyInspector({
+      await queuePropertyInspectorPayload(ev.action.id, {
         type: CONNECTION_TEST_RESULT_TYPE,
         requestId: payload.requestId,
         ok: false,

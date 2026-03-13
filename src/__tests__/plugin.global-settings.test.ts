@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const onDidReceiveGlobalSettings = vi.fn();
+const onDidAppear = vi.fn();
 const onSendToPlugin = vi.fn();
 const registerAction = vi.fn();
 const getGlobalSettings = vi.fn();
@@ -13,6 +14,7 @@ const hydrateAccessTokenFromGlobalSettings = vi.fn();
 const onAccessTokenUpdated = vi.fn();
 const clearCredentials = vi.fn();
 const updateSettings = vi.fn();
+const runConnectionTest = vi.fn();
 
 vi.mock("@elgato/streamdeck", () => ({
   default: {
@@ -26,6 +28,7 @@ vi.mock("@elgato/streamdeck", () => ({
       registerAction,
     },
     ui: {
+      onDidAppear,
       onSendToPlugin,
       current: undefined,
     },
@@ -63,6 +66,10 @@ vi.mock("../kis/auth.js", () => ({
   onAccessTokenUpdated,
 }));
 
+vi.mock("../property-inspector/connection-test.js", () => ({
+  runConnectionTest,
+}));
+
 vi.mock("../utils/logger.js", () => ({
   logger: {
     info: vi.fn(),
@@ -76,6 +83,7 @@ describe("plugin global settings handling", () => {
   beforeEach(() => {
     vi.resetModules();
     onDidReceiveGlobalSettings.mockReset();
+    onDidAppear.mockReset();
     registerAction.mockReset();
     onSendToPlugin.mockReset();
     getGlobalSettings.mockReset();
@@ -91,6 +99,7 @@ describe("plugin global settings handling", () => {
     connect.mockResolvedValue(undefined);
     getGlobalSettings.mockResolvedValue({});
     onDidReceiveGlobalSettings.mockImplementation((handler: unknown) => handler);
+    onDidAppear.mockImplementation((handler: unknown) => handler);
     onSendToPlugin.mockImplementation((handler: unknown) => handler);
   });
 
