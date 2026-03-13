@@ -39,6 +39,9 @@ function applyGlobalSettings(settings: GlobalSettings): void {
   kisGlobalSettings.set(settings);
 
   if (!hasCredentials(settings)) {
+    clearAccessTokenCache();
+    lastAppliedCredentialKey = null;
+    kisWebSocket.clearCredentials();
     return;
   }
 

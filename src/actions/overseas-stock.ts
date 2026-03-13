@@ -235,9 +235,9 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
         entry.onSuccess,
         entry.onConnectionState
       );
-      this.resetActionRuntime(ev.action.id);
       logger.info(`[미국] 구독 해제: ${entry.trKey}`);
     }
+    this.resetActionRuntime(ev.action.id);
   }
 
   override async onDidReceiveSettings(
@@ -547,7 +547,10 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
       const data = this.lastDataByAction.get(actionId);
       const action = this.actionRefMap.get(actionId);
       if (data && action) {
-        this.renderStockData(actionId, action, data, { source: "live" }).catch((err) => {
+        this.renderStockData(actionId, action, data, {
+          source: "live",
+          preserveTimestamp: true,
+        }).catch((err) => {
           logger.debug(`[미국] hybrid flush 렌더 실패: ${err}`);
         });
       }
@@ -680,7 +683,10 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     if (!data || !action) return;
     const source =
       this.connectionStateByAction.get(actionId) === "LIVE" ? "live" : "backup";
-    this.renderStockData(actionId, action, data, { source }).catch((err) => {
+    this.renderStockData(actionId, action, data, {
+      source,
+      preserveTimestamp: true,
+    }).catch((err) => {
       logger.debug(`[미국] 마지막 데이터 재렌더 실패: ${err}`);
     });
   }
@@ -700,10 +706,12 @@ export class OverseasStockAction extends SingletonAction<OverseasStockSettings> 
     actionId: string,
     action: { setImage(image: string): Promise<void> | void },
     data: StockData,
-    options: { source: DataSource; force?: boolean }
+    options: { source: DataSource; force?: boolean; preserveTimestamp?: boolean }
   ): Promise<void> {
     this.lastDataByAction.set(actionId, data);
-    this.lastDataAtByAction.set(actionId, Date.now());
+    if (!options.preserveTimestamp) {
+      this.lastDataAtByAction.set(actionId, Date.now());
+    }
 
     const targetState = this.getRenderConnectionState(actionId, options.source);
     if (targetState) {

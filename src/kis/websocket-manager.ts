@@ -179,6 +179,17 @@ class KISWebSocketManager {
     }
   }
 
+  clearCredentials(): void {
+    this.approvalKey = null;
+    this.globalSettings = null;
+    this.reconnectAttempts = 0;
+    this.isConnecting = false;
+    this.connectPromise = null;
+    this.markAllSubscriptionsDisconnected();
+    this.notifyConnectionStateForAll("BROKEN");
+    this.safeDisconnect();
+  }
+
   destroy(): void {
     this.subscriptions.clear();
     this.safeDisconnect();

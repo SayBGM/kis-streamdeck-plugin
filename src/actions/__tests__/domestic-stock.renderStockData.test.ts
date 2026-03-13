@@ -70,10 +70,14 @@ type PrivateAction = {
     actionId: string,
     action: { setImage(image: string): Promise<void> | void; id?: string },
     data: StockData,
-    options: { source: "live" | "backup"; force?: boolean }
+    options: { source: "live" | "backup"; force?: boolean; preserveTimestamp?: boolean }
   ) => Promise<void>;
+  renderLastDataIfPossible: (actionId: string) => void;
   connectionStateByAction: Map<string, string>;
   lastRenderKeyByAction: Map<string, string>;
+  lastDataAtByAction: Map<string, number>;
+  lastDataByAction: Map<string, StockData>;
+  actionRefMap: Map<string, { setImage(image: string): Promise<void> | void; id?: string }>;
   pendingRenderByAction: Map<string, { action: { setImage(image: string): Promise<void> | void }; dataUri: string; renderKey: string }>;
   flushTimer: ReturnType<typeof setTimeout> | null;
   flushPendingRenders: () => void;
@@ -180,5 +184,24 @@ describe("DomesticStockAction.renderStockData() — characterization tests", () 
     vi.advanceTimersByTime(50);
 
     expect(mockAction.setImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaying cached data preserves the original data timestamp", async () => {
+    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
+    const data = makeStockData(75400);
+    action.connectionStateByAction.set("action-1", "LIVE");
+
+    await action.renderStockData("action-1", mockAction, data, { source: "live" });
+    const firstTimestamp = action.lastDataAtByAction.get("action-1");
+
+    expect(firstTimestamp).toBeDefined();
+
+    action.lastDataByAction.set("action-1", data);
+    action.actionRefMap.set("action-1", mockAction);
+
+    vi.advanceTimersByTime(5_000);
+    action.renderLastDataIfPossible("action-1");
+
+    expect(action.lastDataAtByAction.get("action-1")).toBe(firstTimestamp);
   });
 });
