@@ -2,11 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { StockData } from "../../types/index.js";
 
 vi.mock("../../utils/timezone.js", () => ({
+  getETDayOfWeek: vi.fn(() => 1),
   getETTotalMinutes: vi.fn(() => 600),
+  getKSTDayOfWeek: vi.fn(() => 1),
   getKSTTotalMinutes: vi.fn(() => 600),
 }));
 
-import { renderConnectedCard, renderStockCard } from "../stock-card.js";
+import * as timezone from "../../utils/timezone.js";
+import { renderConnectedCard, renderStockCard, renderWaitingCard } from "../stock-card.js";
 
 const sampleData: StockData = {
   ticker: "AAPL",
@@ -35,6 +38,7 @@ describe("stock-card rendering", () => {
     });
 
     expect(svg).toContain("새로고침 중");
+    expect(svg).toContain('data-role="loading-indicator"');
   });
 
   it("renders clearer connected copy on waiting-for-trades cards", () => {
@@ -42,5 +46,24 @@ describe("stock-card rendering", () => {
 
     expect(svg).toContain("실시간 연결됨");
     expect(svg).toContain("데이터 대기");
+    expect(svg).toContain('data-role="loading-indicator"');
+  });
+
+  it("renders a loading indicator on waiting cards", () => {
+    const svg = renderWaitingCard("Apple", "overseas");
+
+    expect(svg).toContain("초기화 중");
+    expect(svg).toContain('data-role="loading-indicator"');
+  });
+
+  it("treats weekend sessions as closed instead of regular", () => {
+    vi.mocked(timezone.getETDayOfWeek).mockReturnValue(0);
+
+    const svg = renderStockCard(sampleData, "overseas", {
+      connectionState: "LIVE",
+    });
+
+    expect(svg).toContain("마감");
+    expect(svg).not.toContain("정규");
   });
 });

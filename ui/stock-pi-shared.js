@@ -1,6 +1,4 @@
 (function () {
-  var CONNECTION_TEST_REQUEST_TYPE = "kis.connectionTest";
-  var CONNECTION_TEST_RESULT_TYPE = "kis.connectionTestResult";
   var ACTION_SAVE_DEBOUNCE_MS = 350;
   var DEFAULT_ACTION_BADGE = "현재 버튼만";
   var DEFAULT_ACTION_NOTE =
@@ -162,7 +160,6 @@
       '<div id="throttleMsError" class="sdpi-error">최솟값은 200ms입니다</div>',
       '<div class="sdpi-actions">',
       '<button type="button" id="saveGlobalButton" class="sdpi-button primary" disabled>공통 설정 저장</button>',
-      '<button type="button" id="testConnectionButton" class="sdpi-button secondary">연결 테스트</button>',
       "</div>",
       '<div id="globalStatusMessage" class="sdpi-status info"></div>',
       "</div>",
@@ -187,7 +184,6 @@
     this.config = config;
     this.globalDirty = false;
     this.actionSaveTimer = null;
-    this.pendingConnectionTestId = null;
     this.actionFieldValidity = {};
   }
 
@@ -261,7 +257,6 @@
   StockPropertyInspector.prototype.updateGlobalControls = function () {
     byId("saveGlobalButton").disabled =
       !this.globalDirty || !this.isGlobalSettingsValid();
-    byId("testConnectionButton").disabled = this.pendingConnectionTestId !== null;
   };
 
   StockPropertyInspector.prototype.getFieldSettingKey = function (field) {
@@ -362,16 +357,6 @@
     return payload;
   };
 
-  StockPropertyInspector.prototype.getConnectionTestActionPayload = function () {
-    var actionPayload = this.buildActionSettingsPayload();
-
-    return {
-      stockCode: actionPayload.stockCode,
-      ticker: actionPayload.ticker,
-      exchange: actionPayload.exchange,
-    };
-  };
-
   StockPropertyInspector.prototype.saveGlobalSettings = function () {
     if (!this.isGlobalSettingsValid()) {
       this.setStatus("globalStatusMessage", "공통 설정 값을 확인하세요.", "error");
@@ -442,45 +427,6 @@
     }, ACTION_SAVE_DEBOUNCE_MS);
   };
 
-  StockPropertyInspector.prototype.runConnectionTest = function () {
-    var actionPayload;
-    var invalidField;
-
-    if (this.pendingConnectionTestId !== null) {
-      return;
-    }
-
-    invalidField = this.findFirstInvalidActionField();
-    if (invalidField) {
-      this.setStatus(
-        "actionStatusMessage",
-        invalidField.invalidStatusMessage || "입력 값을 확인하세요.",
-        "error"
-      );
-      return;
-    }
-
-    this.pendingConnectionTestId = "connection-test-" + Date.now();
-    actionPayload = this.getConnectionTestActionPayload();
-    this.updateGlobalControls();
-    byId("testConnectionButton").textContent = "연결 확인 중...";
-    this.setStatus(
-      "globalStatusMessage",
-      "KIS API 연결과 현재 버튼 설정을 확인하는 중입니다...",
-      "info"
-    );
-
-    sendToPlugin({
-      type: CONNECTION_TEST_REQUEST_TYPE,
-      requestId: this.pendingConnectionTestId,
-      appKey: byId("appKey").value.trim(),
-      appSecret: byId("appSecret").value.trim(),
-      stockCode: actionPayload.stockCode,
-      ticker: actionPayload.ticker,
-      exchange: actionPayload.exchange,
-    });
-  };
-
   StockPropertyInspector.prototype.applyGlobalSettings = function (settings) {
     var mode = settings.updateMode || "websocket";
 
@@ -522,35 +468,8 @@
       inspector.applyActionSettings(evt.detail || {});
     });
 
-    document.addEventListener("piDidReceiveMessage", function (evt) {
-      var payload = evt.detail || {};
-
-      if (payload.type !== CONNECTION_TEST_RESULT_TYPE) {
-        return;
-      }
-      if (
-        payload.requestId &&
-        inspector.pendingConnectionTestId &&
-        payload.requestId !== inspector.pendingConnectionTestId
-      ) {
-        return;
-      }
-
-      inspector.pendingConnectionTestId = null;
-      byId("testConnectionButton").textContent = "연결 테스트";
-      inspector.updateGlobalControls();
-      inspector.setStatus(
-        "globalStatusMessage",
-        payload.message,
-        payload.ok ? "success" : "error"
-      );
-    });
-
     byId("saveGlobalButton").addEventListener("click", function () {
       inspector.saveGlobalSettings();
-    });
-    byId("testConnectionButton").addEventListener("click", function () {
-      inspector.runConnectionTest();
     });
 
     byId("appKey").addEventListener("input", function () {

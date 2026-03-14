@@ -1,24 +1,18 @@
-import streamDeck, { LogLevel } from "@elgato/streamdeck";
+import streamDeck from "@elgato/streamdeck";
 import { kisWebSocket } from "./kis/websocket-manager.js";
 import { kisGlobalSettings } from "./kis/settings-store.js";
 import { DomesticStockAction } from "./actions/domestic-stock.js";
 import { OverseasStockAction } from "./actions/overseas-stock.js";
-import { ErrorType, type GlobalSettings } from "./types/index.js";
+import { type GlobalSettings } from "./types/index.js";
 import { logger } from "./utils/logger.js";
 import {
   clearAccessTokenCache,
   hydrateAccessTokenFromGlobalSettings,
   onAccessTokenUpdated,
 } from "./kis/auth.js";
-import { runConnectionTest } from "./property-inspector/connection-test.js";
-import {
-  CONNECTION_TEST_RESULT_TYPE,
-  isConnectionTestRequestPayload,
-  type ConnectionTestResultPayload,
-} from "./property-inspector/message-contract.js";
 
 // 로깅 설정
-streamDeck.logger.setLevel(LogLevel.DEBUG);
+streamDeck.logger.setLevel("debug");
 
 function hasCredentials(
   settings: GlobalSettings
@@ -32,81 +26,6 @@ function credentialKey(settings: { appKey: string; appSecret: string }): string 
 
 let lastAppliedCredentialKey: string | null = null;
 let isInternalGlobalSettingsWrite = false;
-
-type PropertyInspectorRef = {
-  action?: { id: string };
-  sendToPropertyInspector(payload: ConnectionTestResultPayload): Promise<void>;
-};
-
-const pendingPropertyInspectorPayloads = new Map<
-  string,
-  ConnectionTestResultPayload[]
->();
-
-function getMatchingPropertyInspector(actionId: string): PropertyInspectorRef | undefined {
-  const current = streamDeck.ui.current as PropertyInspectorRef | undefined;
-  return current?.action?.id === actionId ? current : undefined;
-}
-
-function enqueuePropertyInspectorPayload(
-  actionId: string,
-  payload: ConnectionTestResultPayload
-): void {
-  const queue = pendingPropertyInspectorPayloads.get(actionId);
-  if (queue) {
-    queue.push(payload);
-    return;
-  }
-
-  pendingPropertyInspectorPayloads.set(actionId, [payload]);
-}
-
-async function flushPropertyInspectorPayloads(actionId: string): Promise<void> {
-  const queue = pendingPropertyInspectorPayloads.get(actionId);
-  if (!queue?.length) {
-    return;
-  }
-
-  while (queue.length > 0) {
-    const inspector = getMatchingPropertyInspector(actionId);
-    if (!inspector) {
-      return;
-    }
-
-    try {
-      await inspector.sendToPropertyInspector(queue[0]);
-      queue.shift();
-    } catch (error) {
-      logger.debug(
-        `[Plugin] Property Inspector 응답 전송을 보류합니다: actionId=${actionId}`,
-        error
-      );
-      return;
-    }
-  }
-
-  pendingPropertyInspectorPayloads.delete(actionId);
-}
-
-async function queuePropertyInspectorPayload(
-  actionId: string,
-  payload: ConnectionTestResultPayload
-): Promise<void> {
-  enqueuePropertyInspectorPayload(actionId, payload);
-
-  if (!getMatchingPropertyInspector(actionId)) {
-    logger.warn(
-      `[Plugin] Property Inspector 응답을 대기열에 보관합니다: actionId=${actionId}`
-    );
-    return;
-  }
-
-  await flushPropertyInspectorPayloads(actionId);
-}
-
-streamDeck.ui.onDidAppear((ev) => {
-  void flushPropertyInspectorPayloads(ev.action.id);
-});
 
 /**
  * 전역 설정 적용 (공통)
@@ -181,39 +100,6 @@ streamDeck.settings.onDidReceiveGlobalSettings<GlobalSettings>((ev) => {
   }
 
   applyGlobalSettings(settings);
-});
-
-streamDeck.ui.onSendToPlugin((ev) => {
-  const payload = ev.payload;
-  if (!isConnectionTestRequestPayload(payload)) {
-    return;
-  }
-
-  void (async () => {
-    try {
-      const [globalSettings, actionSettings] = await Promise.all([
-        streamDeck.settings.getGlobalSettings<GlobalSettings>(),
-        ev.action.getSettings().catch((error) => {
-          logger.debug("[Plugin] 액션 설정 조회 실패, stock 검증은 생략될 수 있습니다:", error);
-          return undefined;
-        }),
-      ]);
-      const result = await runConnectionTest(payload, globalSettings, {
-        actionManifestId: ev.action.manifestId,
-        actionSettings,
-      });
-      await queuePropertyInspectorPayload(ev.action.id, result);
-    } catch (error) {
-      logger.error("[Plugin] Property Inspector 메시지 처리 실패:", error);
-      await queuePropertyInspectorPayload(ev.action.id, {
-        type: CONNECTION_TEST_RESULT_TYPE,
-        requestId: payload.requestId,
-        ok: false,
-        errorType: ErrorType.NETWORK_ERROR,
-        message: "연결 테스트를 완료하지 못했습니다. 잠시 후 다시 시도하세요.",
-      });
-    }
-  })();
 });
 
 // ─── 액션 등록 ───

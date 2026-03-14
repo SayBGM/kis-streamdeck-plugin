@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,29 @@ const manifestPath = path.join(projectRoot, "manifest.json");
 
 const manifestRaw = await readFile(manifestPath, "utf8");
 const manifest = JSON.parse(manifestRaw);
+
+function run(command, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      stdio: "inherit",
+      env: process.env,
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(
+        new Error(
+          `${command} ${args.join(" ")} failed with code ${code ?? "unknown"}`,
+        ),
+      );
+    });
+  });
+}
 
 if (!manifest.UUID || typeof manifest.UUID !== "string") {
   throw new Error("manifest.json의 UUID를 찾지 못했습니다.");
@@ -30,6 +54,8 @@ await mkdir(targetDir, { recursive: true });
 
 const copyTasks = [
   ["manifest.json", "manifest.json"],
+  ["package.json", "package.json"],
+  ["package-lock.json", "package-lock.json"],
   ["bin", "bin"],
   ["imgs", "imgs"],
   ["ui", "ui"],
@@ -49,6 +75,8 @@ for (const [from, to] of copyTasks) {
     await cp(fromPath, toPath, { force: true });
   }
 }
+
+await run("npm", ["ci", "--omit=dev", "--prefix", targetDir], projectRoot);
 
 const markerPath = path.join(targetDir, ".local-install-marker");
 await writeFile(

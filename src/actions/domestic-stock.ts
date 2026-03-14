@@ -26,6 +26,7 @@ import {
   TR_ID_DOMESTIC,
   ErrorType,
   type DomesticStockSettings,
+  type GlobalSettings,
   type StockData,
   type StreamConnectionState,
 } from "../types/index.js";
@@ -33,12 +34,22 @@ import { kisGlobalSettings } from "../kis/settings-store.js";
 import { logger } from "../utils/logger.js";
 
 const INITIAL_PRICE_RETRY_DELAY_MS = 4000;
+const GLOBAL_SETTINGS_WAIT_TIMEOUT_MS = 15_000;
 const DOMESTIC_STALE_AFTER_MS = 20_000;
 const CONNECTION_STATE_MIN_HOLD_MS = 1_500;
 const PRICE_PRECISION_DIGITS = 2;
 const CHANGE_PRECISION_DIGITS = 2;
 const CHANGE_RATE_PRECISION_DIGITS = 2;
 const DEBOUNCE_RENDER_MS = 50;
+
+async function getGlobalSettingsWithWait(): Promise<GlobalSettings | null> {
+  const current = kisGlobalSettings.get();
+  if (current?.appKey?.trim() && current.appSecret?.trim()) {
+    return current;
+  }
+
+  return kisGlobalSettings.waitUntilReady(GLOBAL_SETTINGS_WAIT_TIMEOUT_MS);
+}
 
 // REQ-PERF-001-2.2.4
 interface PendingRender {
@@ -94,16 +105,6 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
 
     logger.info(`[국내] onWillAppear: code=${stockCode}, name=${stockName}`);
 
-    // NO_CREDENTIAL 가드: appKey/appSecret 미설정 시 에러 카드 표시
-    const globalSettings = kisGlobalSettings.get();
-    if (!globalSettings?.appKey || !globalSettings?.appSecret) {
-      this.resetActionRuntime(ev.action.id);
-      await ev.action.setImage(
-        svgToDataUri(renderErrorCard(ErrorType.NO_CREDENTIAL), `error:${ErrorType.NO_CREDENTIAL}`),
-      );
-      return;
-    }
-
     if (!stockCode) {
       this.resetActionRuntime(ev.action.id);
       await ev.action.setImage(
@@ -116,6 +117,15 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       svgToDataUri(renderWaitingCard(stockName, "domestic"), `waiting:domestic:${stockName}`),
     );
 
+    const globalSettings = await getGlobalSettingsWithWait();
+    if (!globalSettings?.appKey?.trim() || !globalSettings.appSecret?.trim()) {
+      this.resetActionRuntime(ev.action.id);
+      await ev.action.setImage(
+        svgToDataUri(renderErrorCard(ErrorType.NO_CREDENTIAL), `error:${ErrorType.NO_CREDENTIAL}`),
+      );
+      return;
+    }
+
     // 마지막 체결가를 먼저 표시한 뒤 WebSocket 구독
     const hasSnapshot = await this.fetchAndShowPrice(ev, stockCode, stockName);
     if (hasSnapshot) {
@@ -125,13 +135,12 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       this.scheduleInitialPriceRetry(ev, stockCode, stockName);
     }
 
-    const gs = kisGlobalSettings.get();
-    const updateMode = gs?.updateMode || "websocket";
+    const updateMode = globalSettings.updateMode || "websocket";
     const pollIntervalSec = Math.max(1, Math.min(3600,
-      parseInt(gs?.pollIntervalSec || "30", 10)
+      parseInt(globalSettings.pollIntervalSec || "30", 10)
     ));
     const throttleMs = Math.max(200,
-      parseInt(gs?.throttleMs || "1000", 10)
+      parseInt(globalSettings.throttleMs || "1000", 10)
     );
 
     if (updateMode === "poll") {
@@ -252,16 +261,6 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       `[국내] onDidReceiveSettings: code=${stockCode}, name=${stockName}`,
     );
 
-    // NO_CREDENTIAL 가드: appKey/appSecret 미설정 시 에러 카드 표시
-    const globalSettings = kisGlobalSettings.get();
-    if (!globalSettings?.appKey || !globalSettings?.appSecret) {
-      this.resetActionRuntime(ev.action.id);
-      await ev.action.setImage(
-        svgToDataUri(renderErrorCard(ErrorType.NO_CREDENTIAL), `error:${ErrorType.NO_CREDENTIAL}`),
-      );
-      return;
-    }
-
     if (!stockCode) {
       this.resetActionRuntime(ev.action.id);
       await ev.action.setImage(
@@ -274,6 +273,15 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       svgToDataUri(renderWaitingCard(stockName, "domestic"), `waiting:domestic:${stockName}`),
     );
 
+    const globalSettings = await getGlobalSettingsWithWait();
+    if (!globalSettings?.appKey?.trim() || !globalSettings.appSecret?.trim()) {
+      this.resetActionRuntime(ev.action.id);
+      await ev.action.setImage(
+        svgToDataUri(renderErrorCard(ErrorType.NO_CREDENTIAL), `error:${ErrorType.NO_CREDENTIAL}`),
+      );
+      return;
+    }
+
     // 마지막 체결가를 먼저 표시한 뒤 WebSocket 재구독
     const hasSnapshot = await this.fetchAndShowPrice(ev, stockCode, stockName);
     if (hasSnapshot) {
@@ -283,13 +291,12 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       this.scheduleInitialPriceRetry(ev, stockCode, stockName);
     }
 
-    const gs = kisGlobalSettings.get();
-    const updateMode = gs?.updateMode || "websocket";
+    const updateMode = globalSettings.updateMode || "websocket";
     const pollIntervalSec = Math.max(1, Math.min(3600,
-      parseInt(gs?.pollIntervalSec || "30", 10)
+      parseInt(globalSettings.pollIntervalSec || "30", 10)
     ));
     const throttleMs = Math.max(200,
-      parseInt(gs?.throttleMs || "1000", 10)
+      parseInt(globalSettings.throttleMs || "1000", 10)
     );
 
     if (updateMode === "poll") {

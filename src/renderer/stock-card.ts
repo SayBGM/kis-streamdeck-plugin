@@ -6,7 +6,12 @@ import type {
   StockCardRenderOptions,
 } from "../types/index.js";
 import { ErrorType } from "../types/index.js";
-import { getETTotalMinutes, getKSTTotalMinutes } from "../utils/timezone.js";
+import {
+  getETDayOfWeek,
+  getETTotalMinutes,
+  getKSTDayOfWeek,
+  getKSTTotalMinutes,
+} from "../utils/timezone.js";
 
 // ─── 디자인 상수 ───
 const CARD_SIZE = 144;
@@ -26,6 +31,7 @@ const COLOR_CONN_BACKUP = "#ffd54f";
 const COLOR_CONN_BROKEN = "#ff1744";
 const COLOR_TEXT_SUBTLE = "#a6b0cf";
 const COLOR_TEXT_MUTED = "#7f8aa8";
+const COLOR_LOADING = "#7dd3fc";
 
 const SESSION_PILL_X = 94;
 const SESSION_PILL_Y = 14;
@@ -53,6 +59,10 @@ const svgDataUriCache = new Map<string, string>();
  * 국내주식 장 상태 판단 (KST 기준)
  */
 function getDomesticSession(): MarketSession {
+  if (isWeekend(getKSTDayOfWeek())) {
+    return "CLOSED";
+  }
+
   const totalMin = getKSTTotalMinutes();
 
   if (totalMin >= 510 && totalMin < 540) return "PRE"; // 08:30 ~ 09:00
@@ -65,6 +75,10 @@ function getDomesticSession(): MarketSession {
  * 미국주식 장 상태 판단 (ET 기준, 써머타임 자동 반영)
  */
 function getOverseasSession(): MarketSession {
+  if (isWeekend(getETDayOfWeek())) {
+    return "CLOSED";
+  }
+
   const totalMin = getETTotalMinutes();
 
   if (totalMin >= 240 && totalMin < 570) return "PRE"; // 04:00 ~ 09:30
@@ -144,8 +158,9 @@ export function renderWaitingCard(
   ${renderSessionPill(sessionBadge, sessionColor)}
   <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${nameFontSize}" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(displayName)}</text>
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${market === "domestic" ? "국내 시세" : "미국 시세"}</text>
-  <text x="72" y="76" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_TEXT}" text-anchor="middle">초기화 중</text>
-  <text x="72" y="96" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_MUTED}" text-anchor="middle">REST/실시간 연결 준비</text>
+  ${renderLoadingIndicator(72, 70, 22)}
+  <text x="72" y="102" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_TEXT}" text-anchor="middle">초기화 중</text>
+  <text x="72" y="120" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_MUTED}" text-anchor="middle">REST/실시간 연결 준비</text>
  </svg>`;
 }
 
@@ -203,6 +218,8 @@ export function renderConnectedCard(
   const sessionBadge = getSessionBadgeLabel(session);
   const statusText = session === "CLOSED" ? "장 마감" : "데이터 대기";
   const statusColor = session === "CLOSED" ? COLOR_TEXT_SUBTLE : COLOR_TEXT;
+  const loadingMarkup =
+    session === "CLOSED" ? "" : renderLoadingIndicator(72, 68, 18, COLOR_CONN_LIVE);
   const displayName = truncateName(name || "---", 8);
   const nameFontSize = getNameFontSize(displayName);
 
@@ -211,8 +228,9 @@ export function renderConnectedCard(
   ${renderSessionPill(sessionBadge, sessionColor)}
   <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${nameFontSize}" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(displayName)}</text>
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${market === "domestic" ? "국내 시세" : "미국 시세"}</text>
-  <text x="72" y="74" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${statusColor}" text-anchor="middle">${statusText}</text>
-  <text x="72" y="98" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="${COLOR_CONN_LIVE}" text-anchor="middle">실시간 연결됨</text>
+  ${loadingMarkup}
+  <text x="72" y="${session === "CLOSED" ? "78" : "100"}" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${statusColor}" text-anchor="middle">${statusText}</text>
+  <text x="72" y="${session === "CLOSED" ? "102" : "120"}" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="${COLOR_CONN_LIVE}" text-anchor="middle">실시간 연결됨</text>
   <rect x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${COLOR_CONN_LIVE}" />
 </svg>`;
 }
@@ -272,6 +290,11 @@ export function renderStockCard(
     connectionState,
     renderOptions.isRefreshing ?? false
   );
+  const statusMarkup = renderStatusLabel(
+    statusText,
+    statusColor,
+    renderOptions.isRefreshing ?? false,
+  );
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
@@ -288,7 +311,7 @@ export function renderStockCard(
 
   <!-- 변동률 (우측 하단) -->
   <text x="132" y="108" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}" text-anchor="end">${escapeXml(rateStr)}</text>
-  ${statusText ? `<text x="72" y="124" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${statusColor}" text-anchor="middle">${escapeXml(statusText)}</text>` : ""}
+  ${statusMarkup}
   ${connectionColor ? `<rect x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${connectionColor}" />` : ""}
 </svg>`;
 }
@@ -333,6 +356,10 @@ function getConnectionTextColor(
     default:
       return COLOR_TEXT_MUTED;
   }
+}
+
+function isWeekend(weekday: number): boolean {
+  return weekday === 0 || weekday === 6;
 }
 
 function getConnectionColor(
@@ -384,6 +411,25 @@ function getConnectionStatusText(
   }
 }
 
+function renderStatusLabel(
+  statusText: string | null,
+  statusColor: string,
+  isRefreshing: boolean,
+): string {
+  if (!statusText) {
+    return "";
+  }
+
+  if (!isRefreshing) {
+    return `<text x="72" y="124" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${statusColor}" text-anchor="middle">${escapeXml(statusText)}</text>`;
+  }
+
+  return `<g>
+  ${renderLoadingIndicator(44, 120, 10, statusColor)}
+  <text x="54" y="124" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${statusColor}" text-anchor="start">${escapeXml(statusText)}</text>
+</g>`;
+}
+
 function getNameFontSize(name: string): number {
   const len = name.length;
   if (len <= 6) return 20;
@@ -394,6 +440,54 @@ function getNameFontSize(name: string): number {
 function renderSessionPill(label: string, color: string): string {
   return `<rect x="${SESSION_PILL_X}" y="${SESSION_PILL_Y}" width="${SESSION_PILL_WIDTH}" height="${SESSION_PILL_HEIGHT}" rx="9" fill="rgba(255,255,255,0.08)" stroke="${color}" stroke-width="1" />
   <text x="${SESSION_PILL_X + SESSION_PILL_WIDTH / 2}" y="${SESSION_PILL_Y + 12}" font-family="Arial, Helvetica, sans-serif" font-size="9" font-weight="bold" fill="${color}" text-anchor="middle">${escapeXml(label)}</text>`;
+}
+
+function renderLoadingIndicator(
+  cx: number,
+  cy: number,
+  size: number,
+  color = COLOR_LOADING,
+): string {
+  const radius = size / 2;
+  const strokeWidth = Math.max(2, Math.round(size * 0.18));
+  const arcRadius = radius - strokeWidth / 2;
+  const trailColor = "rgba(255,255,255,0.12)";
+  const arcPath = describeArc(cx, cy, arcRadius, 220, 20);
+  const dot = polarToCartesian(cx, cy, arcRadius, 20);
+
+  return `<g data-role="loading-indicator">
+  <circle cx="${cx}" cy="${cy}" r="${arcRadius}" fill="none" stroke="${trailColor}" stroke-width="${strokeWidth}" />
+  <path d="${arcPath}" fill="none" stroke="${color}" stroke-width="${strokeWidth}" stroke-linecap="round" />
+  <circle cx="${dot.x}" cy="${dot.y}" r="${Math.max(1.5, strokeWidth / 2)}" fill="${color}" />
+</g>`;
+}
+
+function describeArc(
+  cx: number,
+  cy: number,
+  radius: number,
+  startAngle: number,
+  endAngle: number,
+): string {
+  const start = polarToCartesian(cx, cy, radius, endAngle);
+  const end = polarToCartesian(cx, cy, radius, startAngle);
+  const largeArcFlag = endAngle - startAngle <= 180 ? "0" : "1";
+
+  return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArcFlag} 0 ${end.x} ${end.y}`;
+}
+
+function polarToCartesian(
+  cx: number,
+  cy: number,
+  radius: number,
+  angleInDegrees: number,
+): { x: number; y: number } {
+  const angleInRadians = ((angleInDegrees - 90) * Math.PI) / 180.0;
+
+  return {
+    x: cx + radius * Math.cos(angleInRadians),
+    y: cy + radius * Math.sin(angleInRadians),
+  };
 }
 
 function truncateName(name: string, maxLen: number): string {

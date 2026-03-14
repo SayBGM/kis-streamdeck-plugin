@@ -11,7 +11,7 @@
  * - EDT (여름): UTC-4
  */
 
-type ZoneTime = { hour: number; minute: number };
+type ZoneTime = { hour: number; minute: number; weekday: number };
 
 // Intl.DateTimeFormat 생성은 비용이 크므로 타임존별로 재사용합니다.
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
@@ -28,12 +28,20 @@ export function getETTotalMinutes(): number {
   return hour * 60 + minute;
 }
 
+export function getETDayOfWeek(): number {
+  return getTimeInZone("America/New_York").weekday;
+}
+
 /**
  * 현재 한국시간(KST) 기준 시:분을 분 단위로 반환
  */
 export function getKSTTotalMinutes(): number {
   const { hour, minute } = getTimeInZone("Asia/Seoul");
   return hour * 60 + minute;
+}
+
+export function getKSTDayOfWeek(): number {
+  return getTimeInZone("Asia/Seoul").weekday;
 }
 
 /**
@@ -54,6 +62,7 @@ function getTimeInZone(timeZone: string): ZoneTime {
       timeZone,
       hour: "numeric",
       minute: "numeric",
+      weekday: "short",
       hourCycle: "h23",
     });
     formatterCache.set(timeZone, formatter);
@@ -62,16 +71,38 @@ function getTimeInZone(timeZone: string): ZoneTime {
   const parts = formatter.formatToParts(new Date(nowMs));
   let hourStr = "0";
   let minuteStr = "0";
+  let weekday = 0;
   for (const p of parts) {
     if (p.type === "hour") hourStr = p.value;
     else if (p.type === "minute") minuteStr = p.value;
+    else if (p.type === "weekday") weekday = parseWeekday(p.value);
   }
 
   const time: ZoneTime = {
     hour: parseInt(hourStr, 10) || 0,
     minute: parseInt(minuteStr, 10) || 0,
+    weekday,
   };
 
   zoneMinuteCache.set(timeZone, { epochMinute, time });
   return time;
+}
+
+function parseWeekday(value: string): number {
+  switch (value) {
+    case "Sun":
+      return 0;
+    case "Mon":
+      return 1;
+    case "Tue":
+      return 2;
+    case "Wed":
+      return 3;
+    case "Thu":
+      return 4;
+    case "Fri":
+      return 5;
+    default:
+      return 6;
+  }
 }

@@ -14,7 +14,6 @@ const hydrateAccessTokenFromGlobalSettings = vi.fn();
 const onAccessTokenUpdated = vi.fn();
 const clearCredentials = vi.fn();
 const updateSettings = vi.fn();
-const runConnectionTest = vi.fn();
 
 vi.mock("@elgato/streamdeck", () => ({
   default: {
@@ -30,12 +29,10 @@ vi.mock("@elgato/streamdeck", () => ({
     ui: {
       onDidAppear,
       onSendToPlugin,
-      current: undefined,
+      action: undefined,
+      sendToPropertyInspector: vi.fn(),
     },
     connect,
-  },
-  LogLevel: {
-    DEBUG: "DEBUG",
   },
 }));
 
@@ -64,10 +61,6 @@ vi.mock("../kis/auth.js", () => ({
   clearAccessTokenCache,
   hydrateAccessTokenFromGlobalSettings,
   onAccessTokenUpdated,
-}));
-
-vi.mock("../property-inspector/connection-test.js", () => ({
-  runConnectionTest,
 }));
 
 vi.mock("../utils/logger.js", () => ({

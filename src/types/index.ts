@@ -1,3 +1,5 @@
+import { getKSTDayOfWeek, getKSTTotalMinutes } from "../utils/timezone.js";
+
 // ─── JSON 타입 (Stream Deck Global Settings 호환) ───
 export type JsonPrimitive = boolean | number | string | null | undefined;
 export type JsonValue = JsonObject | JsonPrimitive | JsonValue[];
@@ -104,11 +106,12 @@ export const OVERSEAS_DAY_PREFIX: Record<string, string> = {
  * 타임존 유틸은 순환 참조 방지를 위해 여기서 직접 계산.
  */
 export function isOverseasDayTrading(): boolean {
-  // KST는 DST가 없으므로 UTC+9로 고정 계산해도 무방
-  const now = new Date();
-  const kstHour = (now.getUTCHours() + 9) % 24;
-  const kstMin = now.getUTCMinutes();
-  const totalMin = kstHour * 60 + kstMin;
+  const weekday = getKSTDayOfWeek();
+  if (weekday === 0 || weekday === 6) {
+    return false;
+  }
+
+  const totalMin = getKSTTotalMinutes();
 
   // 주간거래 시간: 09:00 ~ 15:30 KST
   return totalMin >= 540 && totalMin < 930;
