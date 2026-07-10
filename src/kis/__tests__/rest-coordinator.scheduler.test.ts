@@ -1,0 +1,260 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { getMarketSnapshot } from "../../core/market-clock.js";
+import { domesticStockAdapter } from "../../markets/market-adapter.js";
+import type {
+  AccessTokenExpectation,
+  CredentialIdentity,
+  RestAuthorizationLease,
+} from "../credential-session.js";
+import {
+  RestCoordinator,
+  type RestCredentialPort,
+  type RestFetch,
+} from "../rest-coordinator.js";
+
+const fingerprint = "fingerprint";
+const lease: RestAuthorizationLease = Object.freeze({
+  appKey: "app-key",
+  appSecret: "app-secret",
+  token: "access-token",
+  expiresAt: 9_999_999_999_999,
+  credentialGeneration: 3,
+  credentialFingerprint: fingerprint,
+  tokenVersion: 5,
+});
+
+function credentials(): RestCredentialPort & {
+  invalidateAccessToken: ReturnType<typeof vi.fn>;
+} {
+  return {
+    initialize: vi.fn(async (): Promise<CredentialIdentity> => ({
+      configured: true,
+      credentialGeneration: lease.credentialGeneration,
+      credentialFingerprint: fingerprint,
+    })),
+    getRestAuthorization: vi.fn(async () => lease),
+    invalidateAccessToken: vi.fn(async (_expected: AccessTokenExpectation) => true),
+  };
+}
+
+function instrument(index: number) {
+  return domesticStockAdapter.toInstrument({ stockCode: String(index).padStart(6, "0") });
+}
+
+const marketSnapshot = getMarketSnapshot(
+  "domestic",
+  Date.parse("2026-07-06T01:00:00.000Z"),
+);
+
+function successfulResponse(price = "1000"): unknown {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      rt_cd: "0",
+      output: { stck_prpr: price, prdy_vrss_sign: "3", prdy_ctrt: "0" },
+    }),
+  };
+}
+
+async function flush(rounds = 30): Promise<void> {
+  for (let index = 0; index < rounds; index += 1) await Promise.resolve();
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("RestCoordinator scheduler", () => {
+  it("runs at most four HTTP requests concurrently", async () => {
+    const resolvers: Array<(value: unknown) => void> = [];
+    const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
+      resolvers.push(resolve);
+    }));
+    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const requests = Array.from({ length: 5 }, (_, index) => coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(index + 1),
+      marketSnapshot,
+      priority: "initial",
+    }));
+
+    await flush();
+    expect(fetch).toHaveBeenCalledTimes(4);
+    resolvers[0](successfulResponse());
+    await flush();
+    expect(fetch).toHaveBeenCalledTimes(5);
+
+    for (const resolve of resolvers.slice(1)) resolve(successfulResponse());
+    await expect(Promise.all(requests)).resolves.toHaveLength(5);
+  });
+
+  it("starts no more than ten requests in a sliding one-second window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const starts: number[] = [];
+    const fetch = vi.fn<RestFetch>(async () => {
+      starts.push(Date.now());
+      return successfulResponse();
+    });
+    const coordinator = new RestCoordinator(credentials(), {
+      fetch,
+      now: () => Date.now(),
+    });
+    const requests = Array.from({ length: 11 }, (_, index) => coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(index + 1),
+      marketSnapshot,
+      priority: "initial",
+    }));
+
+    await flush(80);
+    expect(starts).toHaveLength(10);
+    expect(starts).toEqual(Array(10).fill(0));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(starts).toHaveLength(10);
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(starts).toHaveLength(11);
+    expect(starts[10]).toBe(1_000);
+    await expect(Promise.all(requests)).resolves.toHaveLength(11);
+  });
+
+  it("orders queued work manual, initial, fallback and preserves FIFO within a priority", async () => {
+    const resolvers: Array<(value: unknown) => void> = [];
+    const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
+      resolvers.push(resolve);
+    }));
+    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const pending = [1, 2, 3, 4].map((index) => coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(index),
+      marketSnapshot,
+      priority: "fallback" as const,
+    }));
+    pending.push(coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(5),
+      marketSnapshot,
+      priority: "fallback",
+    }));
+    pending.push(coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(6),
+      marketSnapshot,
+      priority: "manual",
+    }));
+    pending.push(coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(7),
+      marketSnapshot,
+      priority: "initial",
+    }));
+    pending.push(coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(8),
+      marketSnapshot,
+      priority: "manual",
+    }));
+    await flush();
+
+    resolvers[0](successfulResponse());
+    await flush();
+    expect(new URL(fetch.mock.calls[4][0]).searchParams.get("FID_INPUT_ISCD")).toBe("000006");
+    resolvers[1](successfulResponse());
+    await flush();
+    expect(new URL(fetch.mock.calls[5][0]).searchParams.get("FID_INPUT_ISCD")).toBe("000008");
+    resolvers[2](successfulResponse());
+    await flush();
+    expect(new URL(fetch.mock.calls[6][0]).searchParams.get("FID_INPUT_ISCD")).toBe("000007");
+    resolvers[3](successfulResponse());
+    await flush();
+    expect(new URL(fetch.mock.calls[7][0]).searchParams.get("FID_INPUT_ISCD")).toBe("000005");
+
+    for (const resolve of resolvers.slice(4)) resolve(successfulResponse());
+    await expect(Promise.all(pending)).resolves.toHaveLength(8);
+  });
+
+  it("deduplicates a flight while allowing each waiter to cancel independently", async () => {
+    let resolveFetch!: (value: unknown) => void;
+    let transportSignal!: AbortSignal;
+    const fetch = vi.fn<RestFetch>((_url, init) => {
+      transportSignal = init.signal;
+      return new Promise((resolve) => { resolveFetch = resolve; });
+    });
+    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const input = {
+      adapter: domesticStockAdapter,
+      instrument: instrument(1),
+      marketSnapshot,
+      priority: "initial" as const,
+    };
+    const first = coordinator.requestQuote({ ...input, signal: firstAbort.signal });
+    const second = coordinator.requestQuote({ ...input, signal: secondAbort.signal });
+    await flush();
+    expect(fetch).toHaveBeenCalledOnce();
+
+    firstAbort.abort();
+    await expect(first).rejects.toMatchObject({ code: "NETWORK", scope: "rest" });
+    expect(transportSignal.aborted).toBe(false);
+    secondAbort.abort();
+    await expect(second).rejects.toMatchObject({ code: "NETWORK", scope: "rest" });
+    expect(transportSignal.aborted).toBe(true);
+    resolveFetch(successfulResponse());
+    await flush();
+  });
+
+  it("removes a fully cancelled queued flight before it reaches HTTP", async () => {
+    const resolvers: Array<(value: unknown) => void> = [];
+    const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
+      resolvers.push(resolve);
+    }));
+    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const running = [1, 2, 3, 4].map((index) => coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(index),
+      marketSnapshot,
+      priority: "initial" as const,
+    }));
+    const abort = new AbortController();
+    const queued = coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(5),
+      marketSnapshot,
+      priority: "initial",
+      signal: abort.signal,
+    });
+    await flush();
+    expect(fetch).toHaveBeenCalledTimes(4);
+    abort.abort();
+    await expect(queued).rejects.toMatchObject({ scope: "rest" });
+    resolvers[0](successfulResponse());
+    await flush();
+    expect(fetch).toHaveBeenCalledTimes(4);
+
+    for (const resolve of resolvers.slice(1)) resolve(successfulResponse());
+    await expect(Promise.all(running)).resolves.toHaveLength(4);
+  });
+
+  it("cleans a settled dedupe flight so an open-market request can run again", async () => {
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const input = {
+      adapter: domesticStockAdapter,
+      instrument: instrument(1),
+      marketSnapshot,
+      priority: "initial" as const,
+    };
+
+    const [first, second] = await Promise.all([
+      coordinator.requestQuote(input),
+      coordinator.requestQuote(input),
+    ]);
+    expect(first).toEqual(second);
+    expect(fetch).toHaveBeenCalledOnce();
+    await coordinator.requestQuote(input);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});

@@ -40,6 +40,15 @@ export interface AccessTokenLease {
   readonly tokenVersion: number;
 }
 
+/**
+ * REST 전송 계층만 사용하는 내부 lease입니다. 진단/PI 경계에는 이 값을
+ * 전달하지 않고, 세대와 fingerprint로 응답 수명을 검증합니다.
+ */
+export interface RestAuthorizationLease extends AccessTokenLease {
+  readonly appKey: string;
+  readonly appSecret: string;
+}
+
 export interface ApprovalKeyLease {
   readonly approvalKey: string;
   readonly credentialGeneration: number;
@@ -541,6 +550,26 @@ export class CredentialSession {
       () => this.deleteFlight(this.accessTokenFlights, key, flight),
     );
     return flight;
+  }
+
+  async getRestAuthorization(): Promise<RestAuthorizationLease> {
+    const token = await this.getAccessToken();
+    const credentials = await this.currentCredentials();
+    if (
+      token.credentialGeneration !== credentials.generation ||
+      token.credentialFingerprint !== credentials.fingerprint
+    ) {
+      throw authBoundaryError(
+        "AUTH_REJECTED",
+        true,
+        "자격증명이 변경되어 이전 인증 결과를 폐기했습니다.",
+      );
+    }
+    return Object.freeze({
+      appKey: credentials.appKey,
+      appSecret: credentials.appSecret,
+      ...token,
+    });
   }
 
   async getApprovalKey(): Promise<ApprovalKeyLease> {
