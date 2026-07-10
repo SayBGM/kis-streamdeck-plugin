@@ -315,4 +315,29 @@ describe("SubscriptionSupervisor", () => {
       scope: "websocket",
     }));
   });
+
+  it("parks the 42nd physical subscription and rotates it in after the oldest live key is released", async () => {
+    const descriptors = Array.from({ length: 42 }, (_, index) => ({
+      trId: "H0UNCNT0",
+      trKey: String(index).padStart(6, "0"),
+    }));
+    for (const descriptor of descriptors) supervisor.subscribe(descriptor);
+    await flush();
+
+    for (let index = 0; index < 41; index += 1) {
+      const command = connection.sent.at(-1)!;
+      connection.emitRaw(control(command.trId, command.trKey));
+      if (index < 40) advance(100);
+    }
+    expect(supervisor.getSnapshot(descriptors[41])?.state).toBe("parked");
+
+    // Lease timer는 실제 clock과 분리해 실행한다. stale 판정은 이 테스트의 대상이 아니다.
+    vi.advanceTimersByTime(60_000);
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[0] });
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+    advance(100);
+
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41] });
+  });
 });

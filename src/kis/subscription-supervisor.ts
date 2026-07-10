@@ -80,6 +80,7 @@ interface Entry {
   readonly key: string;
   readonly descriptor: SubscriptionDescriptor;
   readonly createdAt: number;
+  readonly order: number;
   generation: number;
   state: PhysicalSubscriptionState;
   subscribed: boolean;
@@ -89,6 +90,8 @@ interface Entry {
   queuedAction: ControlAction | undefined;
   removing: boolean;
   retarget: Retarget | undefined;
+  rotationOutgoing: Entry | undefined;
+  rotationIncoming: boolean;
 }
 
 interface Retarget {
@@ -114,6 +117,8 @@ const CONTROL_TIMEOUT_MS = 5_000;
 const STALE_AFTER_MS = 20_000;
 const STALE_CHECK_INTERVAL_MS = 1_000;
 const MAX_RETIRED_DATA_KEYS = 256;
+const MAX_LIVE_SUBSCRIPTIONS = 41;
+const ROTATION_LEASE_MS = 60_000;
 
 function defaultSetTimeout(callback: () => void, milliseconds: number): TimerHandle {
   return setTimeout(callback, milliseconds);
@@ -172,7 +177,11 @@ export class SubscriptionSupervisor {
   private controlSendTimer: TimerHandle | undefined;
   private controlRetryTimer: TimerHandle | undefined;
   private staleTimer: TimerHandle | undefined;
+  private rotationTimer: TimerHandle | undefined;
+  private rotationCurrent: { outgoing: Entry; incoming: Entry } | undefined;
+  private readonly rotationQueue: Array<{ outgoing: Entry; incoming: Entry }> = [];
   private lastSentAt = Number.NEGATIVE_INFINITY;
+  private entrySequence = 0;
   private requiresFreshOpen = false;
   private destroyed = false;
 
@@ -187,6 +196,7 @@ export class SubscriptionSupervisor {
     this.unsubscribeMessage = this.connection.onMessage((raw) => this.handleRawMessage(raw));
     this.unsubscribeState = this.connection.onState((state) => this.handleConnectionState(state));
     this.staleTimer = this.setIntervalFn(() => this.markStaleEntries(), STALE_CHECK_INTERVAL_MS);
+    this.rotationTimer = this.setIntervalFn(() => this.startRotationLease(), ROTATION_LEASE_MS);
   }
 
   subscribe(descriptorInput: SubscriptionDescriptor, observer: SubscriptionObserver = {}): SubscriptionHandle {
@@ -199,6 +209,7 @@ export class SubscriptionSupervisor {
         key,
         descriptor,
         createdAt: this.safeNow(),
+        order: ++this.entrySequence,
         generation: 1,
         state: "desired",
         subscribed: false,
@@ -208,6 +219,8 @@ export class SubscriptionSupervisor {
         queuedAction: undefined,
         removing: false,
         retarget: undefined,
+        rotationOutgoing: undefined,
+        rotationIncoming: false,
       };
       this.entries.set(key, entry);
       void Promise.resolve(this.connection.retain()).then(
@@ -220,6 +233,7 @@ export class SubscriptionSupervisor {
 
     const ref: Ref = { observer: this.normalizeObserver(observer), entry, released: false };
     entry.refs.add(ref);
+    this.enforceSubscriptionCap();
     this.publishState(entry, ref);
     this.enqueueSubscribe(entry);
     this.pump();
@@ -290,7 +304,9 @@ export class SubscriptionSupervisor {
     this.destroyed = true;
     this.clearControlTimers();
     if (this.staleTimer !== undefined) this.clearIntervalFn(this.staleTimer);
+    if (this.rotationTimer !== undefined) this.clearIntervalFn(this.rotationTimer);
     this.staleTimer = undefined;
+    this.rotationTimer = undefined;
     this.unsubscribeMessage();
     this.unsubscribeState();
     for (const entry of [...this.entries.values()]) {
@@ -299,6 +315,7 @@ export class SubscriptionSupervisor {
     }
     this.controlQueue.length = 0;
     this.retiredDataKeys.clear();
+    this.resetRotation();
     this.currentJob = undefined;
     this.stateListeners.clear();
     this.dataListeners.clear();
@@ -450,6 +467,7 @@ export class SubscriptionSupervisor {
     this.currentJob = undefined;
     this.controlQueue.length = 0;
     this.retiredDataKeys.clear();
+    this.resetRotation();
     for (const entry of [...this.entries.values()]) {
       entry.queuedAction = undefined;
       if (entry.state === "live" || entry.state === "pending" || entry.state === "stale") {
@@ -532,16 +550,20 @@ export class SubscriptionSupervisor {
         entry.liveAt = this.safeNow();
         this.setEntryState(entry, "live");
         if (entry.refs.size === 0 || entry.removing || entry.retarget) this.enqueueUnsubscribe(entry);
+        this.finishRotationIncoming(entry);
       } else {
         this.setEntryState(entry, "rejected");
         try { this.diagnostics.increment("subscriptionRejects"); } catch { /* observability is optional */ }
         if (entry.retarget) this.completeRetarget(entry);
         else if (entry.refs.size === 0) this.deleteEntry(entry);
+        this.finishRotationIncoming(entry);
+        this.promoteParked();
       }
     } else if (success) {
       entry.subscribed = false;
       this.retireDataKey(entry.descriptor);
       if (entry.retarget) this.completeRetarget(entry);
+      else if (entry.rotationOutgoing) this.completeRotationOutgoing(entry);
       else if (entry.refs.size === 0 || entry.removing) this.deleteEntry(entry);
       else {
         this.setEntryState(entry, "desired");
@@ -582,6 +604,123 @@ export class SubscriptionSupervisor {
         this.setEntryState(entry, "stale");
       }
     }
+  }
+
+  private enforceSubscriptionCap(): void {
+    let active = this.countActiveSubscriptions();
+    while (active > MAX_LIVE_SUBSCRIPTIONS) {
+      const newestDesired = [...this.entries.values()]
+        .filter((entry) => entry.refs.size > 0 && entry.state === "desired" && !entry.rotationIncoming)
+        .sort((a, b) => b.createdAt - a.createdAt || b.order - a.order)[0];
+      if (!newestDesired) return;
+      this.setEntryState(newestDesired, "parked");
+      active -= 1;
+    }
+  }
+
+  private countActiveSubscriptions(): number {
+    let count = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.refs.size === 0 || entry.state === "parked" || entry.state === "rejected") continue;
+      count += 1;
+    }
+    return count;
+  }
+
+  private promoteParked(): void {
+    if (this.destroyed || this.countActiveSubscriptions() >= MAX_LIVE_SUBSCRIPTIONS) return;
+    const entry = [...this.entries.values()]
+      .filter((candidate) => candidate.refs.size > 0 && candidate.state === "parked" && !candidate.rotationIncoming)
+      .sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)[0];
+    if (!entry) return;
+    this.setEntryState(entry, "desired");
+    this.enqueueSubscribe(entry);
+    this.pump();
+  }
+
+  private startRotationLease(): void {
+    if (this.destroyed || this.rotationCurrent || this.rotationQueue.length > 0) return;
+    const excess = this.countActiveSubscriptions() + this.countParkedSubscriptions() - MAX_LIVE_SUBSCRIPTIONS;
+    if (excess <= 0) return;
+    const outgoing = [...this.entries.values()]
+      .filter((entry) => entry.refs.size > 0 && entry.state === "live" && !entry.rotationOutgoing)
+      .sort((a, b) =>
+        (a.liveAt ?? a.createdAt) - (b.liveAt ?? b.createdAt) || a.order - b.order,
+      );
+    const incoming = [...this.entries.values()]
+      .filter((entry) => entry.refs.size > 0 && entry.state === "parked" && !entry.rotationIncoming)
+      .sort((a, b) => a.createdAt - b.createdAt || a.order - b.order);
+    const count = Math.min(excess, MAX_LIVE_SUBSCRIPTIONS, outgoing.length, incoming.length);
+    for (let index = 0; index < count; index += 1) {
+      const pair = { outgoing: outgoing[index], incoming: incoming[index] };
+      pair.outgoing.rotationOutgoing = pair.incoming;
+      pair.incoming.rotationIncoming = true;
+      this.rotationQueue.push(pair);
+    }
+    this.advanceRotation();
+  }
+
+  private countParkedSubscriptions(): number {
+    let count = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.refs.size > 0 && entry.state === "parked") count += 1;
+    }
+    return count;
+  }
+
+  private advanceRotation(): void {
+    if (this.rotationCurrent) return;
+    const pair = this.rotationQueue.shift();
+    if (!pair) return;
+    if (
+      pair.outgoing.refs.size === 0 ||
+      pair.outgoing.state !== "live" ||
+      !pair.outgoing.subscribed ||
+      pair.incoming.refs.size === 0 ||
+      pair.incoming.state !== "parked"
+    ) {
+      pair.outgoing.rotationOutgoing = undefined;
+      pair.incoming.rotationIncoming = false;
+      this.advanceRotation();
+      return;
+    }
+    this.rotationCurrent = pair;
+    this.enqueueUnsubscribe(pair.outgoing);
+    this.pump();
+  }
+
+  private completeRotationOutgoing(outgoing: Entry): void {
+    const incoming = outgoing.rotationOutgoing;
+    outgoing.rotationOutgoing = undefined;
+    if (!incoming || this.rotationCurrent?.outgoing !== outgoing) return;
+    outgoing.subscribed = false;
+    this.setEntryState(outgoing, "parked");
+    if (incoming.refs.size === 0 || incoming.state !== "parked") {
+      incoming.rotationIncoming = false;
+      this.rotationCurrent = undefined;
+      this.advanceRotation();
+      return;
+    }
+    this.setEntryState(incoming, "desired");
+    this.enqueueSubscribe(incoming);
+  }
+
+  private finishRotationIncoming(incoming: Entry): void {
+    if (!incoming.rotationIncoming) return;
+    incoming.rotationIncoming = false;
+    if (this.rotationCurrent?.incoming === incoming) {
+      this.rotationCurrent = undefined;
+      this.advanceRotation();
+    }
+  }
+
+  private resetRotation(): void {
+    for (const entry of this.entries.values()) {
+      entry.rotationOutgoing = undefined;
+      entry.rotationIncoming = false;
+    }
+    this.rotationCurrent = undefined;
+    this.rotationQueue.length = 0;
   }
 
   private retireDataKey(descriptor: SubscriptionDescriptor): void {
@@ -630,14 +769,14 @@ export class SubscriptionSupervisor {
     }
 
     const nextKey = descriptorKey(retarget.next);
-    let next = this.entries.get(nextKey);
-    const mergesIntoExistingEntry = next !== undefined;
+    const existing = this.entries.get(nextKey);
+    const mergesIntoExistingEntry = existing !== undefined;
     const refs = [...entry.refs];
-    if (!next) {
-      next = {
+    const next: Entry = existing ?? {
         key: nextKey,
         descriptor: retarget.next,
         createdAt: this.safeNow(),
+        order: ++this.entrySequence,
         generation: 1,
         state: "desired",
         subscribed: false,
@@ -647,7 +786,10 @@ export class SubscriptionSupervisor {
         queuedAction: undefined,
         removing: false,
         retarget: undefined,
+        rotationOutgoing: undefined,
+        rotationIncoming: false,
       };
+    if (!existing) {
       this.entries.set(next.key, next);
       // 기존 physical entry의 retain 하나를 새 entry가 그대로 승계합니다.
     }
@@ -714,6 +856,7 @@ export class SubscriptionSupervisor {
     for (const ref of entry.refs) ref.entry = undefined;
     entry.refs.clear();
     try { this.connection.release(); } catch { /* a transport release cannot leak a ref */ }
+    this.promoteParked();
   }
 
   private normalizeObserver(input: SubscriptionObserver): SubscriptionObserver {
