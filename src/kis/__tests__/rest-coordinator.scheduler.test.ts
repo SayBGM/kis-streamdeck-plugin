@@ -41,10 +41,8 @@ function instrument(index: number) {
   return domesticStockAdapter.toInstrument({ stockCode: String(index).padStart(6, "0") });
 }
 
-const marketSnapshot = getMarketSnapshot(
-  "domestic",
-  Date.parse("2026-07-06T01:00:00.000Z"),
-);
+const marketNow = Date.parse("2026-07-06T01:00:00.000Z");
+const marketSnapshot = getMarketSnapshot("domestic", marketNow);
 
 function successfulResponse(price = "1000"): unknown {
   return {
@@ -71,7 +69,7 @@ describe("RestCoordinator scheduler", () => {
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
       resolvers.push(resolve);
     }));
-    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
     const requests = Array.from({ length: 5 }, (_, index) => coordinator.requestQuote({
       adapter: domesticStockAdapter,
       instrument: instrument(index + 1),
@@ -165,7 +163,7 @@ describe("RestCoordinator scheduler", () => {
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
       resolvers.push(resolve);
     }));
-    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
     const pending = [1, 2, 3, 4].map((index) => coordinator.requestQuote({
       adapter: domesticStockAdapter,
       instrument: instrument(index),
@@ -222,7 +220,7 @@ describe("RestCoordinator scheduler", () => {
       transportSignal = init.signal;
       return new Promise((resolve) => { resolveFetch = resolve; });
     });
-    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
     const firstAbort = new AbortController();
     const secondAbort = new AbortController();
     const input = {
@@ -246,12 +244,54 @@ describe("RestCoordinator scheduler", () => {
     await flush();
   });
 
+  it("lets a new same-key flight proceed while the abandoned flight body is still hanging", async () => {
+    const jsonResolvers: Array<(value: unknown) => void> = [];
+    const fetch = vi.fn<RestFetch>().mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: () => new Promise((resolve) => { jsonResolvers.push(resolve); }),
+    }));
+    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
+    const abort = new AbortController();
+    const input = {
+      adapter: domesticStockAdapter,
+      instrument: instrument(1),
+      marketSnapshot,
+      priority: "initial" as const,
+    };
+
+    const abandoned = coordinator.requestQuote({ ...input, signal: abort.signal });
+    await flush();
+    expect(jsonResolvers).toHaveLength(1);
+    abort.abort();
+    await expect(abandoned).rejects.toMatchObject({ code: "NETWORK", scope: "rest" });
+
+    const current = coordinator.requestQuote(input);
+    await flush();
+    expect(jsonResolvers).toHaveLength(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    jsonResolvers[0](successfulResponse());
+    await flush();
+
+    const joined = coordinator.requestQuote(input);
+    await flush();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    jsonResolvers[1]({
+      rt_cd: "0",
+      output: { stck_prpr: "2000", prdy_vrss_sign: "3", prdy_ctrt: "0" },
+    });
+    await expect(Promise.all([current, joined])).resolves.toEqual([
+      expect.objectContaining({ price: 2_000 }),
+      expect.objectContaining({ price: 2_000 }),
+    ]);
+  });
+
   it("removes a fully cancelled queued flight before it reaches HTTP", async () => {
     const resolvers: Array<(value: unknown) => void> = [];
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
       resolvers.push(resolve);
     }));
-    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
     const running = [1, 2, 3, 4].map((index) => coordinator.requestQuote({
       adapter: domesticStockAdapter,
       instrument: instrument(index),
@@ -280,7 +320,7 @@ describe("RestCoordinator scheduler", () => {
 
   it("cleans a settled dedupe flight so an open-market request can run again", async () => {
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(credentials(), { fetch });
+    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
     const input = {
       adapter: domesticStockAdapter,
       instrument: instrument(1),

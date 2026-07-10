@@ -126,7 +126,7 @@ function defaultClearTimeout(handle: RestTimerHandle): void {
 }
 
 function restError(
-  code: "AUTH_REJECTED" | "NETWORK" | "PROTOCOL" | "INVALID_INSTRUMENT",
+  code: "AUTH_REJECTED" | "NETWORK" | "TIMEOUT" | "PROTOCOL" | "INVALID_INSTRUMENT",
   retryable: boolean,
   safeMessage: string,
   httpStatus?: number,
@@ -153,6 +153,14 @@ function changedCredentialError(): KisError {
     "AUTH_REJECTED",
     true,
     "자격증명이 변경되어 이전 시세 결과를 폐기했습니다.",
+  );
+}
+
+function sessionTransitionError(): KisError {
+  return restError(
+    "TIMEOUT",
+    true,
+    "시장 세션이 전환되어 이전 시세 결과를 폐기했습니다.",
   );
 }
 
@@ -189,6 +197,7 @@ function validateRequest(input: RestQuoteRequest): ValidRequest {
     const snapshotMarket = ownData(marketSnapshot, "market");
     const session = ownData(marketSnapshot, "session");
     const sessionEpoch = ownData(marketSnapshot, "sessionEpoch");
+    const nextTransitionAt = ownData(marketSnapshot, "nextTransitionAt");
 
     if (
       typeof adapterId !== "string" || adapterId.length === 0 ||
@@ -197,6 +206,8 @@ function validateRequest(input: RestQuoteRequest): ValidRequest {
       instrumentMarket !== adapterMarket || snapshotMarket !== adapterMarket ||
       (session !== "PRE" && session !== "REG" && session !== "AFT" && session !== "CLOSED") ||
       typeof sessionEpoch !== "number" || !Number.isFinite(sessionEpoch) ||
+      typeof nextTransitionAt !== "number" || !Number.isFinite(nextTransitionAt) ||
+      nextTransitionAt <= sessionEpoch ||
       (priority !== "manual" && priority !== "initial" && priority !== "fallback") ||
       (signal !== undefined && !(signal instanceof AbortSignal)) ||
       typeof adapter.restDescriptor !== "function" ||
@@ -207,7 +218,12 @@ function validateRequest(input: RestQuoteRequest): ValidRequest {
     return {
       adapter,
       instrument,
-      marketSnapshot,
+      marketSnapshot: Object.freeze({
+        market: snapshotMarket,
+        session,
+        sessionEpoch,
+        nextTransitionAt,
+      }) as MarketSnapshot,
       priority,
       ...(signal ? { signal } : {}),
       adapterId,
@@ -299,6 +315,9 @@ export class RestCoordinator {
   private async prepareRequest(input: RestQuoteRequest): Promise<QuoteSample> {
     const request = validateRequest(input);
     if (request.signal?.aborted) throw cancelledError();
+    if (this.now() >= request.marketSnapshot.nextTransitionAt) {
+      throw sessionTransitionError();
+    }
 
     let identity: CredentialIdentity;
     try {
@@ -395,8 +414,9 @@ export class RestCoordinator {
     flight.abandoned = true;
     if (flight.state === "queued") {
       this.removeQueuedFlight(flight);
-      this.flights.delete(flight.key);
+      this.deleteFlightIdentity(flight);
     } else if (flight.state === "running") {
+      this.deleteFlightIdentity(flight);
       try {
         flight.controller.abort();
       } catch {
@@ -408,6 +428,12 @@ export class RestCoordinator {
   private removeQueuedFlight(flight: Flight): void {
     const index = this.queue.indexOf(flight);
     if (index >= 0) this.queue.splice(index, 1);
+  }
+
+  private deleteFlightIdentity(flight: Flight): void {
+    if (this.flights.get(flight.key) === flight) {
+      this.flights.delete(flight.key);
+    }
   }
 
   private removeAbortListener(waiter: Waiter): void {
@@ -574,6 +600,9 @@ export class RestCoordinator {
     }
     if (!sameCredential(currentIdentity, authorization)) throw changedCredentialError();
     if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
+    if (this.now() >= flight.request.marketSnapshot.nextTransitionAt) {
+      throw sessionTransitionError();
+    }
     return quote;
   }
 
@@ -656,7 +685,7 @@ export class RestCoordinator {
 
   private settleFlight(flight: Flight, quote: QuoteSample): void {
     flight.state = "settled";
-    this.flights.delete(flight.key);
+    this.deleteFlightIdentity(flight);
     if (
       !flight.abandoned &&
       flight.cacheAllowed &&
@@ -673,7 +702,7 @@ export class RestCoordinator {
 
   private failFlight(flight: Flight, error: KisError): void {
     flight.state = "settled";
-    this.flights.delete(flight.key);
+    this.deleteFlightIdentity(flight);
     if (!flight.abandoned && flight.cacheAllowed) {
       this.writeCache(flight.cacheKey, {
         kind: "failure",

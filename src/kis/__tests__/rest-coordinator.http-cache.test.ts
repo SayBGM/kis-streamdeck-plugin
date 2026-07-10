@@ -55,6 +55,8 @@ function snapshot(iso: string): MarketSnapshot {
   return getMarketSnapshot("domestic", Date.parse(iso));
 }
 
+const openNow = Date.parse("2026-07-06T01:00:00.000Z");
+const closedNow = Date.parse("2026-07-06T10:00:00.000Z");
 const openSnapshot = snapshot("2026-07-06T01:00:00.000Z");
 const closedSnapshot = snapshot("2026-07-06T10:00:00.000Z");
 
@@ -98,7 +100,7 @@ describe("RestCoordinator HTTP boundary", () => {
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
     const coordinator = new RestCoordinator(credentials, {
       fetch,
-      now: () => 1_900_000_000_000,
+      now: () => openNow,
     });
 
     await expect(request(coordinator)).resolves.toEqual({
@@ -107,7 +109,7 @@ describe("RestCoordinator HTTP boundary", () => {
       changeRate: 1.25,
       sign: "rise",
       source: "rest",
-      receivedAt: 1_900_000_000_000,
+      receivedAt: openNow,
       sessionEpoch: openSnapshot.sessionEpoch,
     });
     const [url, init] = fetch.mock.calls[0];
@@ -131,7 +133,7 @@ describe("RestCoordinator HTTP boundary", () => {
   it("invalidates a rejected token using the exact generation-version CAS lease", async () => {
     const credentials = mutableCredentials(authorization(8, 13));
     const fetch = vi.fn<RestFetch>().mockResolvedValue({ ok: false, status: 401 });
-    const coordinator = new RestCoordinator(credentials, { fetch });
+    const coordinator = new RestCoordinator(credentials, { fetch, now: () => openNow });
 
     const error = await request(coordinator).catch((value: unknown) => value) as {
       readonly code?: unknown;
@@ -157,6 +159,7 @@ describe("RestCoordinator HTTP boundary", () => {
   ])("sanitizes malformed HTTP boundaries: %s", async (_label, response) => {
     const coordinator = new RestCoordinator(mutableCredentials(), {
       fetch: vi.fn<RestFetch>().mockResolvedValue(response),
+      now: () => openNow,
     });
     const error = await request(coordinator).catch((value: unknown) => value) as {
       readonly code?: unknown;
@@ -175,6 +178,7 @@ describe("RestCoordinator HTTP boundary", () => {
     });
     const coordinator = new RestCoordinator(mutableCredentials(), {
       fetch: vi.fn<RestFetch>().mockResolvedValue(malicious),
+      now: () => openNow,
     });
 
     const error = await request(coordinator).catch((value: unknown) => value) as {
@@ -190,7 +194,7 @@ describe("RestCoordinator HTTP boundary", () => {
     const credentials = mutableCredentials(authorization(3));
     let resolveFetch!: (value: unknown) => void;
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => { resolveFetch = resolve; }));
-    const coordinator = new RestCoordinator(credentials, { fetch });
+    const coordinator = new RestCoordinator(credentials, { fetch, now: () => openNow });
 
     const pending = request(coordinator);
     while (fetch.mock.calls.length === 0) await Promise.resolve();
@@ -203,6 +207,95 @@ describe("RestCoordinator HTTP boundary", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("discards a quote completed exactly at the market session transition", async () => {
+    let now = openSnapshot.nextTransitionAt - 1;
+    let resolveJson!: (value: unknown) => void;
+    const fetch = vi.fn<RestFetch>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => new Promise((resolve) => { resolveJson = resolve; }),
+    });
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => now,
+    });
+
+    const pending = request(coordinator);
+    await flush();
+    expect(resolveJson).toBeTypeOf("function");
+    now = openSnapshot.nextTransitionAt;
+    resolveJson({
+      rt_cd: "0",
+      output: { stck_prpr: "71000", prdy_vrss_sign: "3", prdy_ctrt: "0" },
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      code: "TIMEOUT",
+      scope: "rest",
+      retryable: true,
+    });
+  });
+
+  it("rechecks the transition before settling or success-caching the quote", async () => {
+    let now = closedSnapshot.nextTransitionAt - 1;
+    let resolveJson!: (value: unknown) => void;
+    const fetch = vi.fn<RestFetch>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => new Promise((resolve) => { resolveJson = resolve; }),
+    });
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => now,
+    });
+
+    const pending = request(coordinator, closedSnapshot);
+    await flush();
+    resolveJson({
+      rt_cd: "0",
+      output: { stck_prpr: "71000", prdy_vrss_sign: "3", prdy_ctrt: "0" },
+    });
+    queueMicrotask(() => { now = closedSnapshot.nextTransitionAt; });
+
+    await expect(pending).rejects.toMatchObject({ code: "TIMEOUT", scope: "rest" });
+    fetch.mockResolvedValue(successfulResponse("72000"));
+    await expect(request(coordinator, {
+      ...closedSnapshot,
+      sessionEpoch: closedSnapshot.nextTransitionAt,
+      nextTransitionAt: closedSnapshot.nextTransitionAt + 60_000,
+    })).resolves.toMatchObject({ price: 72_000 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects stale and non-finite transition inputs through safe boundaries", async () => {
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const staleCoordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => openSnapshot.nextTransitionAt,
+    });
+    await expect(request(staleCoordinator)).rejects.toMatchObject({
+      code: "TIMEOUT",
+      scope: "rest",
+    });
+
+    const invalidCoordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => openNow,
+    });
+    await expect(invalidCoordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(),
+      marketSnapshot: { ...openSnapshot, nextTransitionAt: Number.NaN },
+      priority: "initial",
+    })).rejects.toMatchObject({ code: "PROTOCOL", scope: "rest" });
+    expect(JSON.stringify(await invalidCoordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(),
+      marketSnapshot: { ...openSnapshot, nextTransitionAt: Number.POSITIVE_INFINITY },
+      priority: "initial",
+    }).catch((error: unknown) => error))).not.toContain("app-secret");
+  });
+
   it("settles a cancelled waiter before a late JSON body and never caches that body", async () => {
     let resolveJson!: (value: unknown) => void;
     const fetch = vi.fn<RestFetch>().mockResolvedValue({
@@ -210,7 +303,10 @@ describe("RestCoordinator HTTP boundary", () => {
       status: 200,
       json: () => new Promise((resolve) => { resolveJson = resolve; }),
     });
-    const coordinator = new RestCoordinator(mutableCredentials(), { fetch });
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => closedNow,
+    });
     const abort = new AbortController();
     const pending = request(coordinator, closedSnapshot, "initial", abort.signal);
     await flush();
@@ -232,13 +328,15 @@ describe("RestCoordinator cache policy", () => {
   it("reuses closed-session success only for the same instrument, session and credential generation", async () => {
     const credentials = mutableCredentials(authorization(2));
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(credentials, { fetch });
+    let now = closedNow;
+    const coordinator = new RestCoordinator(credentials, { fetch, now: () => now });
 
     await request(coordinator, closedSnapshot);
     await request(coordinator, closedSnapshot);
     expect(fetch).toHaveBeenCalledOnce();
 
     const nextClosedSession = snapshot("2026-07-07T10:00:00.000Z");
+    now = Date.parse("2026-07-07T10:00:00.000Z");
     await request(coordinator, nextClosedSession);
     expect(fetch).toHaveBeenCalledTimes(2);
 
@@ -251,7 +349,10 @@ describe("RestCoordinator cache policy", () => {
     const fetch = vi.fn<RestFetch>()
       .mockResolvedValueOnce(successfulResponse("71000"))
       .mockResolvedValueOnce(successfulResponse("72000"));
-    const coordinator = new RestCoordinator(mutableCredentials(), { fetch });
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => closedNow,
+    });
 
     await expect(request(coordinator, closedSnapshot)).resolves.toMatchObject({ price: 71_000 });
     await expect(request(coordinator, closedSnapshot, "manual")).resolves.toMatchObject({ price: 72_000 });
