@@ -626,4 +626,91 @@ describe("SubscriptionSupervisor", () => {
     expect(supervisor.getSnapshot(next)?.state).toBe("parked");
     expect(connection.sent).toHaveLength(sentBefore);
   });
+
+  it("cancels a queued target unsubscribe before merging a retargeted source into it", async () => {
+    const source = { trId: "H0UNCNT0", trKey: "000001" } as const;
+    const target = { trId: "H0UNCNT0", trKey: "000002" } as const;
+    const sourceHandle = supervisor.subscribe(source);
+    const targetHandle = supervisor.subscribe(target);
+    await flush();
+    connection.emitRaw(control(source.trId, source.trKey));
+    advance(100);
+    connection.emitRaw(control(target.trId, target.trKey));
+
+    const retargeted = supervisor.retargetAll(source, target);
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...source });
+    targetHandle.release();
+    connection.emitRaw(control(source.trId, source.trKey, "OPSP0002"));
+    await retargeted;
+
+    expect(sourceHandle.descriptor).toEqual(target);
+    expect(sourceHandle.snapshot?.refCount).toBe(1);
+    advance(100);
+    expect(connection.sent.at(-1)).not.toEqual({ trType: "2", ...target });
+  });
+
+  it("does not let a target unsubscribe acknowledgement delete source handles after current unsubscribe separation", async () => {
+    const source = { trId: "H0UNCNT0", trKey: "000011" } as const;
+    const target = { trId: "H0UNCNT0", trKey: "000012" } as const;
+    const sourceHandle = supervisor.subscribe(source);
+    const targetHandle = supervisor.subscribe(target);
+    await flush();
+    connection.emitRaw(control(source.trId, source.trKey));
+    advance(100);
+    connection.emitRaw(control(target.trId, target.trKey));
+
+    targetHandle.release();
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...target });
+    const retargeted = supervisor.retargetAll(source, target);
+    connection.emitRaw(control(target.trId, target.trKey, "OPSP0002"));
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...source });
+    connection.emitRaw(control(source.trId, source.trKey, "OPSP0002"));
+    await retargeted;
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...target });
+    connection.emitRaw(control(target.trId, target.trKey));
+
+    expect(sourceHandle.descriptor).toEqual(target);
+    expect(sourceHandle.snapshot?.state).toBe("live");
+    expect(connection.releases).toBe(1);
+  });
+
+  it("commits a pending job before an onState listener destroys the supervisor", async () => {
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    const handle = supervisor.subscribe(descriptor, {
+      onState: (snapshot) => {
+        if (snapshot.state === "pending") supervisor.destroy();
+      },
+    });
+    await flush();
+    advance(5_000);
+
+    expect(handle.snapshot).toBeUndefined();
+    expect(connection.reconnects).toBe(0);
+    expect(connection.releases).toBe(1);
+  });
+
+  it("commits retarget transfer before an onState callback destroys the supervisor", async () => {
+    const source = { trId: "H0UNCNT0", trKey: "000021" } as const;
+    const next = { trId: "H0UNCNT0", trKey: "000022" } as const;
+    const handle = supervisor.subscribe(source, {
+      onState: (snapshot) => {
+        if (snapshot.descriptor.trKey === next.trKey) supervisor.destroy();
+      },
+    });
+    await flush();
+    connection.emitRaw(control(source.trId, source.trKey));
+
+    const retargeted = supervisor.retargetAll(source, next);
+    advance(100);
+    connection.emitRaw(control(source.trId, source.trKey, "OPSP0002"));
+    await retargeted;
+
+    expect(handle.snapshot).toBeUndefined();
+    expect(connection.retains).toBe(1);
+    expect(connection.releases).toBe(1);
+  });
 });

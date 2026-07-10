@@ -87,11 +87,16 @@ interface Entry {
   liveAt: number | undefined;
   lastDataAt: number | undefined;
   readonly refs: Set<Ref>;
+  demand: ConnectionDemand | undefined;
   queuedAction: ControlAction | undefined;
   removing: boolean;
   retarget: Retarget | undefined;
   rotationOutgoing: Entry | undefined;
   rotationIncoming: boolean;
+}
+
+interface ConnectionDemand {
+  released: boolean;
 }
 
 interface Retarget {
@@ -216,6 +221,7 @@ export class SubscriptionSupervisor {
         liveAt: undefined,
         lastDataAt: undefined,
         refs: new Set(),
+        demand: { released: false },
         queuedAction: undefined,
         removing: false,
         retarget: undefined,
@@ -425,9 +431,12 @@ export class SubscriptionSupervisor {
       return;
     }
     this.lastSentAt = this.safeNow();
-    if (job.action === "subscribe") this.setEntryState(entry, "pending");
+    const publishPending = job.action === "subscribe";
+    if (publishPending) entry.state = "pending";
     this.currentJob = job;
     this.controlTimeout = this.setTimeoutFn(() => this.handleControlTimeout(job), CONTROL_TIMEOUT_MS);
+    // Listener가 destroy/release를 호출해도 current job과 timeout이 이미 일관된 상태입니다.
+    if (publishPending) this.publishState(entry);
   }
 
   private requeue(job: QueuedJob, retry = false): void {
@@ -551,10 +560,12 @@ export class SubscriptionSupervisor {
       if (success) {
         entry.liveAt = this.safeNow();
         this.setEntryState(entry, "live");
+        if (!this.isCurrentEntry(entry)) return;
         if (entry.refs.size === 0 || entry.removing || entry.retarget) this.enqueueUnsubscribe(entry);
         this.finishRotationIncoming(entry);
       } else {
         this.setEntryState(entry, "rejected");
+        if (!this.isCurrentEntry(entry)) return;
         try { this.diagnostics.increment("subscriptionRejects"); } catch { /* observability is optional */ }
         if (entry.retarget) this.completeRetarget(entry);
         else if (entry.refs.size === 0) this.deleteEntry(entry);
@@ -669,6 +680,7 @@ export class SubscriptionSupervisor {
       .sort((a, b) => a.createdAt - b.createdAt || a.order - b.order)[0];
     if (!entry) return;
     this.setEntryState(entry, "desired");
+    if (!this.isCurrentEntry(entry)) return;
     this.enqueueSubscribe(entry);
     this.pump();
   }
@@ -730,6 +742,7 @@ export class SubscriptionSupervisor {
     if (!incoming || this.rotationCurrent?.outgoing !== outgoing) return;
     outgoing.subscribed = false;
     this.setEntryState(outgoing, "parked");
+    if (!this.isCurrentEntry(outgoing)) return;
     if (incoming.refs.size === 0 || incoming.state !== "parked") {
       incoming.rotationIncoming = false;
       this.rotationCurrent = undefined;
@@ -811,15 +824,31 @@ export class SubscriptionSupervisor {
   private completeRetarget(entry: Entry): void {
     const retarget = entry.retarget;
     if (!retarget || this.entries.get(entry.key) !== entry) return;
-    entry.retarget = undefined;
     if (entry.refs.size === 0) {
+      entry.retarget = undefined;
       this.deleteEntry(entry);
       retarget.resolve();
       return;
     }
 
     const nextKey = descriptorKey(retarget.next);
-    const existing = this.entries.get(nextKey);
+    let existing = this.entries.get(nextKey);
+    if (existing?.removing) {
+      if (existing.queuedAction === "unsubscribe" && this.currentJob?.entry !== existing) {
+        this.cancelQueuedUnsubscribe(existing);
+      } else if (this.currentJob?.entry === existing && this.currentJob.action === "unsubscribe") {
+        // 서버 해제는 이미 전송됐습니다. doomed entry는 map에서 분리하고, 같은 key의
+        // 새 physical entry가 그 ack 뒤에 다시 subscribe하도록 합니다.
+        this.deleteEntry(existing);
+        existing = undefined;
+      } else {
+        // pending subscribe가 끝난 뒤의 unsubscribe를 먼저 처리하도록 source를 보존합니다.
+        return;
+      }
+    }
+    if (this.destroyed || this.entries.get(entry.key) !== entry) return;
+
+    entry.retarget = undefined;
     const mergesIntoExistingEntry = existing !== undefined;
     const refs = [...entry.refs];
     const next: Entry = existing ?? {
@@ -833,6 +862,7 @@ export class SubscriptionSupervisor {
         liveAt: undefined,
         lastDataAt: undefined,
         refs: new Set(),
+        demand: undefined,
         queuedAction: undefined,
         removing: false,
         retarget: undefined,
@@ -847,19 +877,34 @@ export class SubscriptionSupervisor {
       entry.refs.delete(ref);
       ref.entry = next;
       next.refs.add(ref);
-      this.publishState(next, ref);
     }
     this.entries.delete(entry.key);
     entry.generation += 1;
     entry.queuedAction = undefined;
     if (mergesIntoExistingEntry) {
-      // 대상 physical entry는 자체 retain을 이미 보유하므로 source retain 하나만 해제합니다.
-      try { this.connection.release(); } catch { /* release is best effort */ }
+      // 대상 physical entry는 자체 retain을 이미 보유하므로 source demand만 해제합니다.
+      this.releaseDemand(entry);
+    } else {
+      // 새 key는 source physical demand를 승계하므로 release하지 않습니다.
+      next.demand = entry.demand;
+      entry.demand = undefined;
     }
     this.enqueueSubscribe(next);
-    this.rebalanceSubscriptions();
     retarget.resolve();
+    this.rebalanceSubscriptions();
+    if (this.destroyed || this.entries.get(next.key) !== next) return;
+    this.publishState(next);
     this.pump();
+  }
+
+  private cancelQueuedUnsubscribe(entry: Entry): void {
+    if (entry.queuedAction !== "unsubscribe" || this.currentJob?.entry === entry) return;
+    entry.queuedAction = undefined;
+    for (let index = this.controlQueue.length - 1; index >= 0; index -= 1) {
+      const job = this.controlQueue[index];
+      if (job.entry === entry && job.action === "unsubscribe") this.controlQueue.splice(index, 1);
+    }
+    entry.removing = false;
   }
 
   private rejectRetarget(entry: Entry, error: KisError): void {
@@ -907,8 +952,20 @@ export class SubscriptionSupervisor {
     entry.queuedAction = undefined;
     for (const ref of entry.refs) ref.entry = undefined;
     entry.refs.clear();
-    try { this.connection.release(); } catch { /* a transport release cannot leak a ref */ }
+    this.releaseDemand(entry);
     this.rebalanceSubscriptions();
+  }
+
+  private releaseDemand(entry: Entry): void {
+    const demand = entry.demand;
+    entry.demand = undefined;
+    if (!demand || demand.released) return;
+    demand.released = true;
+    try { this.connection.release(); } catch { /* a transport release cannot leak a ref */ }
+  }
+
+  private isCurrentEntry(entry: Entry): boolean {
+    return !this.destroyed && this.entries.get(entry.key) === entry;
   }
 
   private normalizeObserver(input: SubscriptionObserver): SubscriptionObserver {
