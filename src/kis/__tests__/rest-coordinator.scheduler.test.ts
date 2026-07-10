@@ -123,12 +123,9 @@ describe("RestCoordinator scheduler", () => {
     vi.setSystemTime(0);
     const authorizationResolvers: Array<(value: RestAuthorizationLease) => void> = [];
     const port = credentials();
-    port.getRestAuthorization = vi.fn(() => {
-      if (authorizationResolvers.length >= 4) return Promise.resolve(lease);
-      return new Promise<RestAuthorizationLease>((resolve) => {
-        authorizationResolvers.push(resolve);
-      });
-    });
+    port.getRestAuthorization = vi.fn(() => new Promise<RestAuthorizationLease>((resolve) => {
+      authorizationResolvers.push(resolve);
+    }));
     const starts: number[] = [];
     const fetch = vi.fn<RestFetch>(async () => {
       starts.push(Date.now());
@@ -142,7 +139,7 @@ describe("RestCoordinator scheduler", () => {
       priority: "initial",
     }));
     await flush();
-    expect(authorizationResolvers).toHaveLength(4);
+    expect(authorizationResolvers).toHaveLength(14);
 
     await vi.advanceTimersByTimeAsync(2_000);
     for (const resolve of authorizationResolvers) resolve(lease);
@@ -284,6 +281,187 @@ describe("RestCoordinator scheduler", () => {
       expect.objectContaining({ price: 2_000 }),
       expect.objectContaining({ price: 2_000 }),
     ]);
+  });
+
+  it.each(["fetch", "json"] as const)(
+    "reclaims all four logical transport slots when cancelled %s ignores abort",
+    async (stage) => {
+      let calls = 0;
+      const fetch = vi.fn<RestFetch>(async () => {
+        calls += 1;
+        if (calls <= 4) {
+          if (stage === "fetch") return new Promise(() => {});
+          return { ok: true, status: 200, json: () => new Promise(() => {}) };
+        }
+        return successfulResponse("5000");
+      });
+      const coordinator = new RestCoordinator(credentials(), {
+        fetch,
+        now: () => marketNow,
+      });
+      const controllers = Array.from({ length: 4 }, () => new AbortController());
+      const abandoned = controllers.map((controller, index) => coordinator.requestQuote({
+        adapter: domesticStockAdapter,
+        instrument: instrument(index + 1),
+        marketSnapshot,
+        priority: "fallback",
+        signal: controller.signal,
+      }));
+      await flush();
+      expect(fetch).toHaveBeenCalledTimes(4);
+      for (const controller of controllers) controller.abort();
+      await expect(Promise.allSettled(abandoned)).resolves.toEqual(
+        Array(4).fill(expect.objectContaining({ status: "rejected" })),
+      );
+
+      const manual = coordinator.requestQuote({
+        adapter: domesticStockAdapter,
+        instrument: instrument(5),
+        marketSnapshot,
+        priority: "manual",
+      });
+      await flush(80);
+      expect(fetch).toHaveBeenCalledTimes(5);
+      await expect(manual).resolves.toMatchObject({ price: 5_000 });
+    },
+  );
+
+  it("prioritizes a later manual gate waiter without spending slots on rate waits", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(credentials(), {
+      fetch,
+      now: () => marketNow,
+      rateNow: () => Date.now(),
+    });
+    await Promise.all(Array.from({ length: 10 }, (_, index) => coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(index + 1),
+      marketSnapshot,
+      priority: "initial",
+    })));
+    expect(fetch).toHaveBeenCalledTimes(10);
+
+    const fallback = [11, 12, 13, 14].map((index) => coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(index),
+      marketSnapshot,
+      priority: "fallback" as const,
+    }));
+    await flush();
+    const manual = coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(15),
+      marketSnapshot,
+      priority: "manual",
+    });
+    await flush();
+    expect(fetch).toHaveBeenCalledTimes(10);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(new URL(fetch.mock.calls[10][0]).searchParams.get("FID_INPUT_ISCD")).toBe("000015");
+    await expect(Promise.all([...fallback, manual])).resolves.toHaveLength(5);
+  });
+
+  it("uses the monotonic rate clock and does not grant early after wall-clock rollback", async () => {
+    vi.useFakeTimers();
+    let rateTime = 0;
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(credentials(), {
+      fetch,
+      now: () => marketNow,
+      rateNow: () => rateTime,
+    });
+    await Promise.all(Array.from({ length: 10 }, (_, index) => coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(index + 1),
+      marketSnapshot,
+      priority: "initial",
+    })));
+    const pending = coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(11),
+      marketSnapshot,
+      priority: "initial",
+    });
+    await flush();
+    rateTime = -500;
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetch).toHaveBeenCalledTimes(10);
+    rateTime = 1_000;
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ symbol: "000011" });
+    expect(fetch).toHaveBeenCalledTimes(11);
+  });
+
+  it("handles synchronous rate-timer callbacks without retaining a stale timer", async () => {
+    let rateTime = 0;
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(credentials(), {
+      fetch,
+      now: () => marketNow,
+      rateNow: () => rateTime,
+      setTimeout: (callback, milliseconds) => {
+        rateTime += milliseconds;
+        callback();
+        return { rateTime };
+      },
+      clearTimeout: () => {},
+    });
+
+    await expect(Promise.all(Array.from({ length: 21 }, (_, index) =>
+      coordinator.requestQuote({
+        adapter: domesticStockAdapter,
+        instrument: instrument(index + 1),
+        marketSnapshot,
+        priority: "initial",
+      }),
+    ))).resolves.toHaveLength(21);
+    expect(fetch).toHaveBeenCalledTimes(21);
+    expect(rateTime).toBe(2_000);
+  });
+
+  it("safely rejects and removes gate waiters when rate timer creation throws", async () => {
+    let rateTime = 0;
+    let timerThrows = true;
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(credentials(), {
+      fetch,
+      now: () => marketNow,
+      rateNow: () => rateTime,
+      setTimeout: () => {
+        if (timerThrows) throw new Error("raw timer failure with app-secret");
+        return 1;
+      },
+      clearTimeout: () => {},
+    });
+    const results = await Promise.allSettled(Array.from({ length: 11 }, (_, index) =>
+      coordinator.requestQuote({
+        adapter: domesticStockAdapter,
+        instrument: instrument(index + 1),
+        marketSnapshot,
+        priority: "initial",
+      }),
+    ));
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(10);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: { code: "NETWORK", scope: "rest" },
+    });
+    expect(JSON.stringify(rejected)).not.toContain("app-secret");
+
+    timerThrows = false;
+    rateTime = 1_000;
+    await expect(coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(12),
+      marketSnapshot,
+      priority: "manual",
+    })).resolves.toMatchObject({ symbol: "000012" });
+    expect(fetch).toHaveBeenCalledTimes(11);
   });
 
   it("removes a fully cancelled queued flight before it reaches HTTP", async () => {

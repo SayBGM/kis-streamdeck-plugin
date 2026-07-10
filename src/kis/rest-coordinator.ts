@@ -38,6 +38,7 @@ export type RestTimerHandle = unknown;
 export interface RestCoordinatorOptions {
   readonly fetch?: RestFetch;
   readonly now?: () => number;
+  readonly rateNow?: () => number;
   readonly setTimeout?: (callback: () => void, milliseconds: number) => RestTimerHandle;
   readonly clearTimeout?: (handle: RestTimerHandle) => void;
 }
@@ -91,13 +92,15 @@ interface Flight {
   readonly controller: AbortController;
   readonly waiters: Map<number, Waiter>;
   priorityRank: number;
-  state: "queued" | "running" | "settled";
+  state: "queued" | "preparing" | "gate_wait" | "running" | "settled";
   cacheAllowed: boolean;
   abandoned: boolean;
+  releaseTransport?: () => void;
 }
 
-interface RateWaiter {
-  readonly resolve: () => void;
+interface TransportGateWaiter {
+  readonly flight: Flight;
+  readonly resolve: (release: () => void) => void;
   readonly reject: (error: KisError) => void;
   readonly signal: AbortSignal;
   readonly abortListener: () => void;
@@ -123,6 +126,10 @@ function defaultSetTimeout(callback: () => void, milliseconds: number): RestTime
 
 function defaultClearTimeout(handle: RestTimerHandle): void {
   clearTimeout(handle as ReturnType<typeof setTimeout>);
+}
+
+function defaultRateNow(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
 }
 
 function restError(
@@ -162,6 +169,46 @@ function sessionTransitionError(): KisError {
     true,
     "시장 세션이 전환되어 이전 시세 결과를 폐기했습니다.",
   );
+}
+
+function transportGateError(): KisError {
+  return restError("NETWORK", true, "REST 전송 대기열을 처리하지 못했습니다.");
+}
+
+function raceWithAbort<T>(operation: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(cancelledError());
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      try { signal.removeEventListener("abort", onAbort); } catch { /* noop */ }
+    };
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(cancelledError());
+    };
+    try {
+      signal.addEventListener("abort", onAbort, { once: true });
+    } catch {
+      onAbort();
+      return;
+    }
+    Promise.resolve(operation).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 function normalizeError(value: unknown): KisError {
@@ -288,22 +335,27 @@ export class RestCoordinator {
   private readonly credentials: RestCredentialPort;
   private readonly fetch: RestFetch;
   private readonly now: () => number;
+  private readonly rateNow: () => number;
   private readonly setTimeout: NonNullable<RestCoordinatorOptions["setTimeout"]>;
   private readonly clearTimeout: NonNullable<RestCoordinatorOptions["clearTimeout"]>;
   private readonly queue: Flight[] = [];
   private readonly flights = new Map<string, Flight>();
   private readonly cache = new Map<string, CacheEntry>();
   private readonly startTimes: number[] = [];
-  private readonly rateWaiters: RateWaiter[] = [];
-  private activeCount = 0;
+  private readonly gateWaiters: TransportGateWaiter[] = [];
+  private activeTransportCount = 0;
   private nextSequence = 0;
   private nextWaiterId = 0;
   private rateTimer?: RestTimerHandle;
+  private rateTimerScheduled = false;
+  private rateTimerGeneration = 0;
+  private lastRateNow = Number.NEGATIVE_INFINITY;
 
   constructor(credentials: RestCredentialPort, options: RestCoordinatorOptions = {}) {
     this.credentials = credentials;
     this.fetch = options.fetch ?? defaultFetch;
     this.now = options.now ?? Date.now;
+    this.rateNow = options.rateNow ?? defaultRateNow;
     this.setTimeout = options.setTimeout ?? defaultSetTimeout;
     this.clearTimeout = options.clearTimeout ?? defaultClearTimeout;
   }
@@ -415,17 +467,14 @@ export class RestCoordinator {
     if (flight.waiters.size > 0) return;
 
     flight.abandoned = true;
-    if (flight.state === "queued") {
-      this.removeQueuedFlight(flight);
-      this.deleteFlightIdentity(flight);
-    } else if (flight.state === "running") {
-      this.deleteFlightIdentity(flight);
-      try {
-        flight.controller.abort();
-      } catch {
-        // The request completion path remains safe if a host signal cannot abort.
-      }
+    this.removeQueuedFlight(flight);
+    this.deleteFlightIdentity(flight);
+    try {
+      flight.controller.abort();
+    } catch {
+      // The request completion path remains safe if a host signal cannot abort.
     }
+    flight.releaseTransport?.();
   }
 
   private removeQueuedFlight(flight: Flight): void {
@@ -453,23 +502,32 @@ export class RestCoordinator {
       left.priorityRank - right.priorityRank || left.sequence - right.sequence,
     );
 
-    while (this.activeCount < MAX_CONCURRENT_REQUESTS && this.queue.length > 0) {
+    while (this.queue.length > 0) {
       const flight = this.queue.shift()!;
       if (flight.state !== "queued" || flight.waiters.size === 0) continue;
-      flight.state = "running";
-      this.activeCount += 1;
+      flight.state = "preparing";
       void this.execute(flight).then(
         (quote) => this.settleFlight(flight, quote),
         (error: unknown) => this.failFlight(flight, normalizeError(error)),
-      ).finally(() => {
-        this.activeCount -= 1;
-        this.pump();
-      });
+      );
     }
   }
 
-  private pruneStartTimes(): void {
-    const cutoff = this.now() - RATE_WINDOW_MS;
+  private readRateNow(): number {
+    let current: number;
+    try {
+      current = this.rateNow();
+    } catch {
+      throw transportGateError();
+    }
+    if (!Number.isFinite(current)) throw transportGateError();
+    if (current < this.lastRateNow) return this.lastRateNow;
+    this.lastRateNow = current;
+    return current;
+  }
+
+  private pruneStartTimes(current: number): void {
+    const cutoff = current - RATE_WINDOW_MS;
     while (this.startTimes.length > 0 && this.startTimes[0] <= cutoff) {
       this.startTimes.shift();
     }
@@ -477,70 +535,134 @@ export class RestCoordinator {
 
   private scheduleRatePump(): void {
     if (
-      this.rateTimer !== undefined ||
+      this.rateTimerScheduled ||
       this.startTimes.length === 0 ||
-      this.rateWaiters.length === 0
+      this.gateWaiters.length === 0 ||
+      this.activeTransportCount >= MAX_CONCURRENT_REQUESTS
     ) return;
-    const delay = Math.max(0, this.startTimes[0] + RATE_WINDOW_MS - this.now());
-    this.rateTimer = this.setTimeout(() => {
+    let delay: number;
+    try {
+      delay = Math.max(0, this.startTimes[0] + RATE_WINDOW_MS - this.readRateNow());
+    } catch (error) {
+      this.failGateWaiters(normalizeError(error));
+      return;
+    }
+    const generation = ++this.rateTimerGeneration;
+    this.rateTimerScheduled = true;
+    try {
+      const handle = this.setTimeout(() => {
+        if (!this.rateTimerScheduled || generation !== this.rateTimerGeneration) return;
+        this.rateTimerScheduled = false;
+        this.rateTimer = undefined;
+        queueMicrotask(() => {
+          if (generation !== this.rateTimerGeneration) return;
+          this.pumpTransportGate();
+        });
+      }, delay);
+      if (this.rateTimerScheduled && generation === this.rateTimerGeneration) {
+        this.rateTimer = handle;
+      }
+    } catch {
+      if (generation !== this.rateTimerGeneration) return;
+      this.rateTimerScheduled = false;
       this.rateTimer = undefined;
-      this.pumpRatePermits();
-    }, delay);
+      this.failGateWaiters(transportGateError());
+    }
   }
 
-  private acquireRatePermit(signal: AbortSignal): Promise<void> {
+  private acquireTransportGate(flight: Flight): Promise<() => void> {
+    const signal = flight.controller.signal;
     if (signal.aborted) return Promise.reject(cancelledError());
+    flight.state = "gate_wait";
     return new Promise((resolve, reject) => {
-      let waiter!: RateWaiter;
-      const abortListener = () => this.cancelRateWaiter(waiter);
-      waiter = { resolve, reject, signal, abortListener };
-      this.rateWaiters.push(waiter);
+      let waiter!: TransportGateWaiter;
+      const abortListener = () => this.cancelGateWaiter(waiter);
+      waiter = { flight, resolve, reject, signal, abortListener };
+      this.gateWaiters.push(waiter);
       try {
         signal.addEventListener("abort", abortListener, { once: true });
       } catch {
-        this.cancelRateWaiter(waiter);
+        this.cancelGateWaiter(waiter);
         return;
       }
-      this.pumpRatePermits();
+      this.pumpTransportGate();
     });
   }
 
-  private pumpRatePermits(): void {
-    this.pruneStartTimes();
+  private pumpTransportGate(): void {
+    let current: number;
+    try {
+      current = this.readRateNow();
+    } catch (error) {
+      this.failGateWaiters(normalizeError(error));
+      return;
+    }
+    this.pruneStartTimes(current);
+    this.gateWaiters.sort((left, right) =>
+      left.flight.priorityRank - right.flight.priorityRank ||
+      left.flight.sequence - right.flight.sequence,
+    );
     while (
-      this.rateWaiters.length > 0 &&
+      this.gateWaiters.length > 0 &&
+      this.activeTransportCount < MAX_CONCURRENT_REQUESTS &&
       this.startTimes.length < MAX_STARTS_PER_SECOND
     ) {
-      const waiter = this.rateWaiters.shift()!;
-      this.removeRateAbortListener(waiter);
+      const waiter = this.gateWaiters.shift()!;
+      this.removeGateAbortListener(waiter);
       if (waiter.signal.aborted) {
         waiter.reject(cancelledError());
         continue;
       }
-      this.startTimes.push(this.now());
-      waiter.resolve();
+      this.startTimes.push(current);
+      this.activeTransportCount += 1;
+      waiter.flight.state = "running";
+      let released = false;
+      const release = (): void => {
+        if (released) return;
+        released = true;
+        waiter.flight.releaseTransport = undefined;
+        this.activeTransportCount = Math.max(0, this.activeTransportCount - 1);
+        this.pumpTransportGate();
+      };
+      waiter.flight.releaseTransport = release;
+      waiter.resolve(release);
     }
-    if (this.rateWaiters.length > 0) this.scheduleRatePump();
+    if (this.gateWaiters.length > 0) this.scheduleRatePump();
   }
 
-  private cancelRateWaiter(waiter: RateWaiter): void {
-    const index = this.rateWaiters.indexOf(waiter);
+  private cancelGateWaiter(waiter: TransportGateWaiter): void {
+    const index = this.gateWaiters.indexOf(waiter);
     if (index < 0) return;
-    this.rateWaiters.splice(index, 1);
-    this.removeRateAbortListener(waiter);
+    this.gateWaiters.splice(index, 1);
+    this.removeGateAbortListener(waiter);
     waiter.reject(cancelledError());
-    if (this.rateWaiters.length === 0 && this.rateTimer !== undefined) {
+    if (this.gateWaiters.length === 0) this.clearRateTimer();
+  }
+
+  private clearRateTimer(): void {
+    this.rateTimerGeneration += 1;
+    this.rateTimerScheduled = false;
+    if (this.rateTimer !== undefined) {
       const handle = this.rateTimer;
       this.rateTimer = undefined;
       try { this.clearTimeout(handle); } catch { /* noop */ }
     }
   }
 
-  private removeRateAbortListener(waiter: RateWaiter): void {
+  private removeGateAbortListener(waiter: TransportGateWaiter): void {
     try {
       waiter.signal.removeEventListener("abort", waiter.abortListener);
     } catch {
       // Listener cleanup must not replace the transport result.
+    }
+  }
+
+  private failGateWaiters(error: KisError): void {
+    this.clearRateTimer();
+    const waiters = this.gateWaiters.splice(0);
+    for (const waiter of waiters) {
+      this.removeGateAbortListener(waiter);
+      waiter.reject(error);
     }
   }
 
@@ -559,59 +681,69 @@ export class RestCoordinator {
       throw normalizeError(error);
     }
     const target = descriptorUrl(descriptor);
-    await this.acquireRatePermit(flight.controller.signal);
-    if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
-    let rawResponse: unknown;
+    const releaseTransport = await this.acquireTransportGate(flight);
     try {
-      rawResponse = await this.fetch(target.url, {
-        method: "GET",
-        headers: Object.freeze({
-          "Content-Type": "application/json; charset=utf-8",
-          authorization: `Bearer ${authorization.token}`,
-          appkey: authorization.appKey,
-          appsecret: authorization.appSecret,
-          tr_id: target.trId,
-          custtype: "P",
-        }),
-        signal: flight.controller.signal,
-      });
-    } catch {
-      if (flight.controller.signal.aborted) throw cancelledError();
-      throw restError("NETWORK", true, "KIS 시세 서버에 연결하지 못했습니다.");
-    }
-    if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
+      if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
+      let rawResponse: unknown;
+      try {
+        const fetchOperation = Promise.resolve().then(() => this.fetch(target.url, {
+          method: "GET",
+          headers: Object.freeze({
+            "Content-Type": "application/json; charset=utf-8",
+            authorization: `Bearer ${authorization.token}`,
+            appkey: authorization.appKey,
+            appsecret: authorization.appSecret,
+            tr_id: target.trId,
+            custtype: "P",
+          }),
+          signal: flight.controller.signal,
+        }));
+        rawResponse = await raceWithAbort(fetchOperation, flight.controller.signal);
+      } catch (error) {
+        if (error instanceof KisError) throw error;
+        throw restError("NETWORK", true, "KIS 시세 서버에 연결하지 못했습니다.");
+      }
+      if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
 
-    const payload = await this.decodeResponse(rawResponse, authorization);
-    const receivedAt = this.now();
-    let quote: QuoteSample;
-    try {
-      quote = flight.request.adapter.parseRest(
-        payload,
-        flight.request.instrument,
-        { receivedAt, sessionEpoch: flight.request.marketSnapshot.sessionEpoch },
+      const payload = await this.decodeResponse(
+        rawResponse,
+        authorization,
+        flight.controller.signal,
       );
-    } catch (error) {
-      if (error instanceof KisError) throw error;
-      throw protocolError();
-    }
+      const receivedAt = this.now();
+      let quote: QuoteSample;
+      try {
+        quote = flight.request.adapter.parseRest(
+          payload,
+          flight.request.instrument,
+          { receivedAt, sessionEpoch: flight.request.marketSnapshot.sessionEpoch },
+        );
+      } catch (error) {
+        if (error instanceof KisError) throw error;
+        throw protocolError();
+      }
 
-    let currentIdentity: CredentialIdentity;
-    try {
-      currentIdentity = await this.credentials.initialize();
-    } catch (error) {
-      throw normalizeError(error);
+      let currentIdentity: CredentialIdentity;
+      try {
+        currentIdentity = await this.credentials.initialize();
+      } catch (error) {
+        throw normalizeError(error);
+      }
+      if (!sameCredential(currentIdentity, authorization)) throw changedCredentialError();
+      if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
+      if (this.now() >= flight.request.marketSnapshot.nextTransitionAt) {
+        throw sessionTransitionError();
+      }
+      return quote;
+    } finally {
+      releaseTransport();
     }
-    if (!sameCredential(currentIdentity, authorization)) throw changedCredentialError();
-    if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
-    if (this.now() >= flight.request.marketSnapshot.nextTransitionAt) {
-      throw sessionTransitionError();
-    }
-    return quote;
   }
 
   private async decodeResponse(
     rawResponse: unknown,
     authorization: RestAuthorizationLease,
+    signal: AbortSignal,
   ): Promise<unknown> {
     let ok: unknown;
     let status: unknown;
@@ -658,8 +790,12 @@ export class RestCoordinator {
 
     let payload: unknown;
     try {
-      payload = await Reflect.apply(json, rawResponse, []);
-    } catch {
+      const bodyOperation = Promise.resolve().then(() =>
+        Reflect.apply(json as (...args: never[]) => unknown, rawResponse, []),
+      );
+      payload = await raceWithAbort(bodyOperation, signal);
+    } catch (error) {
+      if (error instanceof KisError) throw error;
       throw protocolError();
     }
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
