@@ -279,6 +279,36 @@ describe("thin Stream Deck stock action wrappers", () => {
     firstWrite.resolve();
   });
 
+  it("does not consume a later external A setting after settled A/B writes", async () => {
+    const target = controller<Record<string, unknown>>();
+    const action = keyAction();
+    const wrapper = new DomesticStockAction(target, diagnostics());
+
+    await wrapper.onWillAppear({
+      action,
+      payload: { settings: { stockCode: "005930", stockName: "A" } },
+    } as never);
+    await vi.waitFor(() => expect(action.setSettings).toHaveBeenCalledOnce());
+    const normalizedA = action.setSettings.mock.calls[0]?.[0];
+    await wrapper.onDidReceiveSettings({
+      action,
+      payload: { settings: { stockCode: "000660", stockName: "B" } },
+    } as never);
+    await vi.waitFor(() => expect(action.setSettings).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    target.updateSettings.mockClear();
+
+    await wrapper.onDidReceiveSettings({
+      action,
+      payload: { settings: normalizedA },
+    } as never);
+
+    expect(target.updateSettings).toHaveBeenCalledWith(
+      "action-1",
+      expect.objectContaining({ stockCode: "005930", stockName: "A" }),
+    );
+  });
+
   it("records only a safe generic action error when an isolated callback throws", async () => {
     const target = controller<Record<string, unknown>>();
     target.appear.mockRejectedValueOnce(new Error("raw-secret raw-token"));

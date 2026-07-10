@@ -7,6 +7,7 @@ export default {
     file: "bin/plugin.js",
     format: "esm",
     sourcemap: true,
+    sourcemapExcludeSources: false,
   },
   external: ["@elgato/streamdeck", "ws"],
   plugins: [

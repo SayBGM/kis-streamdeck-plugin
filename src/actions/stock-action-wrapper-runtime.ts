@@ -161,8 +161,9 @@ export class StockActionWrapperRuntime<Settings> {
       try {
         await port.setSettings(settings);
       } catch (error) {
-        this.removeInternalWrite(state, marker);
         this.record(error);
+      } finally {
+        this.removeInternalWrite(state, marker);
       }
     });
     state.persistenceTail = operation.catch((error: unknown) => {
