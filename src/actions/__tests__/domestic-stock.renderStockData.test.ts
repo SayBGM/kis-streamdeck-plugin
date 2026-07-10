@@ -1,249 +1,121 @@
-/**
- * Characterization tests for DomesticStockAction.renderStockData()
- *
- * Verifies render key deduplication behavior (existing logic, preserved by DDD).
- * Tests debouncing behavior added in SPEC-PERF-001.
- */
+/** Rendering policy moved to StockActionController + RenderScheduler. These tests
+ * preserve the SDK boundary: the thin wrapper never renders independently. */
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { StockData } from "../../types/index.js";
-import { renderStockCard } from "../../renderer/stock-card.js";
+vi.mock("@elgato/streamdeck", () => ({ SingletonAction: class {} }));
 
-// Mock all external dependencies
-vi.mock("@elgato/streamdeck", () => ({
-  SingletonAction: class {
-    readonly manifestId = "";
-  },
-}));
+import { DomesticStockAction } from "../domestic-stock.js";
 
-vi.mock("../../kis/websocket-manager.js", () => ({
-  kisWebSocket: {
-    subscribe: vi.fn().mockResolvedValue(undefined),
-    unsubscribe: vi.fn(),
-  },
-}));
-
-vi.mock("../../kis/domestic-parser.js", () => ({
-  parseDomesticData: vi.fn(),
-}));
-
-vi.mock("../../kis/rest-price.js", () => ({
-  fetchDomesticPrice: vi.fn().mockResolvedValue(null),
-}));
-
-vi.mock("../../renderer/stock-card.js", () => ({
-  renderStockCard: vi.fn().mockReturnValue("<svg/>"),
-  renderWaitingCard: vi.fn().mockReturnValue("<svg/>"),
-  renderConnectedCard: vi.fn().mockReturnValue("<svg/>"),
-  renderSetupCard: vi.fn().mockReturnValue("<svg/>"),
-  svgToDataUri: vi.fn().mockImplementation((svg: string, key: string) => `data:${key}`),
-  getMarketSession: vi.fn().mockReturnValue("REG"),
-}));
-
-vi.mock("../../types/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../types/index.js")>();
+function controller() {
   return {
-    ...actual,
-    TR_ID_DOMESTIC: "H0STCNT0",
+    appear: vi.fn(async () => undefined),
+    updateSettings: vi.fn(async () => undefined),
+    disappear: vi.fn(async () => undefined),
+    manualRefresh: vi.fn(async () => undefined),
   };
-});
+}
 
-vi.mock("../../utils/logger.js", () => ({
-  logger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
-}));
+function action() {
+  return {
+    id: "action-1",
+    isKey: () => true,
+    setImage: vi.fn(async () => undefined),
+    setSettings: vi.fn(async () => undefined),
+  };
+}
 
-const makeStockData = (price: number): StockData => ({
-  ticker: "005930",
-  name: "삼성전자",
-  price,
-  change: 200,
-  changeRate: 0.27,
-  sign: "rise",
-});
+function appearEvent(target = action()) {
+  return {
+    action: target,
+    payload: {
+      settings: {
+        schemaVersion: 2,
+        stockCode: "005930",
+        stockName: "삼성전자",
+        instrumentType: "stock",
+      },
+    },
+  };
+}
 
-type PrivateAction = {
-  renderStockData: (
-    actionId: string,
-    action: { setImage(image: string): Promise<void> | void; id?: string },
-    data: StockData,
-    options: { source: "live" | "backup"; force?: boolean; preserveTimestamp?: boolean }
-  ) => Promise<void>;
-  renderLastDataIfPossible: (actionId: string) => void;
-  connectionStateByAction: Map<string, string>;
-  lastRenderKeyByAction: Map<string, string>;
-  lastDataAtByAction: Map<string, number>;
-  lastDataByAction: Map<string, StockData>;
-  actionRefMap: Map<string, { setImage(image: string): Promise<void> | void; id?: string }>;
-  pendingRenderByAction: Map<string, { action: { setImage(image: string): Promise<void> | void }; dataUri: string; renderKey: string }>;
-  flushTimer: ReturnType<typeof setTimeout> | null;
-  flushPendingRenders: () => void;
-  manualRefreshByAction: Set<string>;
-};
+describe("DomesticStockAction rendering boundary", () => {
+  beforeEach(() => vi.clearAllMocks());
 
-describe("DomesticStockAction.renderStockData() — characterization tests", () => {
-  let action: PrivateAction;
-
-  beforeEach(async () => {
-    vi.useFakeTimers();
-    vi.resetModules();
-
-    // Re-import after reset so mocks are applied fresh
-    const mod = await import("../../actions/domestic-stock.js");
-    action = new mod.DomesticStockAction() as unknown as PrivateAction;
+  it("does not render before the controller submits a view", async () => {
+    const target = controller();
+    const sdkAction = action();
+    await new DomesticStockAction(target).onWillAppear(appearEvent(sdkAction) as never);
+    expect(sdkAction.setImage).not.toHaveBeenCalled();
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.clearAllMocks();
+  it("passes controller output through the plain action port", async () => {
+    const target = controller();
+    target.appear.mockImplementationOnce(async (input: unknown) => {
+      const port = (input as { actionPort: { setImage(image: string): Promise<void> } }).actionPort;
+      await port.setImage("data:image/svg+xml,one");
+    });
+    const sdkAction = action();
+
+    await new DomesticStockAction(target).onWillAppear(appearEvent(sdkAction) as never);
+
+    expect(sdkAction.setImage).toHaveBeenCalledWith("data:image/svg+xml,one");
   });
 
-  it("preserves BROKEN connection state when backup data is rendered", async () => {
-    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
-    const data = makeStockData(75400);
-    const mockedRenderStockCard = vi.mocked(renderStockCard);
+  it("does not coalesce images because scheduling belongs to RenderScheduler", async () => {
+    const target = controller();
+    target.appear.mockImplementationOnce(async (input: unknown) => {
+      const port = (input as { actionPort: { setImage(image: string): Promise<void> } }).actionPort;
+      await port.setImage("first");
+      await port.setImage("last");
+    });
+    const sdkAction = action();
 
-    action.connectionStateByAction.set("action-1", "BROKEN");
+    await new DomesticStockAction(target).onWillAppear(appearEvent(sdkAction) as never);
 
-    await action.renderStockData("action-1", mockAction, data, { source: "backup" });
-    vi.advanceTimersByTime(50);
+    expect(sdkAction.setImage.mock.calls).toEqual([["first"], ["last"]]);
+  });
 
-    expect(mockedRenderStockCard).toHaveBeenLastCalledWith(
-      data,
-      "domestic",
-      expect.objectContaining({
-        connectionState: "BROKEN",
-      })
+  it("isolates a controller rejection caused by a late image failure", async () => {
+    const target = controller();
+    const sdkAction = action();
+    sdkAction.setImage.mockRejectedValueOnce(new Error("gone"));
+    target.appear.mockImplementationOnce(async (input: unknown) => {
+      const port = (input as { actionPort: { setImage(image: string): Promise<void> } }).actionPort;
+      await port.setImage("late");
+    });
+
+    await expect(new DomesticStockAction(target).onWillAppear(
+      appearEvent(sdkAction) as never,
+    )).resolves.toBeUndefined();
+  });
+
+  it("settings receipt delegates policy changes without direct rendering", async () => {
+    const target = controller();
+    const sdkAction = action();
+    await new DomesticStockAction(target).onDidReceiveSettings(
+      appearEvent(sdkAction) as never,
     );
+    expect(target.updateSettings).toHaveBeenCalledOnce();
+    expect(sdkAction.setImage).not.toHaveBeenCalled();
   });
 
-  it("passes manual refresh state through to the renderer", async () => {
-    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
-    const data = makeStockData(75400);
-    const mockedRenderStockCard = vi.mocked(renderStockCard);
-
-    action.connectionStateByAction.set("action-1", "LIVE");
-    action.manualRefreshByAction.add("action-1");
-
-    await action.renderStockData("action-1", mockAction, data, { source: "live" });
-    vi.advanceTimersByTime(50);
-
-    expect(mockedRenderStockCard).toHaveBeenLastCalledWith(
-      data,
-      "domestic",
-      expect.objectContaining({
-        connectionState: "LIVE",
-        isRefreshing: true,
-      })
-    );
+  it("manual refresh delegates without direct rendering", async () => {
+    const target = controller();
+    const sdkAction = action();
+    await new DomesticStockAction(target).onKeyDown({ action: sdkAction } as never);
+    expect(target.manualRefresh).toHaveBeenCalledOnce();
+    expect(sdkAction.setImage).not.toHaveBeenCalled();
   });
 
-  it("should enqueue setImage in debounce queue and NOT call immediately", async () => {
-    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
-    const data = makeStockData(75400);
-    action.connectionStateByAction.set("action-1", "LIVE");
-
-    await action.renderStockData("action-1", mockAction, data, { source: "live" });
-
-    // setImage should NOT be called immediately (debounced)
-    expect(mockAction.setImage).not.toHaveBeenCalled();
-    expect(action.pendingRenderByAction.size).toBe(1);
+  it("ignores dial appearances because the manifest action is a key", async () => {
+    const target = controller();
+    const sdkAction = { ...action(), isKey: () => false };
+    await new DomesticStockAction(target).onWillAppear(appearEvent(sdkAction) as never);
+    expect(target.appear).not.toHaveBeenCalled();
   });
 
-  it("should call setImage after 50ms debounce timer fires", async () => {
-    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
-    const data = makeStockData(75400);
-    action.connectionStateByAction.set("action-1", "LIVE");
-
-    await action.renderStockData("action-1", mockAction, data, { source: "live" });
-
-    expect(mockAction.setImage).not.toHaveBeenCalled();
-
-    // Advance timer 50ms
-    vi.advanceTimersByTime(50);
-
-    expect(mockAction.setImage).toHaveBeenCalledTimes(1);
-    expect(action.pendingRenderByAction.size).toBe(0);
-    expect(action.flushTimer).toBeNull();
-  });
-
-  it("last-write-wins: multiple updates in 50ms window → only last setImage called", async () => {
-    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
-    action.connectionStateByAction.set("action-1", "LIVE");
-
-    // Enqueue 3 renders with different prices
-    await action.renderStockData("action-1", mockAction, makeStockData(100), { source: "live" });
-    await action.renderStockData("action-1", mockAction, makeStockData(101), { source: "live" });
-    await action.renderStockData("action-1", mockAction, makeStockData(102), { source: "live" });
-
-    expect(mockAction.setImage).not.toHaveBeenCalled();
-    expect(action.pendingRenderByAction.size).toBe(1); // only latest pending
-
-    vi.advanceTimersByTime(50);
-
-    // Only 1 setImage call with the last render key (price 102)
-    expect(mockAction.setImage).toHaveBeenCalledTimes(1);
-    const calledWith = mockAction.setImage.mock.calls[0]?.[0] as string;
-    expect(calledWith).toContain("102.00"); // renderKey contains normalized price
-  });
-
-  it("deduplication: same renderKey skips scheduling", async () => {
-    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
-    const data = makeStockData(75400);
-    action.connectionStateByAction.set("action-1", "LIVE");
-
-    // First render
-    await action.renderStockData("action-1", mockAction, data, { source: "live" });
-    vi.advanceTimersByTime(50); // flush
-    expect(mockAction.setImage).toHaveBeenCalledTimes(1);
-
-    // Second render with same data (same renderKey)
-    mockAction.setImage.mockClear();
-    await action.renderStockData("action-1", mockAction, data, { source: "live" });
-    vi.advanceTimersByTime(50);
-
-    // Dedup: same key → nothing added to pendingRenderByAction
-    expect(mockAction.setImage).not.toHaveBeenCalled();
-  });
-
-  it("force=true bypasses deduplication", async () => {
-    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
-    const data = makeStockData(75400);
-    action.connectionStateByAction.set("action-1", "LIVE");
-
-    // First render
-    await action.renderStockData("action-1", mockAction, data, { source: "live" });
-    vi.advanceTimersByTime(50);
-    expect(mockAction.setImage).toHaveBeenCalledTimes(1);
-
-    // Second render with force=true — should render even with same key
-    mockAction.setImage.mockClear();
-    await action.renderStockData("action-1", mockAction, data, { source: "live", force: true });
-    vi.advanceTimersByTime(50);
-
-    expect(mockAction.setImage).toHaveBeenCalledTimes(1);
-  });
-
-  it("replaying cached data preserves the original data timestamp", async () => {
-    const mockAction = { setImage: vi.fn().mockResolvedValue(undefined) };
-    const data = makeStockData(75400);
-    action.connectionStateByAction.set("action-1", "LIVE");
-
-    await action.renderStockData("action-1", mockAction, data, { source: "live" });
-    const firstTimestamp = action.lastDataAtByAction.get("action-1");
-
-    expect(firstTimestamp).toBeDefined();
-
-    action.lastDataByAction.set("action-1", data);
-    action.actionRefMap.set("action-1", mockAction);
-
-    vi.advanceTimersByTime(5_000);
-    action.renderLastDataIfPossible("action-1");
-
-    expect(action.lastDataAtByAction.get("action-1")).toBe(firstTimestamp);
+  it("keeps the exact manifest UUID", () => {
+    expect(new DomesticStockAction(controller()).manifestId)
+      .toBe("com.kis.streamdeck.domestic-stock");
   });
 });

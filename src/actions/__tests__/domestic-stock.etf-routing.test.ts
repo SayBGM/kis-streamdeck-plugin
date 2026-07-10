@@ -1,56 +1,24 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TR_ID_DOMESTIC } from "../../types/index.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-  fetchDomesticPrice: vi.fn().mockResolvedValue(null),
-  subscribe: vi.fn().mockResolvedValue(undefined),
-  unsubscribe: vi.fn(),
-  getGlobalSettings: vi.fn(),
-}));
-
-vi.mock("@elgato/streamdeck", () => ({
-  SingletonAction: class {
-    readonly manifestId = "";
-  },
-}));
-
-vi.mock("../../kis/websocket-manager.js", () => ({
-  kisWebSocket: {
-    subscribe: mocks.subscribe,
-    unsubscribe: mocks.unsubscribe,
-  },
-}));
-
-vi.mock("../../kis/domestic-parser.js", () => ({
-  parseDomesticData: vi.fn(),
-}));
-
-vi.mock("../../kis/rest-price.js", () => ({
-  fetchDomesticPrice: mocks.fetchDomesticPrice,
-}));
-
-vi.mock("../../renderer/stock-card.js", () => ({
-  renderStockCard: vi.fn().mockReturnValue("<svg/>"),
-  renderWaitingCard: vi.fn().mockReturnValue("<svg/>"),
-  renderConnectedCard: vi.fn().mockReturnValue("<svg/>"),
-  renderSetupCard: vi.fn().mockReturnValue("<svg/>"),
-  renderErrorCard: vi.fn().mockReturnValue("<svg/>"),
-  renderRecoveryCard: vi.fn().mockReturnValue("<svg/>"),
-  svgToDataUri: vi.fn().mockReturnValue("data:image/svg+xml,test"),
-}));
-
-vi.mock("../../kis/settings-store.js", () => ({
-  kisGlobalSettings: {
-    get: mocks.getGlobalSettings,
-    waitUntilReady: vi.fn(),
-  },
-}));
-
-vi.mock("../../utils/logger.js", () => ({
-  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-}));
+vi.mock("@elgato/streamdeck", () => ({ SingletonAction: class {} }));
 
 import { DomesticStockAction } from "../domestic-stock.js";
+
+const target = {
+  appear: vi.fn(async () => undefined),
+  updateSettings: vi.fn(async () => undefined),
+  disappear: vi.fn(async () => undefined),
+  manualRefresh: vi.fn(async () => undefined),
+};
+
+function action(id = "etf-1") {
+  return {
+    id,
+    isKey: () => true,
+    setImage: vi.fn(async () => undefined),
+    setSettings: vi.fn(async () => undefined),
+  };
+}
 
 function etfSettings() {
   return {
@@ -60,110 +28,69 @@ function etfSettings() {
   };
 }
 
-describe("DomesticStockAction ETF routing", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    mocks.getGlobalSettings.mockReturnValue({
-      appKey: "app-key",
-      appSecret: "app-secret",
-    });
-    mocks.fetchDomesticPrice.mockResolvedValue(null);
-  });
+describe("DomesticStockAction ETF routing settings", () => {
+  beforeEach(() => vi.clearAllMocks());
 
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.clearAllMocks();
-  });
-
-  it("normalizes an ETF code, routes its snapshot, and keeps unified live trades", async () => {
-    const action = new DomesticStockAction();
-
-    await action.onWillAppear({
-      action: { id: "etf-1", setImage: vi.fn() },
+  it("normalizes ETF settings before the controller resolves its adapter", async () => {
+    const wrapper = new DomesticStockAction(target);
+    await wrapper.onWillAppear({
+      action: action(),
       payload: { settings: etfSettings() },
     } as never);
 
-    expect(mocks.fetchDomesticPrice).toHaveBeenCalledWith(
-      "0210A0",
-      "테스트 ETF",
-      "etf",
-    );
-    expect(mocks.subscribe).toHaveBeenCalledWith(
-      TR_ID_DOMESTIC,
-      "0210A0",
-      expect.any(Function),
-      expect.any(Function),
-      expect.any(Function),
-    );
+    expect(target.appear).toHaveBeenCalledWith(expect.objectContaining({
+      settings: expect.objectContaining({
+        stockCode: "0210A0",
+        instrumentType: "etf",
+      }),
+    }));
   });
 
-  it("defaults legacy settings to stock on manual refresh", async () => {
-    const action = new DomesticStockAction();
-
-    await action.onKeyDown({
-      action: { id: "stock-1", setImage: vi.fn() },
+  it("defaults legacy settings to stock", async () => {
+    const wrapper = new DomesticStockAction(target);
+    await wrapper.onWillAppear({
+      action: action(),
       payload: { settings: { stockCode: "005930", stockName: "삼성전자" } },
     } as never);
 
-    expect(mocks.fetchDomesticPrice).toHaveBeenCalledWith(
-      "005930",
-      "삼성전자",
-      "stock",
-    );
+    expect(target.appear).toHaveBeenCalledWith(expect.objectContaining({
+      settings: expect.objectContaining({ instrumentType: "stock" }),
+    }));
   });
 
   it("keeps ETF routing when settings are received again", async () => {
-    const action = new DomesticStockAction();
-
-    await action.onDidReceiveSettings({
-      action: { id: "etf-1", setImage: vi.fn() },
+    const wrapper = new DomesticStockAction(target);
+    await wrapper.onDidReceiveSettings({
+      action: action(),
       payload: { settings: etfSettings() },
     } as never);
 
-    expect(mocks.fetchDomesticPrice).toHaveBeenCalledWith(
-      "0210A0",
-      "테스트 ETF",
-      "etf",
+    expect(target.updateSettings).toHaveBeenCalledWith(
+      "etf-1",
+      expect.objectContaining({ stockCode: "0210A0", instrumentType: "etf" }),
     );
   });
 
-  it("keeps ETF routing for the initial retry", async () => {
-    const action = new DomesticStockAction();
-
-    await action.onWillAppear({
-      action: { id: "etf-1", setImage: vi.fn() },
-      payload: { settings: etfSettings() },
+  it("preserves unknown action fields during ETF migration", async () => {
+    const wrapper = new DomesticStockAction(target);
+    await wrapper.onWillAppear({
+      action: action(),
+      payload: { settings: { ...etfSettings(), futureOption: "preserved" } },
     } as never);
-    await vi.advanceTimersByTimeAsync(4_000);
 
-    expect(mocks.fetchDomesticPrice).toHaveBeenNthCalledWith(
-      2,
-      "0210A0",
-      "테스트 ETF",
-      "etf",
-    );
+    expect(target.appear).toHaveBeenCalledWith(expect.objectContaining({
+      settings: expect.objectContaining({ futureOption: "preserved" }),
+    }));
   });
 
-  it("keeps ETF routing while polling", async () => {
-    mocks.getGlobalSettings.mockReturnValue({
-      appKey: "app-key",
-      appSecret: "app-secret",
-      updateMode: "poll",
-      pollIntervalSec: "30",
-    });
-    const action = new DomesticStockAction();
-
-    await action.onWillAppear({
-      action: { id: "etf-1", setImage: vi.fn() },
-      payload: { settings: etfSettings() },
+  it("manual refresh delegates by action id without reinterpreting stale payload settings", async () => {
+    const wrapper = new DomesticStockAction(target);
+    await wrapper.onKeyDown({
+      action: action(),
+      payload: { settings: { instrumentType: "stock" } },
     } as never);
-    await vi.advanceTimersByTimeAsync(30_000);
 
-    expect(mocks.fetchDomesticPrice).toHaveBeenNthCalledWith(
-      2,
-      "0210A0",
-      "테스트 ETF",
-      "etf",
-    );
+    expect(target.manualRefresh).toHaveBeenCalledWith("etf-1");
+    expect(target.appear).not.toHaveBeenCalled();
   });
 });
