@@ -383,4 +383,52 @@ describe("RestCoordinator cache policy", () => {
     await expect(request(coordinator)).resolves.toMatchObject({ price: 74_000 });
     expect(fetch).toHaveBeenCalledTimes(3);
   });
+
+  it("does not return a success cache crossed during credential initialization", async () => {
+    const credentials = mutableCredentials();
+    const transitionAt = closedNow + 20_000;
+    const shortSession = { ...closedSnapshot, nextTransitionAt: transitionAt };
+    let now = closedNow;
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse("71000"));
+    const coordinator = new RestCoordinator(credentials, { fetch, now: () => now });
+    await expect(request(coordinator, shortSession)).resolves.toMatchObject({ price: 71_000 });
+
+    let releaseInitialize!: () => void;
+    credentials.initialize.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseInitialize = () => resolve(identity(credentials.current));
+    }));
+    now = transitionAt - 1;
+    const pending = request(coordinator, shortSession);
+    await flush();
+    expect(releaseInitialize).toBeTypeOf("function");
+    now = transitionAt;
+    releaseInitialize();
+
+    await expect(pending).rejects.toMatchObject({ code: "TIMEOUT", scope: "rest" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("does not return a negative cache crossed during credential initialization", async () => {
+    const credentials = mutableCredentials();
+    const transitionAt = closedNow + 20_000;
+    const shortSession = { ...closedSnapshot, nextTransitionAt: transitionAt };
+    let now = closedNow;
+    const fetch = vi.fn<RestFetch>().mockResolvedValue({ ok: false, status: 503 });
+    const coordinator = new RestCoordinator(credentials, { fetch, now: () => now });
+    await expect(request(coordinator, shortSession)).rejects.toMatchObject({ code: "NETWORK" });
+
+    let releaseInitialize!: () => void;
+    credentials.initialize.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseInitialize = () => resolve(identity(credentials.current));
+    }));
+    now = transitionAt - 1;
+    const pending = request(coordinator, shortSession);
+    await flush();
+    expect(releaseInitialize).toBeTypeOf("function");
+    now = transitionAt;
+    releaseInitialize();
+
+    await expect(pending).rejects.toMatchObject({ code: "TIMEOUT", scope: "rest" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
 });

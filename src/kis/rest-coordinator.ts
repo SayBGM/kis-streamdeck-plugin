@@ -329,6 +329,9 @@ export class RestCoordinator {
       throw restError("AUTH_REJECTED", false, "KIS API 자격증명이 비어 있습니다.");
     }
     if (request.signal?.aborted) throw cancelledError();
+    if (this.now() >= request.marketSnapshot.nextTransitionAt) {
+      throw sessionTransitionError();
+    }
 
     const cacheKey = `${request.adapterId}|${request.instrumentKey}|${request.marketSnapshot.sessionEpoch}|${identity.credentialGeneration}`;
     if (request.priority !== "manual") {
