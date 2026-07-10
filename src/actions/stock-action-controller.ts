@@ -16,8 +16,8 @@ import type {
 import type { RestQuoteRequest } from "../kis/rest-coordinator.js";
 import type { RenderCategory, RenderIntervalMs, RenderRequest } from "../renderer/render-scheduler.js";
 import type { SettingsSnapshot } from "../settings/settings-repository.js";
-import type { DataMode, GlobalPreferencesV2 } from "../settings/schema.js";
-import type { Market, MarketSession, PriceSign } from "../types/index.js";
+import type { GlobalPreferencesV2 } from "../settings/schema.js";
+import type { Market, MarketSession } from "../types/index.js";
 
 const INITIAL_WS_GRACE_MS = 5_000;
 const POLICY_TICK_MS = 60_000;
@@ -136,6 +136,9 @@ interface ActionSession<Settings> {
   policyTimer?: TimerHandle;
   recoveryTimer?: TimerHandle;
   fallbackAbort?: AbortController;
+  readonly policyAbortControllers: Set<AbortController>;
+  retargetPromise?: Promise<void>;
+  manualAbort?: AbortController;
   lastQuote?: QuoteSample;
   connection: StockActionConnection;
   stale: boolean;
@@ -198,6 +201,13 @@ function sameDescriptor(
   return left?.trId === right.trId && left.trKey === right.trKey;
 }
 
+function sameMarketSnapshot(left: MarketSnapshot, right: MarketSnapshot): boolean {
+  return left.market === right.market &&
+    left.session === right.session &&
+    left.sessionEpoch === right.sessionEpoch &&
+    left.nextTransitionAt === right.nextTransitionAt;
+}
+
 function semanticKey(view: StockActionView): string {
   return JSON.stringify([
     view.instrument.name,
@@ -240,6 +250,7 @@ export class StockActionController<Settings> {
   private readonly clearTimer: (handle: TimerHandle) => void;
   private readonly records = new Map<string, ActionRecord<Settings>>();
   private readonly sessions = new Map<string, ActionSession<Settings>>();
+  private readonly fatalRenderGenerations = new Map<string, number>();
   private settingsSnapshot?: SettingsSnapshot;
   private unsubscribeSettings?: () => void;
   private settingsSubscriptionStarted = false;
@@ -262,7 +273,10 @@ export class StockActionController<Settings> {
   }
 
   async appear(input: StockActionAppearInput<Settings>): Promise<void> {
-    if (this.destroyed) return;
+    if (this.destroyed) {
+      await this.settingsRepository.whenReady();
+      return;
+    }
     const epoch = ++this.nextEpoch;
     const previous = this.records.get(input.actionId);
     this.records.set(input.actionId, { epoch, input });
@@ -275,7 +289,10 @@ export class StockActionController<Settings> {
   }
 
   async updateSettings(actionId: string, settings: Settings): Promise<void> {
-    if (this.destroyed) return;
+    if (this.destroyed) {
+      await this.settingsRepository.whenReady();
+      return;
+    }
     const previous = this.records.get(actionId);
     if (!previous?.input) {
       await this.ensureReady();
@@ -321,6 +338,7 @@ export class StockActionController<Settings> {
     this.destroyed = true;
     this.nextEpoch += 1;
     for (const actionId of [...this.sessions.keys()]) this.teardownSession(actionId);
+    for (const actionId of [...this.fatalRenderGenerations.keys()]) this.teardownSession(actionId);
     this.records.clear();
     try { this.unsubscribeSettings?.(); } catch { /* best effort */ }
     this.unsubscribeSettings = undefined;
@@ -382,6 +400,7 @@ export class StockActionController<Settings> {
       hasValidWebSocketData: false,
       webSocketRevision: 0,
       fallbackActive: false,
+      policyAbortControllers: new Set(),
       destroyed: false,
     };
     this.sessions.set(input.actionId, session);
@@ -398,12 +417,8 @@ export class StockActionController<Settings> {
       return;
     }
 
-    try { clock.start(); } catch { /* snapshot remains usable */ }
-    session.unsubscribeClock = clock.subscribe((marketSnapshot) => {
-      if (!this.isCurrent(session)) return;
-      session.snapshot = marketSnapshot;
-      this.reconfigurePolicy(session);
-    });
+    this.attachClock(session);
+    this.reconfigurePolicy(session);
   }
 
   private renderStandaloneFatal(
@@ -417,6 +432,7 @@ export class StockActionController<Settings> {
       input.actionId,
       global.settings.preferences.renderIntervalMs,
     );
+    this.fatalRenderGenerations.set(input.actionId, generation);
     const view: StockActionView = Object.freeze({
       actionId: input.actionId,
       instrument: Object.freeze({ symbol: "", name: "설정 필요", market: this.fallbackMarket }),
@@ -449,7 +465,9 @@ export class StockActionController<Settings> {
       );
       session.policyGeneration += 1;
       this.clearPolicyWork(session, true);
+      session.closedRequestKey = undefined;
       if (!hasCredentials(snapshot)) {
+        this.detachClock(session);
         session.connection = "BROKEN";
         session.error = Object.freeze({
           code: snapshot.status.baseKnown ? "NO_CREDENTIALS" : "SETTINGS",
@@ -460,6 +478,7 @@ export class StockActionController<Settings> {
         this.submitView(session, "immediate");
       } else {
         session.error = undefined;
+        this.attachClock(session);
         this.reconfigurePolicy(session);
       }
     }
@@ -470,8 +489,6 @@ export class StockActionController<Settings> {
     const generation = ++session.policyGeneration;
     this.clearPolicyWork(session, false);
     session.snapshot = this.effectiveSnapshot(session.adapter.market, session.clock.snapshot());
-    session.closedRequestKey = undefined;
-
     this.armPolicyTick(session, generation);
     if (session.preferences.dataMode === "automatic" && isRealtime(session.snapshot.session)) {
       this.startAutomaticRealtime(session, generation);
@@ -490,13 +507,23 @@ export class StockActionController<Settings> {
     session.connection = session.lastQuote ? session.connection : "waiting";
     session.stale = false;
     session.error = undefined;
-    const descriptor = session.adapter.webSocketDescriptor(session.instrument, this.safeNow());
-    session.wsDescriptor = descriptor;
-    const observer: SubscriptionObserver = {
-      onState: (value) => this.handleSubscriptionState(session, generation, value),
-      onData: (event) => this.handleSubscriptionData(session, generation, event),
-    };
-    session.subscription = this.subscriptions.subscribe(descriptor, observer);
+    try {
+      const descriptor = session.adapter.webSocketDescriptor(session.instrument, this.safeNow());
+      session.wsDescriptor = descriptor;
+      const observer: SubscriptionObserver = {
+        onState: (value) => this.handleSubscriptionState(session, generation, value),
+        onData: (event) => this.handleSubscriptionData(session, generation, event),
+      };
+      session.subscription = this.subscriptions.subscribe(descriptor, observer);
+    } catch (error) {
+      session.wsDescriptor = undefined;
+      session.subscription = undefined;
+      session.connection = "BROKEN";
+      session.error = safeError(error, "SUBSCRIPTION_REJECTED");
+      this.submitView(session, "control");
+      this.startFallback(session, generation, true);
+      return;
+    }
     this.submitView(session, "control");
     this.armGrace(session, generation);
   }
@@ -624,8 +651,9 @@ export class StockActionController<Settings> {
     abortableFallback: boolean,
   ): Promise<void> {
     if (!this.isPolicyCurrent(session, generation)) return;
-    const controller = abortableFallback ? new AbortController() : undefined;
-    if (controller) session.fallbackAbort = controller;
+    const controller = new AbortController();
+    session.policyAbortControllers.add(controller);
+    if (abortableFallback) session.fallbackAbort = controller;
     const webSocketRevision = session.webSocketRevision;
     try {
       const result = await this.restCoordinator.requestQuote({
@@ -633,7 +661,7 @@ export class StockActionController<Settings> {
         instrument: session.instrument,
         marketSnapshot: session.snapshot,
         priority,
-        ...(controller ? { signal: controller.signal } : {}),
+        signal: controller.signal,
       });
       if (
         !this.isPolicyCurrent(session, generation) ||
@@ -645,7 +673,7 @@ export class StockActionController<Settings> {
       session.stale = false;
       this.submitView(session, "normal");
     } catch (error) {
-      if (!this.isPolicyCurrent(session, generation) || controller?.signal.aborted) return;
+      if (!this.isPolicyCurrent(session, generation) || controller.signal.aborted) return;
       if (!session.lastQuote) {
         session.connection = "BROKEN";
         session.error = safeError(error, "NETWORK");
@@ -653,11 +681,14 @@ export class StockActionController<Settings> {
       }
     } finally {
       if (session.fallbackAbort === controller) session.fallbackAbort = undefined;
+      session.policyAbortControllers.delete(controller);
     }
   }
 
   private async performManual(session: ActionSession<Settings>): Promise<void> {
     const generation = session.policyGeneration;
+    const controller = new AbortController();
+    session.manualAbort = controller;
     this.submitView(session, "immediate", { refreshing: true });
     try {
       const result = await this.restCoordinator.requestQuote({
@@ -665,6 +696,7 @@ export class StockActionController<Settings> {
         instrument: session.instrument,
         marketSnapshot: session.snapshot,
         priority: "manual",
+        signal: controller.signal,
       });
       if (!this.isPolicyCurrent(session, generation)) return;
       session.lastQuote = result;
@@ -672,22 +704,28 @@ export class StockActionController<Settings> {
       session.error = undefined;
       this.submitView(session, "immediate");
     } catch (error) {
-      if (!this.isPolicyCurrent(session, generation)) return;
+      if (!this.isPolicyCurrent(session, generation) || controller.signal.aborted) return;
       if (!session.lastQuote) {
         session.connection = "BROKEN";
         session.error = safeError(error, "NETWORK");
       }
       this.submitView(session, "immediate");
+    } finally {
+      if (session.manualAbort === controller) session.manualAbort = undefined;
     }
   }
 
   private showRecovery(session: ActionSession<Settings>, generation: number): void {
     this.clearHandle(session, "recoveryTimer");
     this.submitView(session, "control", { recovery: true });
-    session.recoveryTimer = this.safeSetTimeout(() => {
+    const timer = this.safeSetTimeout(() => {
       session.recoveryTimer = undefined;
       if (this.isPolicyCurrent(session, generation)) this.submitView(session, "normal");
     }, RECOVERY_DISPLAY_MS);
+    session.recoveryTimer = timer;
+    if (timer === undefined && this.isPolicyCurrent(session, generation)) {
+      this.submitView(session, "normal");
+    }
   }
 
   private armPolicyTick(session: ActionSession<Settings>, generation: number): void {
@@ -710,27 +748,46 @@ export class StockActionController<Settings> {
       return;
     }
 
-    if (session.subscription && session.wsDescriptor) {
+    if (session.subscription && session.wsDescriptor && !session.retargetPromise) {
       const next = session.adapter.webSocketDescriptor(session.instrument, this.safeNow());
       if (!sameDescriptor(session.wsDescriptor, next)) {
         const old = session.wsDescriptor;
-        void this.subscriptions.retargetAll(old, next).then(
+        let operation: Promise<void>;
+        try {
+          operation = Promise.resolve(this.subscriptions.retargetAll(old, next));
+        } catch (error) {
+          this.handleRetargetFailure(session, generation, error);
+          this.armPolicyTick(session, generation);
+          return;
+        }
+        session.retargetPromise = operation;
+        void operation.then(
           () => {
+            if (session.retargetPromise === operation) session.retargetPromise = undefined;
             if (this.isPolicyCurrent(session, generation)) session.wsDescriptor = next;
           },
           (error) => {
-            if (!this.isPolicyCurrent(session, generation)) return;
-            if (!session.lastQuote) {
-              session.connection = "BROKEN";
-              session.error = safeError(error, "SUBSCRIPTION_REJECTED");
-              this.submitView(session, "control");
-            }
-            this.startFallback(session, generation, true);
+            if (session.retargetPromise === operation) session.retargetPromise = undefined;
+            this.handleRetargetFailure(session, generation, error);
           },
         );
       }
     }
     this.armPolicyTick(session, generation);
+  }
+
+  private handleRetargetFailure(
+    session: ActionSession<Settings>,
+    generation: number,
+    error: unknown,
+  ): void {
+    if (!this.isPolicyCurrent(session, generation)) return;
+    if (!session.lastQuote) {
+      session.connection = "BROKEN";
+      session.error = safeError(error, "SUBSCRIPTION_REJECTED");
+      this.submitView(session, "control");
+    }
+    this.startFallback(session, generation, true);
   }
 
   private effectiveSnapshot(market: Market, source: MarketSnapshot): MarketSnapshot {
@@ -808,9 +865,15 @@ export class StockActionController<Settings> {
     this.clearHandle(session, "policyTimer");
     this.clearHandle(session, "recoveryTimer");
     session.fallbackActive = false;
-    const fallback = session.fallbackAbort;
     session.fallbackAbort = undefined;
-    try { fallback?.abort(); } catch { /* best effort */ }
+    for (const controller of [...session.policyAbortControllers]) {
+      try { controller.abort(); } catch { /* best effort */ }
+    }
+    session.policyAbortControllers.clear();
+    session.retargetPromise = undefined;
+    const manual = session.manualAbort;
+    session.manualAbort = undefined;
+    try { manual?.abort(); } catch { /* best effort */ }
     if (releaseSubscription) this.releaseSubscription(session);
   }
 
@@ -824,7 +887,14 @@ export class StockActionController<Settings> {
 
   private teardownSession(actionId: string): void {
     const session = this.sessions.get(actionId);
-    if (!session) return;
+    if (!session) {
+      const fatalGeneration = this.fatalRenderGenerations.get(actionId);
+      if (fatalGeneration !== undefined) {
+        this.fatalRenderGenerations.delete(actionId);
+        this.renderScheduler.remove(actionId, fatalGeneration);
+      }
+      return;
+    }
     this.sessions.delete(actionId);
     session.destroyed = true;
     session.policyGeneration += 1;
@@ -832,6 +902,34 @@ export class StockActionController<Settings> {
     try { session.unsubscribeClock?.(); } catch { /* best effort */ }
     session.unsubscribeClock = undefined;
     this.renderScheduler.remove(actionId, session.renderGeneration);
+  }
+
+  private attachClock(session: ActionSession<Settings>): void {
+    if (session.unsubscribeClock || !this.isCurrent(session)) return;
+    try { session.clock.start(); } catch { /* snapshot remains usable */ }
+    let subscribing = true;
+    try {
+      const unsubscribe = session.clock.subscribe((marketSnapshot) => {
+        if (!this.isCurrent(session)) return;
+        const unchanged = sameMarketSnapshot(session.snapshot, marketSnapshot);
+        session.snapshot = marketSnapshot;
+        if (subscribing || unchanged) return;
+        const global = this.settingsSnapshot;
+        if (!global || !hasCredentials(global)) return;
+        this.reconfigurePolicy(session);
+      });
+      session.unsubscribeClock = unsubscribe;
+    } catch {
+      session.unsubscribeClock = undefined;
+    } finally {
+      subscribing = false;
+    }
+  }
+
+  private detachClock(session: ActionSession<Settings>): void {
+    const unsubscribe = session.unsubscribeClock;
+    session.unsubscribeClock = undefined;
+    try { unsubscribe?.(); } catch { /* best effort */ }
   }
 
   private isCurrent(session: ActionSession<Settings>): boolean {
@@ -860,7 +958,6 @@ export class StockActionController<Settings> {
         try { callback(); } catch { /* timer boundary isolation */ }
       }, delayMs);
     } catch {
-      try { callback(); } catch { /* timer boundary isolation */ }
       return undefined;
     }
   }
@@ -874,4 +971,3 @@ export class StockActionController<Settings> {
     }
   }
 }
-

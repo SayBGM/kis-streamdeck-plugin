@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MarketSnapshot } from "../../core/market-clock.js";
+import { KisError } from "../../core/errors.js";
 import type {
   CanonicalInstrument,
   MarketAdapter,
@@ -29,9 +30,13 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function snapshot(session: MarketSnapshot["session"] = "REG", epoch = 1_000): MarketSnapshot {
+function snapshot(
+  session: MarketSnapshot["session"] = "REG",
+  epoch = 1_000,
+  market: MarketSnapshot["market"] = "domestic",
+): MarketSnapshot {
   return Object.freeze({
-    market: "domestic" as const,
+    market,
     session,
     sessionEpoch: epoch,
     nextTransitionAt: 1_000_000,
@@ -80,7 +85,7 @@ class FakeSettingsRepository {
   private listener?: (value: ReturnType<FakeSettingsRepository["makeSnapshot"]>) => void | Promise<void>;
   current = this.makeSnapshot();
 
-  private makeSnapshot(overrides: Record<string, unknown> = {}) {
+  private makeSnapshot(overrides: Record<string, unknown> = {}, baseKnown = true) {
     const settings = migrateGlobalSettings({
       appKey: "app-key",
       appSecret: "app-secret",
@@ -90,7 +95,7 @@ class FakeSettingsRepository {
     });
     return Object.freeze({
       settings: Object.freeze(settings),
-      status: Object.freeze({ baseKnown: true, persistenceDegraded: false }),
+      status: Object.freeze({ baseKnown, persistenceDegraded: !baseKnown }),
     });
   }
 
@@ -110,8 +115,8 @@ class FakeSettingsRepository {
     };
   }
 
-  resolve(overrides: Record<string, unknown> = {}): void {
-    this.current = this.makeSnapshot(overrides);
+  resolve(overrides: Record<string, unknown> = {}, baseKnown = true): void {
+    this.current = this.makeSnapshot(overrides, baseKnown);
     this.ready.resolve(this.current);
   }
 
@@ -164,11 +169,16 @@ class FakeRest {
   requests: Array<{
     priority: string;
     signal?: AbortSignal;
+    marketSnapshot?: MarketSnapshot;
     resolve: (value: QuoteSample) => void;
     reject: (error: unknown) => void;
   }> = [];
 
-  requestQuote(input: { priority: string; signal?: AbortSignal }): Promise<QuoteSample> {
+  requestQuote(input: {
+    priority: string;
+    signal?: AbortSignal;
+    marketSnapshot?: MarketSnapshot;
+  }): Promise<QuoteSample> {
     return new Promise((resolve, reject) => {
       if (input.signal?.aborted) {
         reject(new Error("aborted"));
@@ -176,7 +186,13 @@ class FakeRest {
       }
       const onAbort = () => reject(new Error("aborted"));
       input.signal?.addEventListener("abort", onAbort, { once: true });
-      this.requests.push({ priority: input.priority, signal: input.signal, resolve, reject });
+      this.requests.push({
+        priority: input.priority,
+        signal: input.signal,
+        marketSnapshot: input.marketSnapshot,
+        resolve,
+        reject,
+      });
     });
   }
 }
@@ -185,6 +201,8 @@ class ImmediateScheduler {
   private nextGeneration = 0;
   private readonly active = new Map<string, number>();
   intervals: number[] = [];
+  requests: Array<Pick<RenderRequest, "category" | "semanticKey">> = [];
+  removals: Array<{ id: string; generation: number }> = [];
 
   activate(id: string, interval: 2_000 | 5_000 | 10_000): number {
     const generation = ++this.nextGeneration;
@@ -201,11 +219,13 @@ class ImmediateScheduler {
 
   submit(id: string, generation: number, request: RenderRequest): boolean {
     if (this.active.get(id) !== generation) return false;
+    this.requests.push({ category: request.category, semanticKey: request.semanticKey });
     void Promise.resolve(request.render()).then((image) => request.commit(image));
     return true;
   }
 
   remove(id: string, generation: number): boolean {
+    this.removals.push({ id, generation });
     if (this.active.get(id) !== generation) return false;
     this.active.delete(id);
     return true;
@@ -241,32 +261,43 @@ function makeAdapter(id = "stock"): MarketAdapter<TestSettings> {
   };
 }
 
-function setup() {
+function setup(options: {
+  adapterResolver?: (settings: TestSettings) => MarketAdapter<TestSettings>;
+  subscriptions?: FakeSubscriptions;
+  setTimeout?: (callback: () => void, delayMs: number) => unknown;
+  clearTimeout?: (handle: unknown) => void;
+  useDefaultRuntime?: boolean;
+} = {}) {
   const settings = new FakeSettingsRepository();
   const clock = new FakeClock();
-  const subscriptions = new FakeSubscriptions();
+  const subscriptions = options.subscriptions ?? new FakeSubscriptions();
   const rest = new FakeRest();
   const scheduler = new ImmediateScheduler();
   const images: StockActionView[] = [];
   const adapters: string[] = [];
+  const runtime = options.useDefaultRuntime
+    ? {}
+    : {
+        now: () => Date.now(),
+        setTimeout: options.setTimeout ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs)),
+        clearTimeout: options.clearTimeout ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>)),
+      };
   const controller = new StockActionController<TestSettings>({
     settingsRepository: settings,
     clocks: { domestic: clock, overseas: clock },
     subscriptions,
     restCoordinator: rest,
     renderScheduler: scheduler,
-    adapterResolver: (actionSettings) => {
+    adapterResolver: options.adapterResolver ?? ((actionSettings) => {
       const id = actionSettings.instrumentType === "etf" ? "etf" : "stock";
       adapters.push(id);
       return makeAdapter(id);
-    },
+    }),
     renderer: (view) => {
       images.push(view);
       return JSON.stringify(view);
     },
-    now: () => Date.now(),
-    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    ...runtime,
   });
   return { settings, clock, subscriptions, rest, scheduler, images, adapters, controller };
 }
@@ -426,6 +457,20 @@ describe("StockActionController automatic policy and lifecycle", () => {
     expect(test.images.at(-1)?.error?.code).toBe("NO_CREDENTIALS");
   });
 
+  it("설정 원본을 읽지 못한 readiness 상태는 SETTINGS fatal로 표시한다", async () => {
+    const test = setup();
+    test.settings.resolve({}, false);
+
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(test.images.at(-1)?.error?.code).toBe("SETTINGS");
+    expect(test.subscriptions.subscriptions).toHaveLength(0);
+  });
+
   it.each(["desired", "stale", "parked", "rejected"] as const)(
     "유효 WS 이후 %s 상태는 즉시 fallback REST를 시작한다",
     async (state) => {
@@ -458,6 +503,25 @@ describe("StockActionController automatic policy and lifecycle", () => {
     await Promise.resolve();
 
     expect(test.rest.requests.map((request) => request.priority)).toEqual(["fallback"]);
+  });
+
+  it("subscription port의 동기 예외를 격리하고 fallback으로 전환한다", async () => {
+    class ThrowingSubscribe extends FakeSubscriptions {
+      subscribe(): ReturnType<FakeSubscriptions["subscribe"]> {
+        throw new Error("subscription unavailable");
+      }
+    }
+    const test = setup({ subscriptions: new ThrowingSubscribe() });
+    test.settings.resolve();
+
+    await expect(test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    })).resolves.toBeUndefined();
+
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["fallback"]);
+    expect(test.images.at(-1)?.connection).toBe("BROKEN");
   });
 
   it("REST 전용 장중은 즉시 initial 요청 후 설정 간격으로 fallback을 반복한다", async () => {
@@ -496,6 +560,9 @@ describe("StockActionController automatic policy and lifecycle", () => {
     expect(test.subscriptions.subscriptions).toHaveLength(0);
     expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial"]);
     await vi.advanceTimersByTimeAsync(180_000);
+    expect(test.rest.requests).toHaveLength(1);
+    test.clock.emit(snapshot("CLOSED", 4_000));
+    await vi.advanceTimersByTimeAsync(0);
     expect(test.rest.requests).toHaveLength(1);
   });
 
@@ -536,5 +603,377 @@ describe("StockActionController automatic policy and lifecycle", () => {
 
     expect(test.images.at(-1)?.connection).toBe("BROKEN");
     expect(test.images.at(-1)?.error?.code).toBe("NETWORK");
+  });
+
+  it("수동 요청은 disappear에서 취소되고 늦은 결과가 렌더되지 않는다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const manual = test.controller.manualRefresh("a");
+    await vi.advanceTimersByTimeAsync(0);
+    const request = test.rest.requests[0]!;
+
+    await test.controller.disappear("a");
+
+    expect(request.signal?.aborted).toBe(true);
+    await manual;
+  });
+
+  it("invalid instrument fatal scheduler target도 disappear에서 제거한다", async () => {
+    const test = setup({
+      adapterResolver: () => ({
+        ...makeAdapter(),
+        toInstrument() {
+          throw new KisError({
+            code: "INVALID_INSTRUMENT",
+            scope: "action",
+            retryable: false,
+            safeMessage: "안전한 종목 오류",
+          });
+        },
+      }),
+    });
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "invalid",
+      settings: { symbol: "bad" },
+      actionPort: { setImage: vi.fn() },
+    });
+    expect(test.images.at(-1)?.error).toEqual({
+      code: "INVALID_INSTRUMENT",
+      message: "안전한 종목 오류",
+    });
+
+    await test.controller.disappear("invalid");
+
+    expect(test.scheduler.removals).toHaveLength(1);
+  });
+
+  it("기본 runtime과 중복 lifecycle 호출도 멱등하게 정리한다", async () => {
+    const test = setup({ useDefaultRuntime: true });
+    test.settings.resolve();
+    await test.controller.updateSettings("missing", { symbol: "000000" });
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "000660" },
+      actionPort: { setImage: vi.fn() },
+    });
+    await test.controller.destroy();
+
+    const subscriptions = test.subscriptions.subscriptions.length;
+    await test.controller.appear({
+      actionId: "late",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    await test.controller.updateSettings("a", { symbol: "035420" });
+    await test.controller.destroy();
+
+    expect(test.subscriptions.subscriptions).toHaveLength(subscriptions);
+  });
+});
+
+describe("StockActionController settings, market and rendering boundaries", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("전역 preference 변경은 렌더 간격과 데이터 정책을 재구성한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const oldSubscription = test.subscriptions.subscriptions[0]!;
+
+    test.settings.emit({
+      preferences: {
+        dataMode: "rest-only",
+        renderIntervalMs: 5_000,
+        backupPollIntervalMs: 15_000,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(oldSubscription.released).toBe(true);
+    expect(test.scheduler.intervals).toEqual([2_000, 5_000]);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial"]);
+  });
+
+  it("자격증명 제거는 정책 요청을 취소하고 fatal 이후 네트워크를 재시작하지 않는다", async () => {
+    const test = setup();
+    test.settings.resolve({
+      preferences: {
+        dataMode: "rest-only",
+        renderIntervalMs: 2_000,
+        backupPollIntervalMs: 15_000,
+      },
+    });
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const initial = test.rest.requests[0]!;
+
+    test.settings.emit({ appKey: undefined, appSecret: undefined });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(initial.signal?.aborted).toBe(true);
+    expect(test.rest.requests).toHaveLength(1);
+    expect(test.images.at(-1)?.error?.code).toBe("NO_CREDENTIALS");
+  });
+
+  it("자격증명 제거 뒤 clock 이벤트는 네트워크를 재시작하지 않고 복구 시 listener를 다시 연결한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const oldSubscription = test.subscriptions.subscriptions[0]!;
+
+    test.settings.emit({ appKey: undefined, appSecret: undefined });
+    test.clock.emit(snapshot("CLOSED", 8_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(oldSubscription.released).toBe(true);
+    expect(test.rest.requests).toHaveLength(0);
+
+    test.clock.current = snapshot("REG", 9_000);
+    test.settings.emit({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.subscriptions.subscriptions).toHaveLength(2);
+
+    test.clock.emit(snapshot("CLOSED", 10_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial"]);
+  });
+
+  it("시장 CLOSED 전환은 WS를 해제하고 해당 세션 initial REST 한 번으로 바꾼다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const subscription = test.subscriptions.subscriptions[0]!;
+
+    test.clock.emit(snapshot("CLOSED", 9_000));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(subscription.released).toBe(true);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial"]);
+  });
+
+  it("미국 ET CLOSED여도 KST 주간 거래 창은 realtime 세션으로 파생한다", async () => {
+    vi.setSystemTime(Date.UTC(2026, 0, 5, 3, 0)); // 월요일 12:00 KST
+    const overseas = makeAdapter("stock") as MarketAdapter<TestSettings>;
+    Object.defineProperty(overseas, "market", { value: "overseas" });
+    const test = setup({ adapterResolver: () => overseas });
+    test.clock.current = snapshot("CLOSED", 5_000, "overseas");
+    test.settings.resolve();
+
+    await test.controller.appear({
+      actionId: "us",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(test.subscriptions.subscriptions).toHaveLength(1);
+    expect(test.rest.requests).toHaveLength(0);
+    expect(test.images.at(-1)?.session).toBe("REG");
+  });
+
+  it("60초 정책 tick에서 해외 day/night descriptor를 break-before-make retarget한다", async () => {
+    const start = Date.UTC(2026, 0, 5, 6, 29, 30); // 월요일 15:29:30 KST
+    vi.setSystemTime(start);
+    const cutoff = start + 30_000;
+    const overseas: MarketAdapter<TestSettings> = {
+      ...makeAdapter("stock"),
+      id: "overseas",
+      market: "overseas",
+      webSocketDescriptor(instrument, nowMs) {
+        return { trId: "US", trKey: `${nowMs < cutoff ? "DAY" : "NIGHT"}:${instrument.symbol}` };
+      },
+    };
+    const test = setup({ adapterResolver: () => overseas });
+    test.clock.current = snapshot("REG", 5_000, "overseas");
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "us",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    test.subscriptions.data(70_000);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(test.subscriptions.retargets).toEqual([{
+      oldDescriptor: { trId: "US", trKey: "DAY:005930" },
+      nextDescriptor: { trId: "US", trKey: "NIGHT:005930" },
+    }]);
+  });
+
+  it("동일 시세의 receivedAt만 바뀌면 같은 semantic key를 제출한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    test.subscriptions.data(70_000);
+    await vi.advanceTimersByTimeAsync(1);
+    test.subscriptions.data(70_000);
+    await vi.advanceTimersByTimeAsync(0);
+    const normal = test.scheduler.requests.filter((request) => request.category === "normal");
+
+    expect(normal).toHaveLength(2);
+    expect(normal[0]?.semanticKey).toBe(normal[1]?.semanticKey);
+    expect(Object.isFrozen(test.images.at(-1))).toBe(true);
+    expect(Object.isFrozen(test.images.at(-1)?.instrument)).toBe(true);
+    expect(Object.isFrozen(test.images.at(-1)?.quote)).toBe(true);
+  });
+
+  it("BACKUP에서 유효 WS로 회복하면 2초 recovery view 후 LIVE 일반 view로 돌아간다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    test.rest.requests[0]!.resolve(quote("rest", 69_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.images.at(-1)?.connection).toBe("BACKUP");
+
+    test.subscriptions.data(70_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.images.at(-1)?.connection).toBe("LIVE");
+    expect(test.images.at(-1)?.recovery).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(test.images.at(-1)?.recovery).toBe(false);
+  });
+
+  it("recovery timer 등록이 실패하면 recovery 상태에 고정되지 않는다", async () => {
+    const test = setup({
+      setTimeout: (callback, delayMs) => {
+        if (delayMs === 2_000) throw new Error("recovery timer unavailable");
+        return setTimeout(callback, delayMs);
+      },
+    });
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    test.rest.requests[0]!.resolve(quote("rest", 69_000));
+    await vi.advanceTimersByTimeAsync(0);
+
+    test.subscriptions.data(70_000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(test.images.at(-1)?.connection).toBe("LIVE");
+    expect(test.images.at(-1)?.recovery).toBe(false);
+  });
+
+  it("grace timer 등록의 동기 예외는 fallback을 조기 실행하지 않는다", async () => {
+    let calls = 0;
+    const test = setup({
+      setTimeout: (callback, delayMs) => {
+        calls += 1;
+        if (calls === 2) throw new Error("timer unavailable");
+        return setTimeout(callback, delayMs);
+      },
+    });
+    test.settings.resolve();
+
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(test.rest.requests).toHaveLength(0);
+  });
+
+  it("retargetAll 동기 예외를 격리하고 즉시 fallback으로 전환한다", async () => {
+    class ThrowingSubscriptions extends FakeSubscriptions {
+      retargetAll(): Promise<void> {
+        throw new Error("retarget unavailable");
+      }
+    }
+    const start = Date.UTC(2026, 0, 5, 6, 29, 30);
+    vi.setSystemTime(start);
+    const cutoff = start + 30_000;
+    const overseas: MarketAdapter<TestSettings> = {
+      ...makeAdapter("stock"),
+      id: "overseas",
+      market: "overseas",
+      webSocketDescriptor(instrument, nowMs) {
+        return { trId: "US", trKey: `${nowMs < cutoff ? "DAY" : "NIGHT"}:${instrument.symbol}` };
+      },
+    };
+    const subscriptions = new ThrowingSubscriptions();
+    const test = setup({ adapterResolver: () => overseas, subscriptions });
+    test.clock.current = snapshot("REG", 5_000, "overseas");
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "us",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    test.subscriptions.data(70_000);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(test.rest.requests.some((request) => request.priority === "fallback")).toBe(true);
+  });
+
+  it("clearTimeout이 무효여도 disappear 뒤 늦은 timer callback은 세대 검사로 폐기한다", async () => {
+    const callbacks: Array<() => void> = [];
+    const test = setup({
+      setTimeout: (callback) => {
+        callbacks.push(callback);
+        return callback;
+      },
+      clearTimeout: () => undefined,
+    });
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    await test.controller.disappear("a");
+
+    for (const callback of callbacks) callback();
+    await Promise.resolve();
+
+    expect(test.rest.requests).toHaveLength(0);
   });
 });
