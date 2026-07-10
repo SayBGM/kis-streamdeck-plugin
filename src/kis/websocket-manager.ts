@@ -429,7 +429,7 @@ class KISWebSocketManager {
 
     switch (trId) {
       case TR_ID_DOMESTIC: {
-        const stockCode = fields[0]?.trim();
+        const stockCode = fields[0]?.trim().toUpperCase();
         if (!stockCode) return [];
         const sub = this.subscriptions.get(this.makeKey(trId, stockCode));
         if (sub) matches.set(this.makeKey(sub.trId, sub.trKey), sub);

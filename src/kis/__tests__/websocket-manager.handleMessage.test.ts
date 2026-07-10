@@ -63,4 +63,17 @@ describe("KISWebSocketManager.handleMessage()", () => {
     expect(onData).toHaveBeenCalledTimes(1);
     expect(onConnectionState).not.toHaveBeenCalled();
   });
+
+  it("dispatches alphanumeric ETF trades case-insensitively", async () => {
+    const onData = vi.fn();
+
+    await manager.subscribe("H0UNCNT0", "0210A0", onData);
+    manager.handleMessage("0|H0UNCNT0|1|0210a0^10120^unused");
+
+    expect(onData).toHaveBeenCalledWith(
+      "H0UNCNT0",
+      "0210A0",
+      ["0210a0", "10120", "unused"],
+    );
+  });
 });

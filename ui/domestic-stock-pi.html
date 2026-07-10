@@ -15,17 +15,27 @@
       actionTitle: "국내주식 설정",
       fields: [
         {
+          id: "instrumentType",
+          type: "select",
+          label: "상품 유형",
+          defaultValue: "stock",
+          options: [
+            { value: "stock", label: "주식" },
+            { value: "etf", label: "ETF/ETN" }
+          ]
+        },
+        {
           id: "stockCode",
           label: "종목코드",
-          placeholder: "005930",
-          help: "6자리 종목코드를 입력하세요 (예: 삼성전자 005930)",
-          errorMessage: "6자리 숫자를 입력하세요 (예: 005930)",
-          invalidStatusMessage: "종목코드는 6자리 숫자여야 합니다.",
+          placeholder: "005930 또는 0210A0",
+          help: "6자리 영숫자 종목코드를 입력하세요 (예: 삼성전자 005930, ETF 0210A0)",
+          errorMessage: "6자리 영숫자를 입력하세요 (예: 005930, 0210A0)",
+          invalidStatusMessage: "종목코드는 6자리 영숫자여야 합니다.",
           validate: function (value) {
-            return /^\d{6}$/.test(value);
+            return /^[0-9A-Z]{6}$/i.test(value);
           },
           serialize: function (value) {
-            return value.trim();
+            return value.trim().toUpperCase();
           }
         },
         {

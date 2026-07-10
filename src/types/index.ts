@@ -26,10 +26,13 @@ export type GlobalSettings = {
 };
 
 // ─── 액션별 설정 (Action Settings) ───
+export type DomesticInstrumentType = "stock" | "etf";
+
 export type DomesticStockSettings = {
-  stockCode: string; // 종목코드 (예: "005930")
+  stockCode: string; // 종목코드 (예: "005930", "0210A0")
   stockName: string; // 종목명 (예: "삼성전자")
-  [key: string]: string;
+  instrumentType?: DomesticInstrumentType;
+  [key: string]: string | undefined;
 };
 
 export type OverseasStockSettings = {
@@ -119,6 +122,7 @@ export function isOverseasDayTrading(): boolean {
 
 // ─── REST API TR_ID 상수 ───
 export const REST_TR_DOMESTIC_PRICE = "FHKST01010100"; // 국내주식 현재가 시세
+export const REST_TR_DOMESTIC_ETF_PRICE = "FHPST02400000"; // ETF/ETN 현재가
 export const REST_TR_OVERSEAS_PRICE = "HHDFS00000300"; // 해외주식 현재체결가
 
 // ─── 에러 타입 (SPEC-UI-001) ───

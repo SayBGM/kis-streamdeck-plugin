@@ -1,15 +1,18 @@
 import { getAccessToken } from "./auth.js";
 import {
   KIS_REST_BASE,
+  REST_TR_DOMESTIC_ETF_PRICE,
   REST_TR_DOMESTIC_PRICE,
   REST_TR_OVERSEAS_PRICE,
   ErrorType,
   type GlobalSettings,
+  type DomesticInstrumentType,
   type StockData,
   type PriceSign,
 } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { kisGlobalSettings } from "./settings-store.js";
+import { normalizeDomesticStockCode } from "./domestic-instrument.js";
 
 const SETTINGS_WAIT_TIMEOUT_MS = 15_000;
 
@@ -89,17 +92,24 @@ function parseSign(signCode: string): PriceSign {
 export async function fetchDomesticPrice(
   stockCode: string,
   displayName: string,
+  instrumentType: DomesticInstrumentType = "stock",
 ): Promise<StockData | null> {
   const settings = await getSettingsWithWait();
   if (!settings) return null;
 
-  return fetchDomesticPriceForSettings(settings, stockCode, displayName);
+  return fetchDomesticPriceForSettings(
+    settings,
+    stockCode,
+    displayName,
+    instrumentType,
+  );
 }
 
 export async function fetchDomesticPriceForSettings(
   settings: GlobalSettings,
   stockCode: string,
   displayName: string,
+  instrumentType: DomesticInstrumentType = "stock",
 ): Promise<StockData | null> {
   if (!settings.appKey?.trim() || !settings.appSecret?.trim()) {
     return null;
@@ -108,12 +118,18 @@ export async function fetchDomesticPriceForSettings(
   let response: Response | undefined;
   try {
     const token = await getAccessToken(settings);
+    const normalizedStockCode = normalizeDomesticStockCode(stockCode);
+    const isEtf = instrumentType === "etf";
+    const apiPath = isEtf
+      ? "/uapi/etfetn/v1/quotations/inquire-price"
+      : "/uapi/domestic-stock/v1/quotations/inquire-price";
+    const trId = isEtf
+      ? REST_TR_DOMESTIC_ETF_PRICE
+      : REST_TR_DOMESTIC_PRICE;
 
-    const url = new URL(
-      `${KIS_REST_BASE}/uapi/domestic-stock/v1/quotations/inquire-price`,
-    );
+    const url = new URL(`${KIS_REST_BASE}${apiPath}`);
     url.searchParams.set("FID_COND_MRKT_DIV_CODE", "UN");
-    url.searchParams.set("FID_INPUT_ISCD", stockCode);
+    url.searchParams.set("FID_INPUT_ISCD", normalizedStockCode);
 
     response = await fetch(url.toString(), {
       method: "GET",
@@ -122,7 +138,7 @@ export async function fetchDomesticPriceForSettings(
         authorization: `Bearer ${token}`,
         appkey: settings.appKey,
         appsecret: settings.appSecret,
-        tr_id: REST_TR_DOMESTIC_PRICE,
+        tr_id: trId,
       },
     });
 
@@ -150,7 +166,7 @@ export async function fetchDomesticPriceForSettings(
     const changeRate = parseFloat(o.prdy_ctrt) || 0;
 
     return {
-      ticker: stockCode,
+      ticker: normalizedStockCode,
       name: displayName,
       price: parseInt(o.stck_prpr, 10) || 0,
       change: sign === "fall" ? -Math.abs(change) : change,

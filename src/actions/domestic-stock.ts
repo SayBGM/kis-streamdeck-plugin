@@ -12,6 +12,10 @@ import {
   type ConnectionStateCallback,
 } from "../kis/websocket-manager.js";
 import { parseDomesticData } from "../kis/domestic-parser.js";
+import {
+  normalizeDomesticStockCode,
+  resolveDomesticInstrumentType,
+} from "../kis/domestic-instrument.js";
 import { fetchDomesticPrice } from "../kis/rest-price.js";
 import {
   renderStockCard,
@@ -25,6 +29,7 @@ import {
 import {
   TR_ID_DOMESTIC,
   ErrorType,
+  type DomesticInstrumentType,
   type DomesticStockSettings,
   type GlobalSettings,
   type StockData,
@@ -49,6 +54,19 @@ async function getGlobalSettingsWithWait(): Promise<GlobalSettings | null> {
   }
 
   return kisGlobalSettings.waitUntilReady(GLOBAL_SETTINGS_WAIT_TIMEOUT_MS);
+}
+
+function resolveDomesticActionSettings(settings: DomesticStockSettings): {
+  stockCode: string;
+  stockName: string;
+  instrumentType: DomesticInstrumentType;
+} {
+  const stockCode = normalizeDomesticStockCode(settings.stockCode);
+  return {
+    stockCode,
+    stockName: settings.stockName?.trim() || stockCode,
+    instrumentType: resolveDomesticInstrumentType(settings.instrumentType),
+  };
 }
 
 // REQ-PERF-001-2.2.4
@@ -100,8 +118,8 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
   ): Promise<void> {
     this.actionRefMap.set(ev.action.id, ev.action);
     const settings = ev.payload.settings;
-    const stockCode = settings.stockCode?.trim();
-    const stockName = settings.stockName?.trim() || stockCode || "";
+    const { stockCode, stockName, instrumentType } =
+      resolveDomesticActionSettings(settings);
 
     logger.info(`[국내] onWillAppear: code=${stockCode}, name=${stockName}`);
 
@@ -127,12 +145,17 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     }
 
     // 마지막 체결가를 먼저 표시한 뒤 WebSocket 구독
-    const hasSnapshot = await this.fetchAndShowPrice(ev, stockCode, stockName);
+    const hasSnapshot = await this.fetchAndShowPrice(
+      ev,
+      stockCode,
+      stockName,
+      instrumentType,
+    );
     if (hasSnapshot) {
       this.hasInitialPrice.add(ev.action.id);
     } else {
       this.hasInitialPrice.delete(ev.action.id);
-      this.scheduleInitialPriceRetry(ev, stockCode, stockName);
+      this.scheduleInitialPriceRetry(ev, stockCode, stockName, instrumentType);
     }
 
     const updateMode = globalSettings.updateMode || "websocket";
@@ -148,7 +171,14 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       this.staleAfterByAction.set(ev.action.id, staleThreshold);
       this.applyConnectionState(ev.action.id, "BACKUP");
       this.hasInitialPrice.add(ev.action.id);
-      this.startPolling(ev.action.id, ev, stockCode, stockName, pollIntervalSec * 1000);
+      this.startPolling(
+        ev.action.id,
+        ev,
+        stockCode,
+        stockName,
+        instrumentType,
+        pollIntervalSec * 1000,
+      );
       return;
     }
 
@@ -254,8 +284,8 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     this.actionRefMap.set(ev.action.id, ev.action);
 
     const settings = ev.payload.settings;
-    const stockCode = settings.stockCode?.trim();
-    const stockName = settings.stockName?.trim() || stockCode || "";
+    const { stockCode, stockName, instrumentType } =
+      resolveDomesticActionSettings(settings);
 
     logger.info(
       `[국내] onDidReceiveSettings: code=${stockCode}, name=${stockName}`,
@@ -283,12 +313,17 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     }
 
     // 마지막 체결가를 먼저 표시한 뒤 WebSocket 재구독
-    const hasSnapshot = await this.fetchAndShowPrice(ev, stockCode, stockName);
+    const hasSnapshot = await this.fetchAndShowPrice(
+      ev,
+      stockCode,
+      stockName,
+      instrumentType,
+    );
     if (hasSnapshot) {
       this.hasInitialPrice.add(ev.action.id);
     } else {
       this.hasInitialPrice.delete(ev.action.id);
-      this.scheduleInitialPriceRetry(ev, stockCode, stockName);
+      this.scheduleInitialPriceRetry(ev, stockCode, stockName, instrumentType);
     }
 
     const updateMode = globalSettings.updateMode || "websocket";
@@ -304,7 +339,14 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       this.staleAfterByAction.set(ev.action.id, staleThreshold);
       this.applyConnectionState(ev.action.id, "BACKUP");
       this.hasInitialPrice.add(ev.action.id);
-      this.startPolling(ev.action.id, ev, stockCode, stockName, pollIntervalSec * 1000);
+      this.startPolling(
+        ev.action.id,
+        ev,
+        stockCode,
+        stockName,
+        instrumentType,
+        pollIntervalSec * 1000,
+      );
       return;
     }
 
@@ -384,8 +426,8 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     }
 
     const settings = ev.payload.settings;
-    const stockCode = settings.stockCode?.trim();
-    const stockName = settings.stockName?.trim() || stockCode || "";
+    const { stockCode, stockName, instrumentType } =
+      resolveDomesticActionSettings(settings);
 
     if (!stockCode) {
       this.resetActionRuntime(actionId);
@@ -399,7 +441,13 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     this.manualRefreshByAction.add(actionId);
     this.renderLastDataIfPossible(actionId);
     try {
-      const ok = await this.fetchAndShowPrice(ev, stockCode, stockName, true);
+      const ok = await this.fetchAndShowPrice(
+        ev,
+        stockCode,
+        stockName,
+        instrumentType,
+        true,
+      );
       if (ok) {
         this.hasInitialPrice.add(actionId);
         logger.info(`[국내] 수동 새로고침 성공: ${stockCode}`);
@@ -424,10 +472,15 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     ev: { action: { setImage(image: string): Promise<void> | void; id?: string } },
     stockCode: string,
     stockName: string,
+    instrumentType: DomesticInstrumentType,
     force = false,
   ): Promise<boolean> {
     try {
-      const data = await fetchDomesticPrice(stockCode, stockName);
+      const data = await fetchDomesticPrice(
+        stockCode,
+        stockName,
+        instrumentType,
+      );
       if (data) {
         const actionId = ev.action.id;
         if (actionId) {
@@ -463,6 +516,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       | DidReceiveSettingsEvent<DomesticStockSettings>,
     stockCode: string,
     stockName: string,
+    instrumentType: DomesticInstrumentType,
   ): void {
     const actionId = ev.action.id;
     this.clearRetryTimer(actionId);
@@ -478,7 +532,7 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
       }
 
       logger.info(`[국내] REST 현재가 재시도: ${stockCode}`);
-      this.fetchAndShowPrice(ev, stockCode, stockName)
+      this.fetchAndShowPrice(ev, stockCode, stockName, instrumentType)
         .then((ok) => {
           if (ok) {
             this.hasInitialPrice.add(actionId);
@@ -581,13 +635,14 @@ export class DomesticStockAction extends SingletonAction<DomesticStockSettings> 
     ev: { action: { setImage(image: string): Promise<void> | void; id?: string } },
     stockCode: string,
     stockName: string,
+    instrumentType: DomesticInstrumentType,
     intervalMs: number,
   ): void {
     this.stopPolling(actionId);
     const timer = setInterval(() => {
       if (this.refreshInFlight.has(actionId)) return;
       this.refreshInFlight.add(actionId);
-      this.fetchAndShowPrice(ev, stockCode, stockName)
+      this.fetchAndShowPrice(ev, stockCode, stockName, instrumentType)
         .catch((err) => { logger.debug(`[국내] 폴링 조회 실패: ${err}`); })
         .finally(() => { this.refreshInFlight.delete(actionId); });
     }, intervalMs);
