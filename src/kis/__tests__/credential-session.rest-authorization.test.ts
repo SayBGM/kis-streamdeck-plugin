@@ -27,6 +27,25 @@ function makeSession(
 }
 
 describe("CredentialSession REST authorization lease", () => {
+  it("scopes REST secrets to a callback capability", async () => {
+    const fingerprint = fingerprintCredentials("key", "secret");
+    const { session } = makeSession(migrateGlobalSettings({
+      appKey: "key",
+      appSecret: "secret",
+      credentialFingerprint: fingerprint,
+      credentialGeneration: 1,
+      accessToken: "token",
+      accessTokenExpiry: 1_900_000_000_000,
+      accessTokenFingerprint: fingerprint,
+      accessTokenVersion: 2,
+    }), vi.fn<AuthFetch>());
+
+    await expect(session.withRestAuthorization(async (lease) => ({
+      generation: lease.credentialGeneration,
+      authorized: lease.token === "token" && lease.appSecret === "secret",
+    }))).resolves.toEqual({ generation: 1, authorized: true });
+  });
+
   it("returns credentials bound to the exact access-token generation", async () => {
     const fingerprint = fingerprintCredentials("key", "secret");
     const fetch = vi.fn<AuthFetch>().mockResolvedValue({
@@ -42,7 +61,7 @@ describe("CredentialSession REST authorization lease", () => {
       accessTokenVersion: 11,
     }), fetch);
 
-    await expect(session.getRestAuthorization()).resolves.toEqual({
+    await expect(session.withRestAuthorization(async (lease) => lease)).resolves.toEqual({
       appKey: "key",
       appSecret: "secret",
       token: "token",
@@ -67,7 +86,7 @@ describe("CredentialSession REST authorization lease", () => {
       accessTokenVersion: 3,
     }), fetch);
 
-    const pending = session.getRestAuthorization();
+    const pending = session.withRestAuthorization(async (lease) => lease);
     while (fetch.mock.calls.length === 0) await Promise.resolve();
     await session.saveCredentials("new-key", "new-secret");
     resolveFetch({
@@ -111,7 +130,7 @@ describe("CredentialSession REST authorization lease", () => {
     };
     const session = new CredentialSession(port, { now: () => 1_800_000_000_000 });
 
-    await expect(session.getRestAuthorization()).rejects.toMatchObject({
+    await expect(session.withRestAuthorization(async (lease) => lease)).rejects.toMatchObject({
       code: "AUTH_REJECTED",
       scope: "auth",
     });

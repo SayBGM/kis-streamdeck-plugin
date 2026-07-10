@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getMarketSnapshot } from "../../core/market-clock.js";
-import { domesticStockAdapter } from "../../markets/market-adapter.js";
+import { domesticStockAdapter, type QuoteSample } from "../../markets/market-adapter.js";
 import type {
   AccessTokenExpectation,
   CredentialIdentity,
@@ -32,7 +32,9 @@ function credentials(): RestCredentialPort & {
       credentialGeneration: lease.credentialGeneration,
       credentialFingerprint: fingerprint,
     })),
-    getRestAuthorization: vi.fn(async () => lease),
+    withRestAuthorization: vi.fn(async (
+      operation: (authorization: RestAuthorizationLease) => Promise<QuoteSample>,
+    ) => operation(lease)),
     invalidateAccessToken: vi.fn(async (_expected: AccessTokenExpectation) => true),
   };
 }
@@ -121,10 +123,14 @@ describe("RestCoordinator scheduler", () => {
   it("rates the actual HTTP start even when authorization finishes much later", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
-    const authorizationResolvers: Array<(value: RestAuthorizationLease) => void> = [];
+    const authorizationResolvers: Array<() => void> = [];
     const port = credentials();
-    port.getRestAuthorization = vi.fn(() => new Promise<RestAuthorizationLease>((resolve) => {
-      authorizationResolvers.push(resolve);
+    port.withRestAuthorization = vi.fn(
+      (operation: (authorization: RestAuthorizationLease) => Promise<QuoteSample>) =>
+        new Promise<QuoteSample>((resolve, reject) => {
+      authorizationResolvers.push(() => {
+        void operation(lease).then(resolve, reject);
+      });
     }));
     const starts: number[] = [];
     const fetch = vi.fn<RestFetch>(async () => {
@@ -142,7 +148,7 @@ describe("RestCoordinator scheduler", () => {
     expect(authorizationResolvers).toHaveLength(14);
 
     await vi.advanceTimersByTimeAsync(2_000);
-    for (const resolve of authorizationResolvers) resolve(lease);
+    for (const resolve of authorizationResolvers) resolve();
     await flush(120);
     expect(starts).toHaveLength(10);
     expect(starts).toEqual(Array(10).fill(2_000));

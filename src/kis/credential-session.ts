@@ -552,7 +552,15 @@ export class CredentialSession {
     return flight;
   }
 
-  async getRestAuthorization(): Promise<RestAuthorizationLease> {
+  async withRestAuthorization<T>(
+    operation: (authorization: RestAuthorizationLease) => Promise<T>,
+  ): Promise<T> {
+    if (typeof operation !== "function") throw invalidAuthInputError();
+    const authorization = await this.createRestAuthorization();
+    return operation(authorization);
+  }
+
+  private async createRestAuthorization(): Promise<RestAuthorizationLease> {
     const token = await this.getAccessToken();
     const settings = this.repository.getSnapshot().settings;
     const credentials = credentialsFromSettings(settings);

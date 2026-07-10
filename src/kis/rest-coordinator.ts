@@ -27,7 +27,9 @@ export type RestRequestPriority = "manual" | "initial" | "fallback";
 
 export interface RestCredentialPort {
   initialize(): Promise<CredentialIdentity>;
-  getRestAuthorization(): Promise<RestAuthorizationLease>;
+  withRestAuthorization(
+    operation: (authorization: RestAuthorizationLease) => Promise<QuoteSample>,
+  ): Promise<QuoteSample>;
   invalidateAccessToken(expected: AccessTokenExpectation): Promise<boolean>;
 }
 
@@ -781,7 +783,7 @@ export class RestCoordinator {
 
   private async execute(flight: Flight): Promise<QuoteSample> {
     if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
-    const authorization = await this.credentials.getRestAuthorization();
+    return this.credentials.withRestAuthorization(async (authorization) => {
     if (!sameCredential(flight.expectedIdentity, authorization)) {
       throw changedCredentialError();
     }
@@ -856,6 +858,7 @@ export class RestCoordinator {
     } finally {
       releaseTransport();
     }
+    });
   }
 
   private async decodeResponse(

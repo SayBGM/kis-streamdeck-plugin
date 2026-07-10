@@ -41,13 +41,17 @@ function identity(lease: RestAuthorizationLease): CredentialIdentity {
 function mutableCredentials(initial = authorization()): RestCredentialPort & {
   current: RestAuthorizationLease;
   initialize: ReturnType<typeof vi.fn>;
-  getRestAuthorization: ReturnType<typeof vi.fn>;
+  withRestAuthorization: ReturnType<typeof vi.fn>;
   invalidateAccessToken: ReturnType<typeof vi.fn>;
 } {
+  let current = initial;
   const port = {
-    current: initial,
-    initialize: vi.fn(async () => identity(port.current)),
-    getRestAuthorization: vi.fn(async () => port.current),
+    get current(): RestAuthorizationLease { return current; },
+    set current(value: RestAuthorizationLease) { current = value; },
+    initialize: vi.fn(async () => identity(current)),
+    withRestAuthorization: vi.fn(async (
+      operation: (authorization: RestAuthorizationLease) => Promise<QuoteSample>,
+    ) => operation(current)),
     invalidateAccessToken: vi.fn(async (_expected: AccessTokenExpectation) => true),
   };
   return port;
