@@ -153,6 +153,7 @@ export class ConnectionSupervisor {
   private approvalRefreshTimer: TimerHandle | undefined;
   private stableLivenessTimer: TimerHandle | undefined;
   private reconnectAttempts = 0;
+  private reconnectGeneration = 0;
   private lastActivityAt = 0;
   private awaitingHeartbeat = false;
   private approval: ApprovalKeyLease | undefined;
@@ -233,9 +234,8 @@ export class ConnectionSupervisor {
    */
   async refreshApprovalKey(): Promise<boolean> {
     if (this.currentState === "stopped") return false;
-    const requestEpoch = ++this.approvalRequestEpoch;
     try {
-      const lease = await this.requestApprovalKey(requestEpoch);
+      const lease = await this.getOrStartApprovalRequest().promise;
       if (!lease) return false;
     } catch {
       this.recordFailure("AUTH_REJECTED", true, "승인 키를 갱신하지 못했습니다.");
@@ -278,7 +278,7 @@ export class ConnectionSupervisor {
     this.clearReconnectTimer();
     this.clearApprovalRefreshTimer();
     this.clearSocketTimers();
-    this.cancelAttempt();
+    this.cancelAttempt(stoppedError());
     this.disposeCurrentSocket();
     this.approval = undefined;
     this.setState("stopped");
@@ -300,11 +300,12 @@ export class ConnectionSupervisor {
 
   private beginConnect(): Promise<void> {
     this.clearReconnectTimer();
-    this.setState("connecting");
     const attempt = this.createAttempt();
     this.connectionAttempt = attempt;
     // A caller may intentionally not await retain(); prevent rejected attempts from becoming global errors.
     void attempt.promise.catch(() => undefined);
+    this.setState("connecting");
+    if (!this.isCurrentAttempt(attempt)) return attempt.promise;
     void this.acquireApprovalAndCreateSocket(attempt);
     return attempt.promise;
   }
@@ -337,14 +338,10 @@ export class ConnectionSupervisor {
   private async acquireApprovalAndCreateSocket(attempt: ConnectionAttempt): Promise<void> {
     while (this.isCurrentAttempt(attempt)) {
       if (!this.approval) {
-        const requestEpoch = ++this.approvalRequestEpoch;
         try {
-          const lease = await this.requestApprovalKey(requestEpoch);
+          const lease = await this.getOrStartApprovalRequest().promise;
           if (!this.isCurrentAttempt(attempt)) return;
-          if (!lease) {
-            await this.waitForLatestApprovalRequest();
-            continue;
-          }
+          if (!lease) continue;
         } catch {
           this.failAttempt(attempt, supervisorError(
             "AUTH_REJECTED",
@@ -391,10 +388,12 @@ export class ConnectionSupervisor {
   }
 
   /**
-   * 승인 키 요청의 승자는 가장 최근 epoch 하나뿐입니다. 이전 요청은 최신 요청이
-   * 끝날 때까지 기다리는 연결 시도를 방해하지 않으며, 키 값을 외부에 노출하지 않습니다.
+   * 동시에 발생한 승인 키 요청은 현재 in-flight promise 하나를 공유합니다.
+   * 완료 뒤의 낮은 credential generation은 폐기하며, 키 값은 외부에 노출하지 않습니다.
    */
-  private requestApprovalKey(epoch: number): Promise<ApprovalKeyLease | undefined> {
+  private getOrStartApprovalRequest(): ApprovalRequest {
+    if (this.approvalRequest) return this.approvalRequest;
+    const epoch = ++this.approvalRequestEpoch;
     const promise = this.performApprovalRequest(epoch);
     const request: ApprovalRequest = { epoch, promise };
     this.approvalRequest = request;
@@ -402,25 +401,21 @@ export class ConnectionSupervisor {
       () => this.clearApprovalRequest(request),
       () => this.clearApprovalRequest(request),
     );
-    return promise;
+    return request;
   }
 
   private async performApprovalRequest(epoch: number): Promise<ApprovalKeyLease | undefined> {
     const lease = this.normalizeApprovalLease(await this.credentials.getApprovalKey());
     if (this.isStopped() || epoch !== this.approvalRequestEpoch) return undefined;
+    if (
+      this.approval &&
+      lease.credentialGeneration < this.approval.credentialGeneration
+    ) {
+      return undefined;
+    }
     this.approval = lease;
     this.startApprovalRefreshTimer();
     return lease;
-  }
-
-  private async waitForLatestApprovalRequest(): Promise<void> {
-    const request = this.approvalRequest;
-    if (!request || request.epoch !== this.approvalRequestEpoch) return;
-    try {
-      await request.promise;
-    } catch {
-      // The caller will retry only when the latest request did not produce a usable key.
-    }
   }
 
   private clearApprovalRequest(request: ApprovalRequest): void {
@@ -435,6 +430,9 @@ export class ConnectionSupervisor {
     this.lastActivityAt = this.safeNow();
     this.awaitingHeartbeat = false;
     this.setState("open");
+    if (!this.isCurrentSocket(socket, socketEpoch) || this.currentState !== "open") {
+      return;
+    }
     this.startHeartbeat(socket, socketEpoch);
     this.startStableLivenessTimer(socket, socketEpoch);
   }
@@ -487,14 +485,33 @@ export class ConnectionSupervisor {
     }
     if (this.reconnectTimer !== undefined) return;
     const delay = this.nextReconnectDelay();
+    const generation = ++this.reconnectGeneration;
     this.setState("reconnect_wait");
+    if (
+      generation !== this.reconnectGeneration ||
+      this.currentState !== "reconnect_wait" ||
+      this.retainCount === 0
+    ) {
+      return;
+    }
     try {
       const expectedState = this.currentState;
-      this.reconnectTimer = this.setTimeoutFn(() => {
+      const timer = this.setTimeoutFn(() => {
+        if (generation !== this.reconnectGeneration) return;
         this.reconnectTimer = undefined;
+        this.reconnectGeneration += 1;
         if (this.currentState !== expectedState || this.retainCount === 0) return;
         void this.beginConnect().catch(() => undefined);
       }, delay);
+      if (generation !== this.reconnectGeneration || this.currentState !== "reconnect_wait") {
+        try {
+          this.clearTimeoutFn(timer);
+        } catch {
+          // A generation guard prevents an already-queued stale callback.
+        }
+        return;
+      }
+      this.reconnectTimer = timer;
       this.reconnectAttempts = Math.min(this.reconnectAttempts + 1, RECONNECT_DELAYS_MS.length - 1);
       this.diagnostics.increment("websocketReconnects");
     } catch {
@@ -685,13 +702,16 @@ export class ConnectionSupervisor {
   }
 
   private clearReconnectTimer(): void {
-    if (this.reconnectTimer === undefined) return;
-    try {
-      this.clearTimeoutFn(this.reconnectTimer);
-    } catch {
-      // A callback cannot reconnect after its state guard changes.
-    }
+    const timer = this.reconnectTimer;
     this.reconnectTimer = undefined;
+    this.reconnectGeneration += 1;
+    if (timer !== undefined) {
+      try {
+        this.clearTimeoutFn(timer);
+      } catch {
+        // A callback cannot reconnect after its generation changes.
+      }
+    }
   }
 
   private clearApprovalRefreshTimer(): void {

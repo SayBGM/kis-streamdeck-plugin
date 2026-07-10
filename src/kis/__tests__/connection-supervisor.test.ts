@@ -136,6 +136,66 @@ describe("ConnectionSupervisor", () => {
     expect(supervisor.demand).toBe(1);
   });
 
+  it("settles the retain promise without creating a socket when a connecting listener releases demand", async () => {
+    supervisor.onState((state) => {
+      if (state === "connecting") supervisor.release();
+    });
+
+    const retained = supervisor.retain();
+    await flush();
+
+    await expect(retained).rejects.toMatchObject({ code: "NETWORK" });
+    expect(supervisor.state).toBe("idle");
+    expect(sockets).toHaveLength(0);
+  });
+
+  it("settles the retain promise without creating a socket when a connecting listener destroys it", async () => {
+    supervisor.onState((state) => {
+      if (state === "connecting") supervisor.destroy();
+    });
+
+    const retained = supervisor.retain();
+    await flush();
+
+    await expect(retained).rejects.toMatchObject({ code: "SETTINGS" });
+    expect(supervisor.state).toBe("stopped");
+    expect(sockets).toHaveLength(0);
+  });
+
+  it("does not start heartbeat timers after an open listener releases demand", async () => {
+    supervisor.onState((state) => {
+      if (state === "open") supervisor.release();
+    });
+
+    const retained = supervisor.retain();
+    await flush();
+    sockets[0].readyState = 1;
+    sockets[0].emit("open");
+    await flush();
+
+    await expect(retained).resolves.toBeUndefined();
+    expect(supervisor.state).toBe("idle");
+    expect(sockets[0].terminateCalls).toBe(1);
+    expect(intervals.some(({ milliseconds }) => milliseconds === 15_000)).toBe(false);
+  });
+
+  it("does not start heartbeat timers after an open listener destroys it", async () => {
+    supervisor.onState((state) => {
+      if (state === "open") supervisor.destroy();
+    });
+
+    const retained = supervisor.retain();
+    await flush();
+    sockets[0].readyState = 1;
+    sockets[0].emit("open");
+    await flush();
+
+    await expect(retained).resolves.toBeUndefined();
+    expect(supervisor.state).toBe("stopped");
+    expect(sockets[0].terminateCalls).toBe(1);
+    expect(intervals.some(({ milliseconds }) => milliseconds === 15_000)).toBe(false);
+  });
+
   it("shares one connect attempt for multiple retained consumers", async () => {
     void supervisor.retain();
     void supervisor.retain();
@@ -198,6 +258,59 @@ describe("ConnectionSupervisor", () => {
     advance(5_000);
     await flush();
     expect(sockets).toHaveLength(2);
+  });
+
+  it("ignores a cancelled reconnect callback after a newer reconnect timer is armed", async () => {
+    const localSockets: FakeSocket[] = [];
+    const reconnectCallbacks: Array<() => void> = [];
+    let local: ConnectionSupervisor;
+    local = new ConnectionSupervisor({
+      socketFactory: () => {
+        const socket = new FakeSocket();
+        localSockets.push(socket);
+        return socket;
+      },
+      credentials: { getApprovalKey: vi.fn().mockResolvedValue(lease()) },
+      now: () => now,
+      random: () => 0.5,
+      setTimeout: (callback, milliseconds) => {
+        if (
+          (milliseconds === 5_000 || milliseconds === 10_000) &&
+          local.state === "reconnect_wait"
+        ) {
+          reconnectCallbacks.push(callback);
+          return { reconnectCallbacks: reconnectCallbacks.length };
+        }
+        return setTimeout(callback, milliseconds);
+      },
+      clearTimeout: () => undefined,
+      setInterval,
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    });
+
+    void local.retain();
+    await flush();
+    localSockets[0].readyState = 1;
+    localSockets[0].emit("open");
+    localSockets[0].emit("close");
+    local.release();
+
+    void local.retain();
+    await flush();
+    localSockets[1].readyState = 1;
+    localSockets[1].emit("open");
+    localSockets[1].emit("close");
+    expect(reconnectCallbacks).toHaveLength(2);
+
+    reconnectCallbacks[0]();
+    await flush();
+    expect(localSockets).toHaveLength(2);
+    expect(local.state).toBe("reconnect_wait");
+
+    reconnectCallbacks[1]();
+    await flush();
+    expect(localSockets).toHaveLength(3);
+    local.destroy();
   });
 
   it("caps reconnect backoff at 60 seconds", async () => {
@@ -312,21 +425,12 @@ describe("ConnectionSupervisor", () => {
     expect(supervisor.state).toBe("open");
   });
 
-  it("keeps an open connection on approval refresh failure and discards stale refresh results", async () => {
+  it("keeps an open connection on approval refresh failure and discards lower-generation results", async () => {
     const socket = await retainAndOpen();
-    let resolveFirst!: (value: ApprovalKeyLease) => void;
-    const first = new Promise<ApprovalKeyLease>((resolve) => { resolveFirst = resolve; });
-    let resolveSecond!: (value: ApprovalKeyLease) => void;
-    const second = new Promise<ApprovalKeyLease>((resolve) => { resolveSecond = resolve; });
-    getApprovalKey.mockReset().mockReturnValueOnce(first).mockReturnValueOnce(second);
+    getApprovalKey.mockReset().mockResolvedValueOnce(lease("old", 0));
 
-    const oldRefresh = supervisor.refreshApprovalKey();
-    const newRefresh = supervisor.refreshApprovalKey();
-    resolveFirst(lease("old", 1));
-    resolveSecond(lease("new", 2));
-    await expect(oldRefresh).resolves.toBe(false);
-    await expect(newRefresh).resolves.toBe(true);
-    expect(supervisor.approvalIdentity).toMatchObject({ credentialGeneration: 2 });
+    await expect(supervisor.refreshApprovalKey()).resolves.toBe(false);
+    expect(supervisor.approvalIdentity).toMatchObject({ credentialGeneration: 1 });
     expect(socket.sent).toHaveLength(0);
 
     getApprovalKey.mockRejectedValueOnce(new Error("offline"));
@@ -334,24 +438,22 @@ describe("ConnectionSupervisor", () => {
     expect(supervisor.state).toBe("open");
   });
 
-  it("waits for the newest approval request when a connect acquisition becomes stale", async () => {
-    let resolveInitial!: (value: ApprovalKeyLease) => void;
-    const initial = new Promise<ApprovalKeyLease>((resolve) => { resolveInitial = resolve; });
-    let resolveRefresh!: (value: ApprovalKeyLease) => void;
-    const refresh = new Promise<ApprovalKeyLease>((resolve) => { resolveRefresh = resolve; });
-    getApprovalKey.mockReset().mockReturnValueOnce(initial).mockReturnValueOnce(refresh);
+  it("singleflights concurrent refresh calls with the in-flight initial acquisition", async () => {
+    let resolveApproval!: (value: ApprovalKeyLease) => void;
+    const pendingApproval = new Promise<ApprovalKeyLease>((resolve) => {
+      resolveApproval = resolve;
+    });
+    getApprovalKey.mockReset().mockReturnValue(pendingApproval);
 
     void supervisor.retain();
     await flush();
-    const refreshResult = supervisor.refreshApprovalKey();
-    resolveInitial(lease("stale", 1));
-    await flush();
-    expect(sockets).toHaveLength(0);
-    resolveRefresh(lease("current", 2));
-    await expect(refreshResult).resolves.toBe(true);
-    await flush();
+    const firstRefresh = supervisor.refreshApprovalKey();
+    const secondRefresh = supervisor.refreshApprovalKey();
+    expect(getApprovalKey).toHaveBeenCalledTimes(1);
 
-    expect(getApprovalKey).toHaveBeenCalledTimes(2);
+    resolveApproval(lease("approval-current", 2));
+    await expect(Promise.all([firstRefresh, secondRefresh])).resolves.toEqual([true, true]);
+    await flush();
     expect(sockets).toHaveLength(1);
     expect(supervisor.approvalIdentity).toEqual({ credentialGeneration: 2 });
   });
