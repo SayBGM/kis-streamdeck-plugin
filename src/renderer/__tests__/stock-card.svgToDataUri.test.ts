@@ -1,11 +1,4 @@
-/**
- * Characterization tests for svgToDataUri()
- *
- * Captures CURRENT behavior after SPEC-PERF-001 changes:
- * - SVG_DATA_URI_CACHE_MAX_ENTRIES = 500
- * - semanticKey parameter added (signature change)
- * - LRU cache key is semanticKey, not the SVG string
- */
+/** svgToDataUri() caches the generated URI by the actual SVG content. */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -24,15 +17,18 @@ describe("svgToDataUri() — characterization tests", () => {
     );
   });
 
-  it("returns cached DataURI on second call with same semanticKey", async () => {
+  it("uses the actual SVG as the cache key even when semantic keys differ", async () => {
     const { svgToDataUri } = await import("../stock-card.js");
     const svg = '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>';
-    const key = "005930|75400.00|200.00|0.27|rise|LIVE|FRESH";
+    const encodeSpy = vi.spyOn(globalThis, "encodeURIComponent");
+    encodeSpy.mockClear();
 
-    const first = svgToDataUri(svg, key);
-    const second = svgToDataUri(svg, key);
+    const first = svgToDataUri(svg, "old-semantic-key");
+    const second = svgToDataUri(svg, "new-semantic-key");
 
     expect(first).toBe(second);
+    expect(encodeSpy).toHaveBeenCalledTimes(1);
+    encodeSpy.mockRestore();
   });
 
   it("does NOT re-encode SVG on cache hit (encodeURIComponent called only once)", async () => {
@@ -53,18 +49,18 @@ describe("svgToDataUri() — characterization tests", () => {
     encodeSpy.mockRestore();
   });
 
-  it("different semanticKey for same SVG yields new cache entry (cache miss)", async () => {
+  it("does not alias different SVG content that shares a semantic key", async () => {
     const { svgToDataUri } = await import("../stock-card.js");
-    const svg = '<svg/>';
-    const key1 = "ticker|100.00|1.00|0.01|rise|LIVE|FRESH";
-    const key2 = "ticker|200.00|2.00|0.02|rise|LIVE|FRESH";
+    const key = "same-semantic-key";
+    const firstSvg = '<svg id="first"/>';
+    const secondSvg = '<svg id="second"/>';
 
-    const uri1 = svgToDataUri(svg, key1);
-    const uri2 = svgToDataUri(svg, key2);
+    const uri1 = svgToDataUri(firstSvg, key);
+    const uri2 = svgToDataUri(secondSvg, key);
 
-    // Both should produce the same DataURI content (same SVG),
-    // but they are cached under different keys
-    expect(uri1).toBe(uri2);
+    expect(uri1).not.toBe(uri2);
+    expect(uri1).toContain(encodeURIComponent(firstSvg));
+    expect(uri2).toContain(encodeURIComponent(secondSvg));
   });
 
   it("LRU eviction: oldest entry removed when cache reaches 500 entries", async () => {
@@ -72,20 +68,24 @@ describe("svgToDataUri() — characterization tests", () => {
 
     // Fill cache to 500 entries
     for (let i = 0; i < 500; i++) {
-      svgToDataUri(`<svg id="${i}"/>`, `key-${i}`);
+      svgToDataUri(`<svg id="${i}"/>`, "ignored");
     }
 
     // Access key-0 to make it recently used (LRU update)
-    svgToDataUri(`<svg id="0"/>`, "key-0");
+    svgToDataUri(`<svg id="0"/>`, "different-semantic-key");
 
     // Add 501st entry — should evict key-1 (oldest not accessed)
-    svgToDataUri('<svg id="new"/>', "key-new");
+    svgToDataUri('<svg id="new"/>', "ignored");
 
     // Verify the new entry is cached (no re-encoding on second call)
     const encodeSpy = vi.spyOn(globalThis, "encodeURIComponent");
     encodeSpy.mockClear();
-    svgToDataUri('<svg id="new"/>', "key-new");
+    svgToDataUri('<svg id="new"/>', "another-ignored-key");
     expect(encodeSpy.mock.calls.length).toBe(0); // hit, no encode
+
+    encodeSpy.mockClear();
+    svgToDataUri('<svg id="1"/>', "ignored-after-eviction");
+    expect(encodeSpy).toHaveBeenCalledTimes(1); // key was the oldest untouched SVG
 
     encodeSpy.mockRestore();
   });
@@ -95,20 +95,24 @@ describe("svgToDataUri() — characterization tests", () => {
 
     // Fill cache to 500 entries
     for (let i = 0; i < 500; i++) {
-      svgToDataUri(`<svg id="${i}"/>`, `key-${i}`);
+      svgToDataUri(`<svg id="${i}"/>`, "ignored");
     }
 
     // Access key-0 — it becomes most recent
-    svgToDataUri(`<svg id="0"/>`, "key-0");
+    svgToDataUri(`<svg id="0"/>`, "ignored-again");
 
     // Add 501st entry — key-1 should be evicted (was oldest after key-0 was refreshed)
-    svgToDataUri('<svg id="501"/>', "key-501");
+    svgToDataUri('<svg id="501"/>', "ignored");
 
     // key-0 should still be in cache (was refreshed to most-recent)
     const encodeSpy = vi.spyOn(globalThis, "encodeURIComponent");
     encodeSpy.mockClear();
-    svgToDataUri(`<svg id="0"/>`, "key-0");
+    svgToDataUri(`<svg id="0"/>`, "ignored-on-hit");
     expect(encodeSpy.mock.calls.length).toBe(0); // hit
+
+    encodeSpy.mockClear();
+    svgToDataUri(`<svg id="1"/>`, "ignored-after-eviction");
+    expect(encodeSpy).toHaveBeenCalledTimes(1); // untouched oldest SVG was evicted
 
     encodeSpy.mockRestore();
   });

@@ -504,19 +504,21 @@ function escapeXml(str: string): string {
     .replace(/'/g, "&apos;");
 }
 
-// @MX:NOTE: [AUTO] semanticKey must be 1:1 with SVG content. Format for stock cards: "${ticker}|${price}|${change}|${changeRate}|${sign}|${connectionState}|${isStale}"
+// @MX:NOTE: [AUTO] The actual SVG is the cache identity. The optional legacy
+// semantic key is intentionally ignored because callers cannot guarantee a 1:1
+// mapping between their state key and the generated markup.
 // @MX:SPEC: SPEC-PERF-001 REQ-PERF-001-2.1.1, REQ-PERF-001-2.1.3
-export function svgToDataUri(svg: string, semanticKey: string): string {
-  const cached = svgDataUriCache.get(semanticKey);
+export function svgToDataUri(svg: string, _legacySemanticKey?: string): string {
+  const cached = svgDataUriCache.get(svg);
   if (cached) {
     // LRU 갱신: 조회된 키를 최근 사용으로 이동
-    svgDataUriCache.delete(semanticKey);
-    svgDataUriCache.set(semanticKey, cached);
+    svgDataUriCache.delete(svg);
+    svgDataUriCache.set(svg, cached);
     return cached;
   }
 
   const dataUri = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
-  svgDataUriCache.set(semanticKey, dataUri);
+  svgDataUriCache.set(svg, dataUri);
 
   if (svgDataUriCache.size > SVG_DATA_URI_CACHE_MAX_ENTRIES) {
     const oldestKey = svgDataUriCache.keys().next().value;
