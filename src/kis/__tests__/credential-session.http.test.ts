@@ -211,8 +211,8 @@ describe("CredentialSession HTTP issuance", () => {
     expect(sleep).toHaveBeenCalledWith(60_000);
   });
 
-  it("singleflights approval keys per generation without persisting them or retrying rate limits", async () => {
-    const { repository, readDisk, persistence } = makeRepository(configured(2));
+  it("singleflights approval keys per generation without persisting them", async () => {
+    const { repository, readDisk } = makeRepository(configured(2));
     let resolveFetch!: (value: unknown) => void;
     const fetch = vi.fn<AuthFetch>(() => new Promise((resolve) => {
       resolveFetch = resolve;
@@ -228,17 +228,64 @@ describe("CredentialSession HTTP issuance", () => {
       expect.objectContaining({ approvalKey: "approval", credentialGeneration: 2 }),
     ]);
     expect(readDisk()).not.toHaveProperty("approvalKey");
-    const writesBeforeRateLimit = persistence.setGlobalSettings.mock.calls.length;
+  });
 
-    const rateFetch = vi.fn<AuthFetch>().mockResolvedValue(
+  it("retries approval-key EGW00133 once after exactly 60 seconds", async () => {
+    const { repository } = makeRepository(configured());
+    const fetch = vi.fn<AuthFetch>()
+      .mockResolvedValueOnce(response(false, 403, { error_code: "EGW00133" }))
+      .mockResolvedValueOnce(response(true, 200, { approval_key: "retried-approval" }));
+    const sleep = vi.fn(async (_milliseconds: number) => {});
+    const session = new CredentialSession(repository, { fetch, sleep });
+
+    await expect(session.getApprovalKey()).resolves.toMatchObject({
+      approvalKey: "retried-approval",
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(60_000);
+  });
+
+  it("reports approval-key rate limiting after only one retry", async () => {
+    const { repository } = makeRepository(configured());
+    const fetch = vi.fn<AuthFetch>()
+      .mockResolvedValueOnce(response(false, 403, { error_code: "EGW00133" }))
+      .mockResolvedValueOnce(response(false, 403, { error_code: "EGW00133" }));
+    const sleep = vi.fn(async (_milliseconds: number) => {});
+    const session = new CredentialSession(repository, { fetch, sleep });
+
+    await expect(session.getApprovalKey()).rejects.toMatchObject({
+      code: "AUTH_RATE_LIMITED",
+      scope: "auth",
+      retryable: true,
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(60_000);
+  });
+
+  it("cancels an approval-key retry when credentials change during the delay", async () => {
+    const { repository } = makeRepository(configured());
+    const fetch = vi.fn<AuthFetch>().mockResolvedValue(
       response(false, 403, { error_code: "EGW00133" }),
     );
-    const rateSleep = vi.fn(async () => {});
-    const rateSession = new CredentialSession(repository, { fetch: rateFetch, sleep: rateSleep });
-    await expect(rateSession.getApprovalKey()).rejects.toMatchObject({ code: "AUTH_RATE_LIMITED" });
-    expect(rateFetch).toHaveBeenCalledOnce();
-    expect(rateSleep).not.toHaveBeenCalled();
-    expect(persistence.setGlobalSettings.mock.calls.length).toBe(writesBeforeRateLimit);
+    let resolveSleep!: () => void;
+    const sleep = vi.fn(() => new Promise<void>((resolve) => {
+      resolveSleep = resolve;
+    }));
+    const session = new CredentialSession(repository, { fetch, sleep });
+
+    const pending = session.getApprovalKey();
+    await waitForCalls(sleep, 1);
+    await session.saveCredentials("new-key", "new-secret");
+    resolveSleep();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "AUTH_REJECTED",
+      scope: "auth",
+      retryable: true,
+    });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("discards an approval key when credentials change during issuance", async () => {

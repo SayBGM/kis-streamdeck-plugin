@@ -135,6 +135,23 @@ function noCredentialsError(): KisError {
   );
 }
 
+function invalidAuthInputError(): KisError {
+  return authBoundaryError(
+    "PROTOCOL",
+    false,
+    "인증 요청 입력 형식이 올바르지 않습니다.",
+  );
+}
+
+function settingsReadinessError(): KisError {
+  return Object.freeze(new KisError({
+    code: "SETTINGS",
+    scope: "settings",
+    retryable: true,
+    safeMessage: "인증 설정을 안전하게 불러오지 못했습니다.",
+  }));
+}
+
 function incrementCounter(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0 || value >= Number.MAX_SAFE_INTEGER) {
     throw settingsCounterError();
@@ -142,15 +159,21 @@ function incrementCounter(value: number): number {
   return value + 1;
 }
 
-function normalizedPair(appKey: string, appSecret: string): {
+function normalizedPair(appKey: unknown, appSecret: unknown): {
   appKey: string;
   appSecret: string;
 } {
+  if (typeof appKey !== "string" || typeof appSecret !== "string") {
+    throw noCredentialsError();
+  }
   return { appKey: appKey.trim(), appSecret: appSecret.trim() };
 }
 
-export function fingerprintCredentials(appKey: string, appSecret: string): string {
+export function fingerprintCredentials(appKey: unknown, appSecret: unknown): string {
   const normalized = normalizedPair(appKey, appSecret);
+  if (!normalized.appKey || !normalized.appSecret) {
+    throw noCredentialsError();
+  }
   return createHash("sha256")
     .update(
       `${normalized.appKey.length}:${normalized.appKey}` +
@@ -164,6 +187,42 @@ function clearPersistedToken(draft: GlobalSettingsV2): void {
   delete draft.accessToken;
   delete draft.accessTokenExpiry;
   delete draft.accessTokenFingerprint;
+}
+
+function hasAuthenticationArtifacts(settings: Readonly<GlobalSettingsV2>): boolean {
+  return settings.appKey !== undefined ||
+    settings.appSecret !== undefined ||
+    settings.credentialFingerprint !== undefined ||
+    settings.accessToken !== undefined ||
+    settings.accessTokenExpiry !== undefined ||
+    settings.accessTokenFingerprint !== undefined;
+}
+
+function hasInvalidTokenArtifacts(
+  settings: Readonly<GlobalSettingsV2>,
+  credentialFingerprint: string,
+): boolean {
+  const hasAnyTokenArtifact = settings.accessToken !== undefined ||
+    settings.accessTokenExpiry !== undefined ||
+    settings.accessTokenFingerprint !== undefined;
+  if (!hasAnyTokenArtifact) return false;
+  return typeof settings.accessToken !== "string" ||
+    settings.accessToken.length === 0 ||
+    typeof settings.accessTokenExpiry !== "number" ||
+    !Number.isFinite(settings.accessTokenExpiry) ||
+    settings.accessTokenFingerprint !== credentialFingerprint;
+}
+
+function credentialBootstrapNeeded(settings: Readonly<GlobalSettingsV2>): boolean {
+  const appKey = typeof settings.appKey === "string" ? settings.appKey.trim() : "";
+  const appSecret = typeof settings.appSecret === "string" ? settings.appSecret.trim() : "";
+  if (!appKey || !appSecret) return hasAuthenticationArtifacts(settings);
+
+  const fingerprint = fingerprintCredentials(appKey, appSecret);
+  return settings.appKey !== appKey ||
+    settings.appSecret !== appSecret ||
+    settings.credentialFingerprint !== fingerprint ||
+    hasInvalidTokenArtifacts(settings, fingerprint);
 }
 
 function credentialsFromSettings(
@@ -233,6 +292,53 @@ function credentialFlightKey(credentials: NormalizedCredentials): string {
   return `${credentials.generation}:${credentials.fingerprint}`;
 }
 
+function parseAccessTokenExpectation(value: unknown): AccessTokenExpectation {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidAuthInputError();
+  }
+
+  let prototype: object | null;
+  let symbols: symbol[];
+  let descriptors: Record<string, PropertyDescriptor>;
+  try {
+    prototype = Object.getPrototypeOf(value) as object | null;
+    symbols = Object.getOwnPropertySymbols(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw invalidAuthInputError();
+  }
+  if (
+    (prototype !== Object.prototype && prototype !== null) ||
+    symbols.length > 0 ||
+    Object.values(descriptors).some(
+      (descriptor) => !descriptor.enumerable || !("value" in descriptor),
+    )
+  ) {
+    throw invalidAuthInputError();
+  }
+
+  const generation = descriptors.credentialGeneration?.value;
+  const fingerprint = descriptors.credentialFingerprint?.value;
+  const tokenVersion = descriptors.tokenVersion?.value;
+  if (
+    typeof generation !== "number" ||
+    !Number.isSafeInteger(generation) ||
+    generation < 0 ||
+    typeof fingerprint !== "string" ||
+    fingerprint.trim().length === 0 ||
+    typeof tokenVersion !== "number" ||
+    !Number.isSafeInteger(tokenVersion) ||
+    tokenVersion < 0
+  ) {
+    throw invalidAuthInputError();
+  }
+  return {
+    credentialGeneration: generation,
+    credentialFingerprint: fingerprint,
+    tokenVersion,
+  };
+}
+
 export class CredentialSession {
   private readonly repository: CredentialSettingsPort;
   private readonly now: () => number;
@@ -242,6 +348,7 @@ export class CredentialSession {
   private readonly clearTimeout: CredentialSessionOptions["clearTimeout"];
   private readonly accessTokenFlights = new Map<string, Promise<AccessTokenLease>>();
   private readonly approvalKeyFlights = new Map<string, Promise<ApprovalKeyLease>>();
+  private initialization?: Promise<CredentialIdentity>;
 
   constructor(repository: CredentialSettingsPort, options: CredentialSessionOptions = {}) {
     this.repository = repository;
@@ -252,27 +359,67 @@ export class CredentialSession {
     this.clearTimeout = options.clearTimeout ?? defaultClearTimeout;
   }
 
-  async initialize(): Promise<CredentialIdentity> {
-    await this.repository.whenReady();
+  initialize(): Promise<CredentialIdentity> {
+    if (this.initialization) return this.initialization;
+
+    const initialization = this.bootstrap().catch((error: unknown) => {
+      if (this.initialization === initialization) {
+        this.initialization = undefined;
+      }
+      throw error;
+    });
+    this.initialization = initialization;
+    return initialization;
+  }
+
+  private async bootstrap(): Promise<CredentialIdentity> {
+    const ready = await this.repository.whenReady();
+    if (
+      ready.status.baseKnown &&
+      !ready.status.persistenceDegraded &&
+      !credentialBootstrapNeeded(ready.settings)
+    ) {
+      return identityFromSnapshot(ready);
+    }
+
     const snapshot = await this.repository.update((draft) => {
       const appKey = typeof draft.appKey === "string" ? draft.appKey.trim() : "";
       const appSecret = typeof draft.appSecret === "string" ? draft.appSecret.trim() : "";
-      if (!appKey || !appSecret) return;
+      if (!appKey || !appSecret) {
+        if (!hasAuthenticationArtifacts(draft)) return;
+
+        delete draft.appKey;
+        delete draft.appSecret;
+        delete draft.credentialFingerprint;
+        clearPersistedToken(draft);
+        draft.credentialGeneration = incrementCounter(draft.credentialGeneration);
+        draft.accessTokenVersion = incrementCounter(draft.accessTokenVersion);
+        return;
+      }
 
       const fingerprint = fingerprintCredentials(appKey, appSecret);
       draft.appKey = appKey;
       draft.appSecret = appSecret;
-      if (draft.credentialFingerprint === fingerprint) return;
+      if (draft.credentialFingerprint === fingerprint) {
+        if (hasInvalidTokenArtifacts(draft, fingerprint)) {
+          clearPersistedToken(draft);
+          draft.accessTokenVersion = incrementCounter(draft.accessTokenVersion);
+        }
+        return;
+      }
 
       draft.credentialFingerprint = fingerprint;
       draft.credentialGeneration = incrementCounter(draft.credentialGeneration);
       draft.accessTokenVersion = incrementCounter(draft.accessTokenVersion);
       clearPersistedToken(draft);
     });
+    if (!snapshot.status.baseKnown || snapshot.status.persistenceDegraded) {
+      throw settingsReadinessError();
+    }
     return identityFromSnapshot(snapshot);
   }
 
-  async saveCredentials(appKey: string, appSecret: string): Promise<CredentialIdentity> {
+  async saveCredentials(appKey: unknown, appSecret: unknown): Promise<CredentialIdentity> {
     const normalized = normalizedPair(appKey, appSecret);
     if (!normalized.appKey || !normalized.appSecret) {
       throw noCredentialsError();
@@ -353,7 +500,8 @@ export class CredentialSession {
     return null;
   }
 
-  async invalidateAccessToken(expected: AccessTokenExpectation): Promise<boolean> {
+  async invalidateAccessToken(expectedInput: unknown): Promise<boolean> {
+    const expected = parseAccessTokenExpectation(expectedInput);
     await this.repository.whenReady();
     let invalidated = false;
     await this.repository.update((draft) => {
@@ -436,31 +584,10 @@ export class CredentialSession {
   private async issueAndPersistAccessToken(
     credentials: NormalizedCredentials,
   ): Promise<AccessTokenLease> {
-    let issued: IssuedAccessToken | undefined;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        issued = await this.issueAccessTokenAttempt(credentials);
-        break;
-      } catch (error) {
-        if (!(error instanceof KisError) || error.code !== "AUTH_RATE_LIMITED") {
-          throw error;
-        }
-        if (attempt === 1) throw error;
-        try {
-          await this.sleep(TOKEN_RATE_LIMIT_DELAY_MS);
-        } catch {
-          throw authBoundaryError(
-            "NETWORK",
-            true,
-            "인증 재시도 대기 중 오류가 발생했습니다.",
-          );
-        }
-        await this.refreshAndCheckCredentials(credentials);
-      }
-    }
-    if (!issued) {
-      throw authBoundaryError("PROTOCOL", true, "접근 토큰 응답을 처리하지 못했습니다.");
-    }
+    const issued = await this.issueWithRateLimitRetry(
+      credentials,
+      () => this.issueAccessTokenAttempt(credentials),
+    );
 
     const issuedAt = this.now();
     const expiresAt = issuedAt + issued.expiresInSeconds * 1_000;
@@ -496,6 +623,33 @@ export class CredentialSession {
     });
   }
 
+  private async issueWithRateLimitRetry<T>(
+    credentials: NormalizedCredentials,
+    issue: () => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await issue();
+      } catch (error) {
+        if (!(error instanceof KisError) || error.code !== "AUTH_RATE_LIMITED") {
+          throw error;
+        }
+        if (attempt === 1) throw error;
+        try {
+          await this.sleep(TOKEN_RATE_LIMIT_DELAY_MS);
+        } catch {
+          throw authBoundaryError(
+            "NETWORK",
+            true,
+            "인증 재시도 대기 중 오류가 발생했습니다.",
+          );
+        }
+        await this.refreshAndCheckCredentials(credentials);
+      }
+    }
+    throw authBoundaryError("PROTOCOL", true, "인증 응답을 처리하지 못했습니다.");
+  }
+
   private async issueAccessTokenAttempt(
     credentials: NormalizedCredentials,
   ): Promise<IssuedAccessToken> {
@@ -522,6 +676,21 @@ export class CredentialSession {
   private async issueApprovalKey(
     credentials: NormalizedCredentials,
   ): Promise<ApprovalKeyLease> {
+    const approvalKey = await this.issueWithRateLimitRetry(
+      credentials,
+      () => this.issueApprovalKeyAttempt(credentials),
+    );
+    await this.refreshAndCheckCredentials(credentials);
+    return Object.freeze({
+      approvalKey,
+      credentialGeneration: credentials.generation,
+      credentialFingerprint: credentials.fingerprint,
+    });
+  }
+
+  private async issueApprovalKeyAttempt(
+    credentials: NormalizedCredentials,
+  ): Promise<string> {
     const response = await this.postJson(APPROVAL_URL, {
       grant_type: "client_credentials",
       appkey: credentials.appKey,
@@ -532,12 +701,7 @@ export class CredentialSession {
     if (typeof approvalKey !== "string" || approvalKey.length === 0) {
       throw authBoundaryError("PROTOCOL", false, "승인 키 응답 형식이 올바르지 않습니다.");
     }
-    await this.refreshAndCheckCredentials(credentials);
-    return Object.freeze({
-      approvalKey,
-      credentialGeneration: credentials.generation,
-      credentialFingerprint: credentials.fingerprint,
-    });
+    return approvalKey;
   }
 
   private assertSuccessfulResponse(response: AuthResponse): void {
