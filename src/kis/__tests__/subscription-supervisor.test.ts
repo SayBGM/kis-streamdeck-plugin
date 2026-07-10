@@ -18,6 +18,10 @@ class FakeConnection {
   private readonly messageListeners = new Set<MessageListener>();
   private readonly stateListeners = new Set<StateListener>();
 
+  get listenerCount(): number {
+    return this.messageListeners.size + this.stateListeners.size;
+  }
+
   retain(): Promise<void> {
     this.retains += 1;
     return Promise.resolve();
@@ -89,6 +93,7 @@ describe("SubscriptionSupervisor", () => {
     supervisor = new SubscriptionSupervisor({
       connection,
       now: () => now,
+      monotonicNow: () => now,
       setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
       clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
       setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -159,6 +164,7 @@ describe("SubscriptionSupervisor", () => {
     const single = new SubscriptionSupervisor({
       connection,
       now: () => now,
+      monotonicNow: () => now,
       setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
       clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
       setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -175,6 +181,7 @@ describe("SubscriptionSupervisor", () => {
     const noSuffix = new SubscriptionSupervisor({
       connection: noSuffixConnection,
       now: () => now,
+      monotonicNow: () => now,
       setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
       clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
       setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -712,5 +719,96 @@ describe("SubscriptionSupervisor", () => {
     expect(handle.snapshot).toBeUndefined();
     expect(connection.retains).toBe(1);
     expect(connection.releases).toBe(1);
+  });
+
+  it("uses monotonic spacing so a wall-clock rollback cannot stall the next control frame", async () => {
+    const first = { trId: "H0UNCNT0", trKey: "000031" } as const;
+    const second = { trId: "H0UNCNT0", trKey: "000032" } as const;
+    supervisor.subscribe(first);
+    await flush();
+    connection.emitRaw(control(first.trId, first.trKey));
+    now = -3_600_000;
+    supervisor.subscribe(second);
+    vi.advanceTimersByTime(100);
+
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...second });
+  });
+
+  it("drops oversized field payloads before split and never delivers them", async () => {
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    const onData = vi.fn();
+    supervisor.subscribe(descriptor, { onData });
+    await flush();
+    connection.emitRaw(control(descriptor.trId, descriptor.trKey));
+    connection.emitRaw(`0|H0UNCNT0|001|${Array.from({ length: 129 }, () => "x").join("^")}`);
+
+    expect(onData).not.toHaveBeenCalled();
+  });
+
+  it("records a frozen safe diagnostic when a subscription is rejected", async () => {
+    const diagnostics = { record: vi.fn(), increment: vi.fn() };
+    const isolatedConnection = new FakeConnection();
+    const isolated = new SubscriptionSupervisor({
+      connection: isolatedConnection,
+      now: () => now,
+      monotonicNow: () => now,
+      diagnostics,
+      setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    });
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    isolated.subscribe(descriptor);
+    await flush();
+    isolatedConnection.emitRaw(control(descriptor.trId, descriptor.trKey, "ERROR"));
+
+    expect(diagnostics.record).toHaveBeenCalledWith(expect.objectContaining({
+      code: "SUBSCRIPTION_REJECTED",
+      scope: "websocket",
+    }));
+    expect(Object.isFrozen(diagnostics.record.mock.calls[0][0])).toBe(true);
+    expect(diagnostics.increment).toHaveBeenCalledWith("subscriptionRejects");
+    isolated.destroy();
+  });
+
+  it("rolls back constructor listeners when the second interval cannot be armed", () => {
+    const isolatedConnection = new FakeConnection();
+    let intervalCalls = 0;
+    const clearInterval = vi.fn();
+
+    expect(() => new SubscriptionSupervisor({
+      connection: isolatedConnection,
+      setInterval: () => {
+        intervalCalls += 1;
+        if (intervalCalls === 2) throw new Error("rotation timer unavailable");
+        return { id: intervalCalls };
+      },
+      clearInterval,
+    })).toThrow(expect.objectContaining({ code: "SETTINGS" }));
+
+    expect(isolatedConnection.listenerCount).toBe(0);
+    expect(clearInterval).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retain a stale timeout handle when a host timer fires synchronously", async () => {
+    const isolatedConnection = new FakeConnection();
+    const synchronous = new SubscriptionSupervisor({
+      connection: isolatedConnection,
+      now: () => now,
+      monotonicNow: () => now,
+      setTimeout: (callback) => {
+        callback();
+        return { synchronous: true };
+      },
+      clearTimeout: vi.fn(),
+    });
+    const descriptor = { trId: "H0UNCNT0", trKey: "000099" } as const;
+    synchronous.subscribe(descriptor);
+    await flush();
+
+    expect(isolatedConnection.reconnects).toBe(1);
+    expect(synchronous.getSnapshot(descriptor)?.state).toBe("desired");
+    synchronous.destroy();
   });
 });

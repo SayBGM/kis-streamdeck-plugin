@@ -63,6 +63,8 @@ export interface SubscriptionHandle {
 export interface SubscriptionSupervisorOptions {
   readonly connection: ConnectionSupervisorPort;
   readonly now?: () => number;
+  /** 제어 frame spacing 전용 단조 시계입니다. wall clock 변경과 무관해야 합니다. */
+  readonly monotonicNow?: () => number;
   readonly setTimeout?: (callback: () => void, milliseconds: number) => TimerHandle;
   readonly clearTimeout?: (handle: TimerHandle) => void;
   readonly setInterval?: (callback: () => void, milliseconds: number) => TimerHandle;
@@ -124,6 +126,8 @@ const STALE_CHECK_INTERVAL_MS = 1_000;
 const MAX_RETIRED_DATA_KEYS = 256;
 const MAX_LIVE_SUBSCRIPTIONS = 41;
 const ROTATION_LEASE_MS = 60_000;
+const MAX_RAW_FRAME_CHARS = 64 * 1024;
+const MAX_RAW_FIELDS = 128;
 
 function defaultSetTimeout(callback: () => void, milliseconds: number): TimerHandle {
   return setTimeout(callback, milliseconds);
@@ -139,6 +143,12 @@ function defaultSetInterval(callback: () => void, milliseconds: number): TimerHa
 
 function defaultClearInterval(handle: TimerHandle): void {
   clearInterval(handle as ReturnType<typeof setInterval>);
+}
+
+function defaultMonotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
 }
 
 function subscriptionError(safeMessage: string): KisError {
@@ -165,6 +175,7 @@ function cloneDescriptor(descriptor: SubscriptionDescriptor): SubscriptionDescri
 export class SubscriptionSupervisor {
   private readonly connection: ConnectionSupervisorPort;
   private readonly now: () => number;
+  private readonly monotonicNow: () => number;
   private readonly setTimeoutFn: NonNullable<SubscriptionSupervisorOptions["setTimeout"]>;
   private readonly clearTimeoutFn: NonNullable<SubscriptionSupervisorOptions["clearTimeout"]>;
   private readonly setIntervalFn: NonNullable<SubscriptionSupervisorOptions["setInterval"]>;
@@ -185,7 +196,13 @@ export class SubscriptionSupervisor {
   private rotationTimer: TimerHandle | undefined;
   private rotationCurrent: { outgoing: Entry; incoming: Entry } | undefined;
   private readonly rotationQueue: Array<{ outgoing: Entry; incoming: Entry }> = [];
-  private lastSentAt = Number.NEGATIVE_INFINITY;
+  private lastSentAtMonotonic = Number.NEGATIVE_INFINITY;
+  private lastMonotonic = 0;
+  private controlTimeoutGeneration = 0;
+  private controlSendGeneration = 0;
+  private controlRetryGeneration = 0;
+  private staleGeneration = 0;
+  private rotationGeneration = 0;
   private entrySequence = 0;
   private requiresFreshOpen = false;
   private destroyed = false;
@@ -193,6 +210,7 @@ export class SubscriptionSupervisor {
   constructor(options: SubscriptionSupervisorOptions) {
     this.connection = options.connection;
     this.now = options.now ?? Date.now;
+    this.monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
     this.setTimeoutFn = options.setTimeout ?? defaultSetTimeout;
     this.clearTimeoutFn = options.clearTimeout ?? defaultClearTimeout;
     this.setIntervalFn = options.setInterval ?? defaultSetInterval;
@@ -200,8 +218,7 @@ export class SubscriptionSupervisor {
     this.diagnostics = options.diagnostics ?? diagnosticsStore;
     this.unsubscribeMessage = this.connection.onMessage((raw) => this.handleRawMessage(raw));
     this.unsubscribeState = this.connection.onState((state) => this.handleConnectionState(state));
-    this.staleTimer = this.setIntervalFn(() => this.markStaleEntries(), STALE_CHECK_INTERVAL_MS);
-    this.rotationTimer = this.setIntervalFn(() => this.startRotationLease(), ROTATION_LEASE_MS);
+    this.armIntervals();
   }
 
   subscribe(descriptorInput: SubscriptionDescriptor, observer: SubscriptionObserver = {}): SubscriptionHandle {
@@ -310,6 +327,8 @@ export class SubscriptionSupervisor {
     if (this.destroyed) return;
     this.destroyed = true;
     this.clearControlTimers();
+    this.staleGeneration += 1;
+    this.rotationGeneration += 1;
     if (this.staleTimer !== undefined) this.clearIntervalFn(this.staleTimer);
     if (this.rotationTimer !== undefined) this.clearIntervalFn(this.rotationTimer);
     this.staleTimer = undefined;
@@ -383,12 +402,9 @@ export class SubscriptionSupervisor {
 
     const job = this.nextValidJob();
     if (!job) return;
-    const wait = Math.max(0, CONTROL_SPACING_MS - (this.safeNow() - this.lastSentAt));
+    const wait = Math.max(0, CONTROL_SPACING_MS - (this.safeMonotonicNow() - this.lastSentAtMonotonic));
     if (wait > 0) {
-      this.controlSendTimer = this.setTimeoutFn(() => {
-        this.controlSendTimer = undefined;
-        this.sendJob(job);
-      }, wait);
+      this.armControlSend(job, wait);
       return;
     }
     this.sendJob(job);
@@ -430,11 +446,11 @@ export class SubscriptionSupervisor {
       this.requeue(job, true);
       return;
     }
-    this.lastSentAt = this.safeNow();
+    this.lastSentAtMonotonic = this.safeMonotonicNow();
     const publishPending = job.action === "subscribe";
     if (publishPending) entry.state = "pending";
     this.currentJob = job;
-    this.controlTimeout = this.setTimeoutFn(() => this.handleControlTimeout(job), CONTROL_TIMEOUT_MS);
+    this.armControlTimeout(job);
     // Listener가 destroy/release를 호출해도 current job과 timeout이 이미 일관된 상태입니다.
     if (publishPending) this.publishState(entry);
   }
@@ -444,12 +460,7 @@ export class SubscriptionSupervisor {
     if (entry !== job.entry || entry.generation !== job.generation) return;
     if (!entry.queuedAction) entry.queuedAction = job.action;
     this.controlQueue.unshift(job);
-    if (retry && this.controlRetryTimer === undefined) {
-      this.controlRetryTimer = this.setTimeoutFn(() => {
-        this.controlRetryTimer = undefined;
-        this.pump();
-      }, CONTROL_SPACING_MS);
-    }
+    if (retry && this.controlRetryTimer === undefined) this.armControlRetry();
   }
 
   private handleControlTimeout(job: ControlJob): void {
@@ -497,6 +508,7 @@ export class SubscriptionSupervisor {
 
   private handleRawMessage(raw: string): void {
     if (this.destroyed || typeof raw !== "string") return;
+    if (raw.length > MAX_RAW_FRAME_CHARS) return;
     if (raw.startsWith("PINGPONG")) return;
     if (raw.startsWith("{")) {
       this.handleControlMessage(raw);
@@ -507,6 +519,10 @@ export class SubscriptionSupervisor {
     const third = second < 0 ? -1 : raw.indexOf("|", second + 1);
     if (third < 0) return;
     const trId = raw.slice(first + 1, second);
+    let fieldCount = 1;
+    for (let index = third + 1; index < raw.length; index += 1) {
+      if (raw.charCodeAt(index) === 94 && ++fieldCount > MAX_RAW_FIELDS) return;
+    }
     const fields = raw.slice(third + 1).split("^");
     const exactKey = fields[0]?.trim();
     if (!trId || !exactKey) return;
@@ -566,7 +582,18 @@ export class SubscriptionSupervisor {
       } else {
         this.setEntryState(entry, "rejected");
         if (!this.isCurrentEntry(entry)) return;
-        try { this.diagnostics.increment("subscriptionRejects"); } catch { /* observability is optional */ }
+        const error = Object.freeze(new KisError({
+          code: "SUBSCRIPTION_REJECTED",
+          scope: "websocket",
+          retryable: false,
+          safeMessage: "실시간 시세 구독이 거부되었습니다.",
+        }));
+        try {
+          this.diagnostics.record(error);
+          this.diagnostics.increment("subscriptionRejects");
+        } catch {
+          // Diagnostics must not affect the control queue.
+        }
         if (entry.retarget) this.completeRetarget(entry);
         else if (entry.refs.size === 0) this.deleteEntry(entry);
         this.finishRotationIncoming(entry);
@@ -1023,6 +1050,7 @@ export class SubscriptionSupervisor {
   }
 
   private clearControlTimeout(): void {
+    this.controlTimeoutGeneration += 1;
     if (this.controlTimeout === undefined) return;
     this.clearTimeoutFn(this.controlTimeout);
     this.controlTimeout = undefined;
@@ -1030,10 +1058,113 @@ export class SubscriptionSupervisor {
 
   private clearControlTimers(): void {
     this.clearControlTimeout();
+    this.controlSendGeneration += 1;
+    this.controlRetryGeneration += 1;
     if (this.controlSendTimer !== undefined) this.clearTimeoutFn(this.controlSendTimer);
     if (this.controlRetryTimer !== undefined) this.clearTimeoutFn(this.controlRetryTimer);
     this.controlSendTimer = undefined;
     this.controlRetryTimer = undefined;
+  }
+
+  private armControlTimeout(job: ControlJob): void {
+    const generation = ++this.controlTimeoutGeneration;
+    let handle: TimerHandle;
+    try {
+      handle = this.setTimeoutFn(() => {
+        if (generation !== this.controlTimeoutGeneration) return;
+        this.controlTimeout = undefined;
+        this.controlTimeoutGeneration += 1;
+        this.handleControlTimeout(job);
+      }, CONTROL_TIMEOUT_MS);
+    } catch {
+      this.handleControlTimeout(job);
+      return;
+    }
+    if (generation !== this.controlTimeoutGeneration || this.destroyed || this.currentJob !== job) {
+      try { this.clearTimeoutFn(handle); } catch { /* stale synchronous timer */ }
+      return;
+    }
+    this.controlTimeout = handle;
+  }
+
+  private armControlSend(job: QueuedJob, milliseconds: number): void {
+    const generation = ++this.controlSendGeneration;
+    let handle: TimerHandle;
+    try {
+      handle = this.setTimeoutFn(() => {
+        if (generation !== this.controlSendGeneration) return;
+        this.controlSendTimer = undefined;
+        this.controlSendGeneration += 1;
+        this.sendJob(job);
+      }, milliseconds);
+    } catch {
+      this.requeue(job, true);
+      this.connection.forceReconnect("subscription control send timer failed");
+      return;
+    }
+    if (generation !== this.controlSendGeneration || this.destroyed) {
+      try { this.clearTimeoutFn(handle); } catch { /* stale synchronous timer */ }
+      return;
+    }
+    this.controlSendTimer = handle;
+  }
+
+  private armControlRetry(): void {
+    const generation = ++this.controlRetryGeneration;
+    let handle: TimerHandle;
+    try {
+      handle = this.setTimeoutFn(() => {
+        if (generation !== this.controlRetryGeneration) return;
+        this.controlRetryTimer = undefined;
+        this.controlRetryGeneration += 1;
+        this.pump();
+      }, CONTROL_SPACING_MS);
+    } catch {
+      this.connection.forceReconnect("subscription control retry timer failed");
+      return;
+    }
+    if (generation !== this.controlRetryGeneration || this.destroyed) {
+      try { this.clearTimeoutFn(handle); } catch { /* stale synchronous timer */ }
+      return;
+    }
+    this.controlRetryTimer = handle;
+  }
+
+  private armIntervals(): void {
+    const staleGeneration = ++this.staleGeneration;
+    let staleHandle: TimerHandle;
+    try {
+      staleHandle = this.setIntervalFn(() => {
+        if (staleGeneration === this.staleGeneration) this.markStaleEntries();
+      }, STALE_CHECK_INTERVAL_MS);
+    } catch {
+      this.unsubscribeMessage();
+      this.unsubscribeState();
+      throw subscriptionError("구독 타이머를 시작하지 못했습니다.");
+    }
+    if (staleGeneration === this.staleGeneration && !this.destroyed) this.staleTimer = staleHandle;
+    else {
+      try { this.clearIntervalFn(staleHandle); } catch { /* synchronous destroy */ }
+    }
+
+    const rotationGeneration = ++this.rotationGeneration;
+    let rotationHandle: TimerHandle;
+    try {
+      rotationHandle = this.setIntervalFn(() => {
+        if (rotationGeneration === this.rotationGeneration) this.startRotationLease();
+      }, ROTATION_LEASE_MS);
+    } catch {
+      this.staleGeneration += 1;
+      if (this.staleTimer !== undefined) this.clearIntervalFn(this.staleTimer);
+      this.staleTimer = undefined;
+      this.unsubscribeMessage();
+      this.unsubscribeState();
+      throw subscriptionError("구독 타이머를 시작하지 못했습니다.");
+    }
+    if (rotationGeneration === this.rotationGeneration && !this.destroyed) this.rotationTimer = rotationHandle;
+    else {
+      try { this.clearIntervalFn(rotationHandle); } catch { /* synchronous destroy */ }
+    }
   }
 
   private safeNow(): number {
@@ -1043,6 +1174,18 @@ export class SubscriptionSupervisor {
     } catch {
       return Date.now();
     }
+  }
+
+  private safeMonotonicNow(): number {
+    let value = this.lastMonotonic;
+    try {
+      const current = this.monotonicNow();
+      if (Number.isFinite(current)) value = Math.max(this.lastMonotonic, current);
+    } catch {
+      // Keep the previous monotonic reading when the host clock fails.
+    }
+    this.lastMonotonic = value;
+    return value;
   }
 
   private recordSettingsFailure(): void {
