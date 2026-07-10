@@ -594,8 +594,14 @@ export class ConnectionSupervisor {
         // Diagnostics cannot cancel an already-armed reconnect timer.
       }
     } catch {
+      const error = supervisorError(
+        "NETWORK",
+        true,
+        "WebSocket 재연결 타이머를 시작하지 못했습니다.",
+      );
+      this.cancelReconnectWait(error);
       this.setState("idle");
-      this.recordFailure("NETWORK", true, "WebSocket 재연결 타이머를 시작하지 못했습니다.");
+      this.recordError(error);
     }
   }
 

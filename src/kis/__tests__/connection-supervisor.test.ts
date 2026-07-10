@@ -341,6 +341,30 @@ describe("ConnectionSupervisor", () => {
     expect(supervisor.state).toBe("reconnect_wait");
   });
 
+  it("keeps reconnect waiters pending across an ordinary pre-open socket error", async () => {
+    const first = await retainAndOpen();
+    first.emit("close");
+    const retained = supervisor.retain();
+    let settled = false;
+    void retained.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    advance(5_000);
+    await flush();
+    sockets[1].emit("error", new Error("transient"));
+    expect(supervisor.state).toBe("reconnect_wait");
+    await flush();
+    expect(settled).toBe(false);
+
+    advance(10_000);
+    await flush();
+    sockets[2].readyState = 1;
+    sockets[2].emit("open");
+    await expect(retained).resolves.toBeUndefined();
+  });
+
   it("ignores a cancelled reconnect callback after a newer reconnect timer is armed", async () => {
     const localSockets: FakeSocket[] = [];
     const reconnectCallbacks: Array<() => void> = [];
@@ -717,6 +741,41 @@ describe("ConnectionSupervisor", () => {
     advance(5_000);
     await flush();
     expect(localSockets).toHaveLength(2);
+    local.destroy();
+  });
+
+  it("rejects reconnect waiters when creating the reconnect timer throws", async () => {
+    const localSockets: FakeSocket[] = [];
+    let waitingReconnect: Promise<void> | undefined;
+    const local = new ConnectionSupervisor({
+      socketFactory: () => {
+        const socket = new FakeSocket();
+        localSockets.push(socket);
+        return socket;
+      },
+      credentials: { getApprovalKey: vi.fn().mockResolvedValue(lease()) },
+      random: () => 0.5,
+      setTimeout: (_callback, milliseconds) => {
+        if (milliseconds === 5_000) throw new Error("timer unavailable");
+        return setTimeout(() => undefined, milliseconds);
+      },
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      setInterval,
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    });
+    local.onState((state) => {
+      if (state === "reconnect_wait") waitingReconnect = local.retain();
+    });
+
+    void local.retain();
+    await flush();
+    localSockets[0].readyState = 1;
+    localSockets[0].emit("open");
+    localSockets[0].emit("close");
+
+    await expect(waitingReconnect).rejects.toMatchObject({ code: "NETWORK" });
+    expect(local.state).toBe("idle");
+    expect(localSockets).toHaveLength(1);
     local.destroy();
   });
 
