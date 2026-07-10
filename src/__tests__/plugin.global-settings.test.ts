@@ -18,10 +18,16 @@ const mocks = vi.hoisted(() => {
   const domesticController = { kind: "domestic-controller" };
   const overseasController = { kind: "overseas-controller" };
   const diagnostics = { kind: "diagnostics" };
+  const piController = {
+    propertyInspectorDidAppear: vi.fn(async () => undefined),
+    propertyInspectorDidDisappear: vi.fn(async () => undefined),
+    handleCommand: vi.fn(async () => undefined),
+  };
   const runtime = {
     domesticController,
     overseasController,
     diagnostics,
+    piController,
     initialize,
     refreshGlobalSettings,
   };
@@ -36,6 +42,13 @@ const mocks = vi.hoisted(() => {
     onDidReceiveGlobalSettings,
     getGlobalSettings,
     setGlobalSettings,
+  };
+  const ui = {
+    action: undefined as { id: string } | undefined,
+    onDidAppear: vi.fn(),
+    onDidDisappear: vi.fn(),
+    onSendToPlugin: vi.fn(),
+    sendToPropertyInspector: vi.fn(async () => undefined),
   };
   return {
     calls,
@@ -52,6 +65,8 @@ const mocks = vi.hoisted(() => {
     runtime,
     createPluginRuntime,
     settingsApi,
+    ui,
+    piController,
   };
 });
 
@@ -66,6 +81,7 @@ vi.mock("@elgato/streamdeck", () => ({
     },
     settings: mocks.settingsApi,
     actions: { registerAction: mocks.registerAction },
+    ui: mocks.ui,
     connect: mocks.connect,
   },
 }));
@@ -94,10 +110,14 @@ describe("plugin runtime integration", () => {
     vi.clearAllMocks();
     mocks.calls.length = 0;
     mocks.settingsApi.useExperimentalMessageIdentifiers = false;
+    mocks.ui.action = undefined;
     mocks.connect.mockImplementation(async () => { mocks.calls.push("connect"); });
     mocks.initialize.mockImplementation(async () => { mocks.calls.push("initialize"); });
     mocks.refreshGlobalSettings.mockResolvedValue(undefined);
     mocks.onDidReceiveGlobalSettings.mockImplementation((handler: unknown) => handler);
+    mocks.ui.onDidAppear.mockImplementation((handler: unknown) => handler);
+    mocks.ui.onDidDisappear.mockImplementation((handler: unknown) => handler);
+    mocks.ui.onSendToPlugin.mockImplementation((handler: unknown) => handler);
   });
 
   afterEach(() => vi.clearAllMocks());
@@ -158,6 +178,47 @@ describe("plugin runtime integration", () => {
     resolveConnected();
     await vi.waitFor(() => expect(mocks.initialize).toHaveBeenCalledOnce());
     expect(mocks.calls.at(-1)).toBe("initialize");
+  });
+
+  it("routes SDK 2.1 Property Inspector events to the command controller", async () => {
+    await import("../plugin.js");
+    const appear = mocks.ui.onDidAppear.mock.calls[0]?.[0] as ((event: unknown) => void) | undefined;
+    const message = mocks.ui.onSendToPlugin.mock.calls[0]?.[0] as ((event: unknown) => void) | undefined;
+    const disappear = mocks.ui.onDidDisappear.mock.calls[0]?.[0] as ((event: unknown) => void) | undefined;
+    const action = {
+      id: "domestic-1",
+      manifestId: "com.kis.streamdeck.domestic-stock",
+    };
+
+    appear?.({ action });
+    message?.({ action, payload: { type: "settings/request", requestId: "r1" } });
+    disappear?.({ action });
+
+    await vi.waitFor(() => {
+      expect(mocks.piController.propertyInspectorDidAppear).toHaveBeenCalledWith(
+        "domestic-1",
+        "domestic",
+      );
+      expect(mocks.piController.handleCommand).toHaveBeenCalledWith(
+        "domestic-1",
+        "domestic",
+        { type: "settings/request", requestId: "r1" },
+      );
+      expect(mocks.piController.propertyInspectorDidDisappear).toHaveBeenCalledWith("domestic-1");
+    });
+  });
+
+  it("sends PI responses only to the currently visible matching context", async () => {
+    await import("../plugin.js");
+    const options = mocks.createPluginRuntime.mock.calls[0]?.[0] as {
+      piSender?: { send(contextId: string, payload: unknown): Promise<void> };
+    };
+    mocks.ui.action = { id: "ctx-active" };
+
+    await options.piSender?.send("ctx-old", { ok: true });
+    expect(mocks.ui.sendToPropertyInspector).not.toHaveBeenCalled();
+    await options.piSender?.send("ctx-active", { ok: true });
+    expect(mocks.ui.sendToPropertyInspector).toHaveBeenCalledWith({ ok: true });
   });
 
   it("does not initialize when the Stream Deck connection fails", async () => {

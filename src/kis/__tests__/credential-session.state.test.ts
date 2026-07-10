@@ -61,6 +61,25 @@ describe("CredentialSession credential state", () => {
     });
   });
 
+  it("rejects a stale PI revision inside the serialized credential write", async () => {
+    const { repository, readDisk } = makeRepository(migrateGlobalSettings({
+      appKey: "current-key",
+      appSecret: "current-secret",
+      settingsRevision: 7,
+    }));
+    const session = new CredentialSession(repository);
+    await repository.initialize();
+    const before = readDisk();
+
+    const caught = await session
+      .saveCredentials("stale-key", "stale-secret", 6)
+      .catch((error) => error);
+
+    expect(caught).toMatchObject({ code: "SETTINGS", scope: "settings", retryable: true });
+    expect(readDisk()).toEqual(before);
+    expect(JSON.stringify(caught)).not.toContain("stale-secret");
+  });
+
   it("reconciles credentials written externally after an empty successful bootstrap", async () => {
     const { repository, readDisk, writeDisk } = makeRepository(migrateGlobalSettings({}));
     const session = new CredentialSession(repository);

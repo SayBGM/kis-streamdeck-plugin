@@ -1,4 +1,5 @@
 import streamDeck from "@elgato/streamdeck";
+import type { JsonValue } from "@elgato/utils";
 import { DomesticStockAction } from "./actions/domestic-stock.js";
 import { OverseasStockAction } from "./actions/overseas-stock.js";
 import { createPluginRuntime } from "./runtime/plugin-runtime.js";
@@ -15,6 +16,39 @@ const runtime = createPluginRuntime({
     setGlobalSettings: (settings: GlobalSettingsV2) =>
       streamDeck.settings.setGlobalSettings(settings),
   },
+  piSender: {
+    send: async (contextId, message) => {
+      if (streamDeck.ui.action?.id !== contextId) return;
+      await streamDeck.ui.sendToPropertyInspector(message as unknown as JsonValue);
+    },
+  },
+});
+
+function marketForManifest(manifestId: string): "domestic" | "overseas" | undefined {
+  if (manifestId === "com.kis.streamdeck.domestic-stock") return "domestic";
+  if (manifestId === "com.kis.streamdeck.overseas-stock") return "overseas";
+  return undefined;
+}
+
+streamDeck.ui.onDidAppear((event) => {
+  const market = marketForManifest(event.action.manifestId);
+  if (!market) return;
+  void runtime.piController
+    .propertyInspectorDidAppear(event.action.id, market);
+});
+
+streamDeck.ui.onDidDisappear((event) => {
+  const market = marketForManifest(event.action.manifestId);
+  if (!market) return;
+  void runtime.piController
+    .propertyInspectorDidDisappear(event.action.id);
+});
+
+streamDeck.ui.onSendToPlugin((event) => {
+  const market = marketForManifest(event.action.manifestId);
+  if (!market) return;
+  void runtime.piController
+    .handleCommand(event.action.id, market, event.payload);
 });
 
 streamDeck.settings.onDidReceiveGlobalSettings(() => {

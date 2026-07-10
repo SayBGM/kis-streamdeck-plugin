@@ -16,6 +16,14 @@ export type ConnectionState = (typeof CONNECTION_STATES)[number];
 export type TimerHandle = unknown;
 export type SupervisorListener<T> = (value: T) => void | Promise<void>;
 
+export interface ConnectionSupervisorDiagnostics {
+  readonly state: ConnectionState;
+  readonly demand: number;
+  readonly lastActivityAt?: number;
+  readonly heartbeatPending: boolean;
+  readonly reconnectAttempts: number;
+}
+
 /** 최소 WebSocket 표면입니다. 테스트는 이 인터페이스만 구현하면 됩니다. */
 export interface SocketLike {
   readonly readyState: number;
@@ -202,6 +210,16 @@ export class ConnectionSupervisor {
     return this.approval
       ? Object.freeze({ credentialGeneration: this.approval.credentialGeneration })
       : undefined;
+  }
+
+  getDiagnostics(): ConnectionSupervisorDiagnostics {
+    return Object.freeze({
+      state: this.currentState,
+      demand: this.retainCount,
+      ...(this.lastActivityAt > 0 ? { lastActivityAt: this.lastActivityAt } : {}),
+      heartbeatPending: this.awaitingHeartbeat,
+      reconnectAttempts: this.reconnectAttempts,
+    });
   }
 
   onMessage(listener: SupervisorListener<string>): () => void {

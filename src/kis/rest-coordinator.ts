@@ -47,6 +47,14 @@ export interface RestCoordinatorOptions {
   readonly clearTimeout?: (handle: RestTimerHandle) => void;
 }
 
+export interface RestCoordinatorDiagnostics {
+  readonly queuedRequests: number;
+  readonly sharedRequests: number;
+  readonly activeTransports: number;
+  readonly cacheEntries: number;
+  readonly startsInRateWindow: number;
+}
+
 export interface RestQuoteAdapter {
   readonly id: string;
   readonly market: Market;
@@ -462,6 +470,16 @@ export class RestCoordinator {
 
   requestQuote(input: RestQuoteRequest): Promise<QuoteSample> {
     return this.prepareRequest(input);
+  }
+
+  getDiagnostics(): RestCoordinatorDiagnostics {
+    return Object.freeze({
+      queuedRequests: this.queue.filter((flight) => flight.state === "queued").length,
+      sharedRequests: this.flights.size,
+      activeTransports: this.activeTransportCount,
+      cacheEntries: this.cache.size,
+      startsInRateWindow: this.startTimes.length,
+    });
   }
 
   private async prepareRequest(input: RestQuoteRequest): Promise<QuoteSample> {

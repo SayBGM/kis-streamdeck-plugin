@@ -98,6 +98,10 @@ const KR_INT_FORMAT = new Intl.NumberFormat("ko-KR", {
 
 const svgDataUriCache = new Map<string, string>();
 
+export function getStockCardCacheDiagnostics(): { readonly entries: number } {
+  return Object.freeze({ entries: svgDataUriCache.size });
+}
+
 // ─── 장 상태 판단 ───
 
 /**

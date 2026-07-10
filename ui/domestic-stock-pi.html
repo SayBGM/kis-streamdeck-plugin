@@ -2,53 +2,14 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; connect-src ws://localhost:* ws://127.0.0.1:*">
   <title>국내주식 시세 설정</title>
   <link rel="stylesheet" href="sdpi.css">
 </head>
 <body>
   <div id="piRoot"></div>
-
   <script src="sdpi.js"></script>
   <script src="stock-pi-shared.js"></script>
-  <script>
-    window.KISStockPI.bootstrap({
-      actionTitle: "국내주식 설정",
-      fields: [
-        {
-          id: "instrumentType",
-          type: "select",
-          label: "상품 유형",
-          defaultValue: "stock",
-          options: [
-            { value: "stock", label: "주식" },
-            { value: "etf", label: "ETF/ETN" }
-          ]
-        },
-        {
-          id: "stockCode",
-          label: "종목코드",
-          placeholder: "005930 또는 0210A0",
-          help: "6자리 영숫자 종목코드를 입력하세요 (예: 삼성전자 005930, ETF 0210A0)",
-          errorMessage: "6자리 영숫자를 입력하세요 (예: 005930, 0210A0)",
-          invalidStatusMessage: "종목코드는 6자리 영숫자여야 합니다.",
-          validate: function (value) {
-            return /^[0-9A-Z]{6}$/i.test(value);
-          },
-          serialize: function (value) {
-            return value.trim().toUpperCase();
-          }
-        },
-        {
-          id: "stockName",
-          label: "종목명",
-          placeholder: "삼성전자",
-          help: "Stream Deck 키에 표시할 종목명을 입력하세요",
-          serialize: function (value) {
-            return value.trim();
-          }
-        }
-      ]
-    });
-  </script>
+  <script src="domestic-stock-pi.js"></script>
 </body>
 </html>

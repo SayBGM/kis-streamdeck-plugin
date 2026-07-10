@@ -189,6 +189,15 @@ function settingsReadinessError(): KisError {
   }));
 }
 
+function settingsRevisionConflictError(): KisError {
+  return Object.freeze(new KisError({
+    code: "SETTINGS",
+    scope: "settings",
+    retryable: true,
+    safeMessage: "다른 설정 변경이 먼저 저장되었습니다. 최신 값을 다시 불러오세요.",
+  }));
+}
+
 function incrementCounter(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0 || value >= Number.MAX_SAFE_INTEGER) {
     throw settingsCounterError();
@@ -477,7 +486,11 @@ export class CredentialSession {
     }
   }
 
-  async saveCredentials(appKey: unknown, appSecret: unknown): Promise<CredentialIdentity> {
+  async saveCredentials(
+    appKey: unknown,
+    appSecret: unknown,
+    expectedRevision?: number,
+  ): Promise<CredentialIdentity> {
     const normalized = normalizedPair(appKey, appSecret);
     if (!normalized.appKey || !normalized.appSecret) {
       throw noCredentialsError();
@@ -486,6 +499,9 @@ export class CredentialSession {
 
     await this.repository.whenReady();
     const snapshot = await this.repository.update((draft) => {
+      if (expectedRevision !== undefined && draft.settingsRevision !== expectedRevision) {
+        throw settingsRevisionConflictError();
+      }
       const sameIdentity = draft.credentialFingerprint === fingerprint &&
         draft.appKey?.trim() === normalized.appKey &&
         draft.appSecret?.trim() === normalized.appSecret;
@@ -501,9 +517,12 @@ export class CredentialSession {
     return identityFromSnapshot(snapshot);
   }
 
-  async clearCredentials(): Promise<CredentialIdentity> {
+  async clearCredentials(expectedRevision?: number): Promise<CredentialIdentity> {
     await this.repository.whenReady();
     const snapshot = await this.repository.update((draft) => {
+      if (expectedRevision !== undefined && draft.settingsRevision !== expectedRevision) {
+        throw settingsRevisionConflictError();
+      }
       const hasAuthenticationState = draft.appKey !== undefined ||
         draft.appSecret !== undefined ||
         draft.credentialFingerprint !== undefined ||

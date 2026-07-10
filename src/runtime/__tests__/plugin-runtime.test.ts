@@ -34,6 +34,7 @@ function fakeServices(): PluginRuntimeServices {
     domesticController: { destroy: vi.fn(async () => undefined) } as never,
     overseasController: { destroy: vi.fn(async () => undefined) } as never,
     diagnostics: { report: vi.fn(() => ({ events: [], counters: {} })) } as never,
+    piController: { destroy: vi.fn() } as never,
   };
 }
 
@@ -123,6 +124,7 @@ describe("PluginRuntime", () => {
     expect(runtime.services.subscriptionSupervisor).toBeDefined();
     expect(runtime.services.restCoordinator).toBeDefined();
     expect(runtime.services.renderScheduler).toBeDefined();
+    expect(runtime.services.piController).toBeDefined();
     expect(runtime.services.clocks.domestic).not.toBe(runtime.services.clocks.overseas);
 
     await runtime.destroy();
@@ -219,6 +221,7 @@ describe("PluginRuntime", () => {
     expect(services.subscriptionSupervisor.destroy).toHaveBeenCalledOnce();
     expect(services.connectionSupervisor.destroy).toHaveBeenCalledOnce();
     expect(services.renderScheduler.destroy).toHaveBeenCalledOnce();
+    expect(services.piController.destroy).toHaveBeenCalledOnce();
   });
 
   it("continues best-effort shared cleanup when one controller rejects", async () => {

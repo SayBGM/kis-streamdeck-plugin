@@ -15,6 +15,10 @@ import {
 import { RenderScheduler } from "../renderer/render-scheduler.js";
 import { renderStockActionViewDataUri } from "../renderer/stock-card.js";
 import {
+  PiController,
+  type PiOutboundPort,
+} from "../pi/pi-controller.js";
+import {
   migrateDomesticStockSettings,
   migrateOverseasStockSettings,
   type DomesticStockSettingsV2,
@@ -37,12 +41,14 @@ export interface PluginRuntimeServices {
   readonly domesticController: StockActionController<DomesticStockSettingsV2>;
   readonly overseasController: StockActionController<OverseasStockSettingsV2>;
   readonly diagnostics: DiagnosticsStore;
+  readonly piController: PiController;
 }
 
 export interface CreatePluginRuntimeOptions {
   readonly settingsPersistence: SettingsPersistence;
   readonly diagnostics?: DiagnosticsStore;
   readonly credentialSessionOptions?: CredentialSessionOptions;
+  readonly piSender?: PiOutboundPort;
 }
 
 /** Owns the shared plugin services and their deterministic startup/shutdown order. */
@@ -63,6 +69,10 @@ export class PluginRuntime {
 
   get diagnostics(): DiagnosticsStore {
     return this.services.diagnostics;
+  }
+
+  get piController(): PiController {
+    return this.services.piController;
   }
 
   initialize(): Promise<void> {
@@ -108,6 +118,7 @@ export class PluginRuntime {
       this.services.overseasController.destroy(),
     ]);
     const cleanup = [
+      () => this.services.piController.destroy(),
       () => this.services.subscriptionSupervisor.destroy(),
       () => this.services.connectionSupervisor.destroy(),
       () => this.services.renderScheduler.destroy(),
@@ -165,6 +176,19 @@ export function createPluginRuntime(options: CreatePluginRuntimeOptions): Plugin
     renderer: renderStockActionViewDataUri,
     fallbackMarket: "overseas",
   });
+  const piController = new PiController({
+    settingsRepository,
+    credentialSession,
+    connection: connectionSupervisor,
+    subscriptions: subscriptionSupervisor,
+    rest: restCoordinator,
+    render: renderScheduler,
+    diagnostics,
+    manualRefresh: (market, actionId) => market === "domestic"
+      ? domesticController.manualRefresh(actionId)
+      : overseasController.manualRefresh(actionId),
+    sender: options.piSender ?? { send: async () => undefined },
+  });
 
   return new PluginRuntime(Object.freeze({
     settingsRepository,
@@ -177,5 +201,6 @@ export function createPluginRuntime(options: CreatePluginRuntimeOptions): Plugin
     domesticController,
     overseasController,
     diagnostics,
+    piController,
   }));
 }

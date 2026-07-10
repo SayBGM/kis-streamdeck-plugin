@@ -1,10 +1,8 @@
 (function () {
+  "use strict";
+
   var ACTION_SAVE_DEBOUNCE_MS = 350;
-  var DEFAULT_ACTION_BADGE = "현재 버튼만";
-  var DEFAULT_ACTION_NOTE =
-    "이 섹션은 현재 선택한 버튼에만 저장됩니다. 유효한 값은 입력 후 자동 저장됩니다.";
-  var DEFAULT_GLOBAL_NOTE =
-    "여기서 저장한 App Key, App Secret, 업데이트 방식은 모든 주식 버튼에 공통 적용됩니다.";
+  var requestSequence = 0;
 
   function byId(id) {
     return document.getElementById(id);
@@ -19,523 +17,303 @@
       .replace(/'/g, "&#39;");
   }
 
+  function nextRequestId(prefix) {
+    requestSequence += 1;
+    return prefix + "-" + Date.now() + "-" + requestSequence;
+  }
+
+  function command(type, fields) {
+    var payload = { type: type, requestId: nextRequestId(type.replace("/", "-")) };
+    var key;
+    fields = fields || {};
+    for (key in fields) {
+      if (Object.prototype.hasOwnProperty.call(fields, key)) payload[key] = fields[key];
+    }
+    sendToPlugin(payload);
+  }
+
   function hasValue(value) {
     return value !== undefined && value !== null && value !== "";
   }
 
-  function getFieldType(field) {
+  function fieldType(field) {
     return field.type || "text";
   }
 
-  function getSelectFallbackValue(field) {
-    if (hasValue(field.defaultValue)) {
-      return String(field.defaultValue);
-    }
-    if (field.options && field.options.length > 0) {
-      return String(field.options[0].value);
-    }
-    return "";
-  }
-
   function renderOptions(options) {
-    var rendered = [];
-    var index;
-
-    for (index = 0; index < options.length; index += 1) {
-      rendered.push(
-        '<option value="' +
-          escapeHtml(options[index].value) +
-          '">' +
-          escapeHtml(options[index].label) +
-          "</option>"
-      );
-    }
-
-    return rendered.join("");
+    return (options || []).map(function (option) {
+      return '<option value="' + escapeHtml(option.value) + '">' +
+        escapeHtml(option.label) + "</option>";
+    }).join("");
   }
 
   function renderInput(field) {
-    if (getFieldType(field) === "select") {
-      return (
-        '<select id="' +
-        escapeHtml(field.id) +
-        '">' +
-        renderOptions(field.options || []) +
-        "</select>"
-      );
+    if (fieldType(field) === "select") {
+      return '<select id="' + escapeHtml(field.id) + '">' +
+        renderOptions(field.options) + "</select>";
     }
-
-    var attrs = [
-      'type="' + escapeHtml(getFieldType(field)) + '"',
+    var attributes = [
+      'type="' + escapeHtml(fieldType(field)) + '"',
       'id="' + escapeHtml(field.id) + '"',
     ];
-
-    if (hasValue(field.placeholder)) {
-      attrs.push('placeholder="' + escapeHtml(field.placeholder) + '"');
-    }
-    if (hasValue(field.min)) {
-      attrs.push('min="' + escapeHtml(field.min) + '"');
-    }
-    if (hasValue(field.max)) {
-      attrs.push('max="' + escapeHtml(field.max) + '"');
-    }
-
-    return "<input " + attrs.join(" ") + ">";
+    if (field.placeholder) attributes.push('placeholder="' + escapeHtml(field.placeholder) + '"');
+    return "<input " + attributes.join(" ") + ">";
   }
 
   function renderField(field) {
-    var parts = [
+    return [
       '<div class="sdpi-item">',
       '<div class="sdpi-item-label">' + escapeHtml(field.label) + "</div>",
-      '<div class="sdpi-item-value">',
-      renderInput(field),
+      '<div class="sdpi-item-value">' + renderInput(field) + "</div>",
       "</div>",
-      "</div>",
-    ];
-
-    if (field.errorMessage) {
-      parts.push(
-        '<div id="' +
-          escapeHtml(field.errorId || field.id + "Error") +
-          '" class="sdpi-error">' +
-          escapeHtml(field.errorMessage) +
-          "</div>"
-      );
-    }
-    if (field.help) {
-      parts.push('<div class="sdpi-help">' + escapeHtml(field.help) + "</div>");
-    }
-
-    return parts.join("");
+      field.errorMessage
+        ? '<div id="' + escapeHtml(field.id + "Error") + '" class="sdpi-error">' +
+          escapeHtml(field.errorMessage) + "</div>"
+        : "",
+      field.help ? '<div class="sdpi-help">' + escapeHtml(field.help) + "</div>" : "",
+    ].join("");
   }
 
-  function renderActionFields(fields) {
-    var parts = [];
-    var index;
-
-    for (index = 0; index < fields.length; index += 1) {
-      parts.push(renderField(fields[index]));
-    }
-
-    return parts.join("");
+  function renderFields(fields) {
+    return (fields || []).map(renderField).join("");
   }
 
   function renderLayout(config) {
     return [
       '<div class="sdpi-wrapper">',
-      '<div class="sdpi-group">',
-      '<div class="sdpi-group-label">',
-      "<span>KIS API 설정</span>",
-      '<span class="sdpi-badge">모든 버튼 공통</span>',
-      "</div>",
-      '<div class="sdpi-note">' + escapeHtml(DEFAULT_GLOBAL_NOTE) + "</div>",
-      '<div class="sdpi-item">',
-      '<div class="sdpi-item-label">App Key</div>',
-      '<div class="sdpi-item-value"><input type="password" id="appKey" placeholder="App Key 입력"></div>',
-      "</div>",
-      '<div class="sdpi-item">',
-      '<div class="sdpi-item-label">App Secret</div>',
-      '<div class="sdpi-item-value"><input type="password" id="appSecret" placeholder="App Secret 입력"></div>',
-      "</div>",
-      '<div class="sdpi-help">한국투자증권 Open API에서 발급받은 키를 입력하세요. 모든 버튼에 공통 적용됩니다.</div>',
-      '<div class="sdpi-item">',
-      '<div class="sdpi-item-label">업데이트</div>',
-      '<div class="sdpi-item-value">',
-      '<select id="updateMode">',
-      '<option value="websocket">실시간 (WebSocket)</option>',
-      '<option value="hybrid">WebSocket + 쓰로틀</option>',
-      '<option value="poll">주기적 (폴링)</option>',
-      "</select>",
-      "</div>",
-      "</div>",
-      '<div id="pollIntervalRow" class="sdpi-item" style="display:none;">',
-      '<div class="sdpi-item-label">간격(초)</div>',
-      '<div class="sdpi-item-value"><input type="number" id="pollIntervalSec" min="1" max="3600" placeholder="30"></div>',
-      "</div>",
-      '<div id="pollIntervalError" class="sdpi-error">1~3600 사이의 숫자를 입력하세요</div>',
-      '<div id="throttleMsRow" class="sdpi-item" style="display:none;">',
-      '<div class="sdpi-item-label">쓰로틀(ms)</div>',
-      '<div class="sdpi-item-value"><input type="number" id="throttleMs" min="200" placeholder="1000"></div>',
-      "</div>",
-      '<div id="throttleMsError" class="sdpi-error">최솟값은 200ms입니다</div>',
-      '<div class="sdpi-actions">',
-      '<button type="button" id="saveGlobalButton" class="sdpi-button primary" disabled>공통 설정 저장</button>',
-      "</div>",
-      '<div id="globalStatusMessage" class="sdpi-status info"></div>',
-      "</div>",
-      '<div class="sdpi-group">',
-      '<div class="sdpi-group-label">',
-      "<span>" + escapeHtml(config.actionTitle) + "</span>",
-      '<span class="sdpi-badge">' +
-        escapeHtml(config.actionBadge || DEFAULT_ACTION_BADGE) +
-        "</span>",
-      "</div>",
-      '<div class="sdpi-note">' +
-        escapeHtml(config.actionNote || DEFAULT_ACTION_NOTE) +
-        "</div>",
-      renderActionFields(config.fields || []),
+
+      '<section class="sdpi-group" data-section="stock-settings">',
+      '<div class="sdpi-group-label"><span>' + escapeHtml(config.actionTitle) + "</span>",
+      '<span class="sdpi-badge">현재 버튼만</span></div>',
+      '<div class="sdpi-note">유효한 종목 값은 현재 버튼에 자동 저장됩니다.</div>',
+      renderFields(config.fields),
       '<div id="actionStatusMessage" class="sdpi-status info"></div>',
+      "</section>",
+
+      '<section class="sdpi-group" data-section="connection-status">',
+      '<div class="sdpi-group-label"><span>공통 연결 상태</span><span id="connectionBadge" class="sdpi-badge">확인 중</span></div>',
+      '<div id="connectionSummary" class="sdpi-note">플러그인 상태를 불러오는 중입니다.</div>',
+      "</section>",
+
+      '<section class="sdpi-group" data-section="credentials">',
+      '<div class="sdpi-group-label"><span>KIS API 자격증명</span><span class="sdpi-badge">모든 버튼 공통</span></div>',
+      '<div id="credentialSummary" class="sdpi-note">저장 상태를 확인 중입니다.</div>',
+      '<div class="sdpi-item"><div class="sdpi-item-label">저장된 Key</div>',
+      '<div id="maskedAppKey" class="sdpi-item-value sdpi-readonly">설정 안 됨</div></div>',
+      '<div class="sdpi-item"><div class="sdpi-item-label">App Key</div>',
+      '<div class="sdpi-item-value"><input type="text" id="appKey" autocomplete="off" placeholder="새 App Key 입력"></div></div>',
+      '<div class="sdpi-item"><div class="sdpi-item-label">App Secret</div>',
+      '<div class="sdpi-item-value"><input type="password" id="appSecret" autocomplete="new-password" placeholder="비워두면 기존 Secret 유지"></div></div>',
+      '<div class="sdpi-actions">',
+      '<button type="button" id="saveCredentialsButton" class="sdpi-button primary">자격증명 저장</button>',
+      '<button type="button" id="clearCredentialsButton" class="sdpi-button">지우기</button>',
       "</div>",
+      '<div id="credentialStatusMessage" class="sdpi-status info"></div>',
+      "</section>",
+
+      '<details class="sdpi-group" data-section="advanced-settings">',
+      '<summary class="sdpi-group-label">고급 설정</summary>',
+      '<div class="sdpi-item"><div class="sdpi-item-label">데이터 모드</div><div class="sdpi-item-value">',
+      '<select id="dataMode"><option value="automatic">자동 (WebSocket 우선)</option><option value="rest-only">REST 전용</option></select>',
+      "</div></div>",
+      '<div class="sdpi-item"><div class="sdpi-item-label">렌더 간격</div><div class="sdpi-item-value">',
+      '<select id="renderIntervalMs"><option value="2000">2초</option><option value="5000">5초</option><option value="10000">10초</option></select>',
+      "</div></div>",
+      '<div class="sdpi-item"><div class="sdpi-item-label">백업 폴링</div><div class="sdpi-item-value">',
+      '<select id="backupPollIntervalMs"><option value="15000">15초</option><option value="30000">30초</option><option value="60000">60초</option></select>',
+      "</div></div>",
+      '<div class="sdpi-actions"><button type="button" id="savePreferencesButton" class="sdpi-button primary">고급 설정 저장</button></div>',
+      '<div class="sdpi-actions">',
+      '<button type="button" id="retryAuthButton" class="sdpi-button">인증 재시도</button>',
+      '<button type="button" id="reconnectWsButton" class="sdpi-button">WebSocket 재연결</button>',
+      '<button type="button" id="refreshQuoteButton" class="sdpi-button">현재 종목 새로고침</button>',
+      "</div>",
+      '<div id="advancedStatusMessage" class="sdpi-status info"></div>',
+      "</details>",
+
+      '<section class="sdpi-group" data-section="diagnostics">',
+      '<div class="sdpi-group-label"><span>상세 진단</span>',
+      '<button type="button" id="refreshDiagnosticsButton" class="sdpi-button compact">새로고침</button></div>',
+      '<pre id="diagnosticsOutput" class="sdpi-diagnostics">진단을 불러오는 중입니다.</pre>',
+      "</section>",
       "</div>",
     ].join("");
   }
 
   function StockPropertyInspector(config) {
     this.config = config;
-    this.globalDirty = false;
+    this.settingsRevision = 0;
     this.actionSaveTimer = null;
-    this.actionFieldValidity = {};
   }
 
-  StockPropertyInspector.prototype.setStatus = function (targetId, message, type) {
-    var element = byId(targetId);
-
-    if (!message) {
-      element.textContent = "";
-      element.className = "sdpi-status info";
-      return;
-    }
-
-    element.textContent = message;
-    element.className = "sdpi-status " + type + " visible";
-  };
-
-  StockPropertyInspector.prototype.updateModeRows = function (mode) {
-    byId("pollIntervalRow").style.display = mode === "poll" ? "flex" : "none";
-    byId("throttleMsRow").style.display = mode === "hybrid" ? "flex" : "none";
-  };
-
-  StockPropertyInspector.prototype.getGlobalSettingsPayload = function () {
-    return {
-      appKey: byId("appKey").value.trim(),
-      appSecret: byId("appSecret").value.trim(),
-      updateMode: byId("updateMode").value,
-      pollIntervalSec: byId("pollIntervalSec").value || "30",
-      throttleMs: byId("throttleMs").value || "1000",
-    };
-  };
-
-  StockPropertyInspector.prototype.setGlobalDirty = function (message) {
-    this.globalDirty = true;
-    this.updateGlobalControls();
-
-    if (message) {
-      this.setStatus("globalStatusMessage", message, "info");
-    }
-  };
-
-  StockPropertyInspector.prototype.validatePollInterval = function (value) {
-    var parsed = parseInt(value, 10);
-    var isValid = !isNaN(parsed) && parsed >= 1 && parsed <= 3600;
-
-    byId("pollIntervalError").style.display =
-      value.length > 0 && !isValid ? "block" : "none";
-
-    return isValid || value.length === 0;
-  };
-
-  StockPropertyInspector.prototype.validateThrottleMs = function (value) {
-    var parsed = parseInt(value, 10);
-    var isValid = !isNaN(parsed) && parsed >= 200;
-
-    byId("throttleMsError").style.display =
-      value.length > 0 && !isValid ? "block" : "none";
-
-    return isValid || value.length === 0;
-  };
-
-  StockPropertyInspector.prototype.isGlobalSettingsValid = function () {
-    var mode = byId("updateMode").value;
-    var pollValid =
-      mode !== "poll" || this.validatePollInterval(byId("pollIntervalSec").value);
-    var throttleValid =
-      mode !== "hybrid" || this.validateThrottleMs(byId("throttleMs").value);
-
-    return pollValid && throttleValid;
-  };
-
-  StockPropertyInspector.prototype.updateGlobalControls = function () {
-    byId("saveGlobalButton").disabled =
-      !this.globalDirty || !this.isGlobalSettingsValid();
-  };
-
-  StockPropertyInspector.prototype.getFieldSettingKey = function (field) {
-    return field.settingKey || field.id;
+  StockPropertyInspector.prototype.setStatus = function (id, message, kind) {
+    var target = byId(id);
+    if (!target) return;
+    target.textContent = message || "";
+    target.className = "sdpi-status " + (kind || "info") + (message ? " visible" : "");
   };
 
   StockPropertyInspector.prototype.setFieldValue = function (field, value) {
-    var element = byId(field.id);
+    var input = byId(field.id);
     var normalized = hasValue(value) ? String(value) : "";
-
-    if (!normalized && hasValue(field.defaultValue)) {
-      normalized = String(field.defaultValue);
-    }
-    if (typeof field.normalizeReceived === "function") {
-      normalized = field.normalizeReceived(normalized);
-    }
-
-    element.value = normalized;
-
-    if (getFieldType(field) === "select" && !element.value) {
-      element.value = getSelectFallbackValue(field);
+    if (!normalized && hasValue(field.defaultValue)) normalized = String(field.defaultValue);
+    if (field.normalizeReceived) normalized = field.normalizeReceived(normalized);
+    input.value = normalized;
+    if (fieldType(field) === "select" && !input.value && field.options && field.options[0]) {
+      input.value = String(field.options[0].value);
     }
   };
 
-  StockPropertyInspector.prototype.readActionValues = function () {
-    var values = {};
-    var fields = this.config.fields || [];
-    var index;
-
-    for (index = 0; index < fields.length; index += 1) {
-      values[this.getFieldSettingKey(fields[index])] = byId(fields[index].id).value;
-    }
-
-    return values;
-  };
-
-  StockPropertyInspector.prototype.serializeFieldValue = function (field, value) {
-    if (typeof field.serialize === "function") {
-      return field.serialize(value);
-    }
-
-    if (getFieldType(field) === "select") {
-      return value;
-    }
-
-    return value.trim();
-  };
-
-  StockPropertyInspector.prototype.validateActionField = function (field) {
-    var errorId = field.errorId || field.id + "Error";
-    var errorElement = byId(errorId);
+  StockPropertyInspector.prototype.validateField = function (field) {
     var value = byId(field.id).value;
-    var allowEmpty = field.allowEmpty !== false;
-    var isValid = true;
-
-    if (typeof field.validate === "function") {
-      isValid = field.validate(value);
-    }
-
-    if (!allowEmpty && value.length === 0) {
-      isValid = false;
-    }
-
-    if (errorElement) {
-      errorElement.style.display =
-        value.length > 0 && !isValid ? "block" : "none";
-    }
-
-    this.actionFieldValidity[field.id] = isValid || (allowEmpty && value.length === 0);
-    return this.actionFieldValidity[field.id];
-  };
-
-  StockPropertyInspector.prototype.findFirstInvalidActionField = function () {
-    var fields = this.config.fields || [];
-    var index;
-
-    for (index = 0; index < fields.length; index += 1) {
-      if (!this.validateActionField(fields[index])) {
-        return fields[index];
-      }
-    }
-
-    return null;
-  };
-
-  StockPropertyInspector.prototype.buildActionSettingsPayload = function () {
-    var payload = {};
-    var fields = this.config.fields || [];
-    var index;
-
-    for (index = 0; index < fields.length; index += 1) {
-      payload[this.getFieldSettingKey(fields[index])] = this.serializeFieldValue(
-        fields[index],
-        byId(fields[index].id).value
-      );
-    }
-
-    return payload;
-  };
-
-  StockPropertyInspector.prototype.saveGlobalSettings = function () {
-    if (!this.isGlobalSettingsValid()) {
-      this.setStatus("globalStatusMessage", "공통 설정 값을 확인하세요.", "error");
-      this.updateGlobalControls();
-      return;
-    }
-
-    setGlobalSettings(this.getGlobalSettingsPayload());
-    this.globalDirty = false;
-    this.updateGlobalControls();
-    this.setStatus(
-      "globalStatusMessage",
-      "공통 설정이 저장되었습니다. 모든 버튼에 적용됩니다.",
-      "success"
-    );
-  };
-
-  StockPropertyInspector.prototype.saveActionSettings = function () {
-    var invalidField = this.findFirstInvalidActionField();
-
-    if (invalidField) {
-      this.setStatus(
-        "actionStatusMessage",
-        invalidField.invalidStatusMessage || "입력 값을 확인하세요.",
-        "error"
-      );
-      return;
-    }
-
-    setSettings(this.buildActionSettingsPayload());
-    this.setStatus(
-      "actionStatusMessage",
-      this.config.actionSavedMessage || "현재 버튼 설정이 저장되었습니다.",
-      "success"
-    );
-  };
-
-  StockPropertyInspector.prototype.queueActionSave = function () {
-    var invalidField = this.findFirstInvalidActionField();
-
-    if (invalidField) {
-      if (this.actionSaveTimer) {
-        clearTimeout(this.actionSaveTimer);
-        this.actionSaveTimer = null;
-      }
-      this.setStatus(
-        "actionStatusMessage",
-        invalidField.invalidStatusMessage || "입력 값을 확인하세요.",
-        "error"
-      );
-      return;
-    }
-
-    if (this.actionSaveTimer) {
-      clearTimeout(this.actionSaveTimer);
-    }
-
-    this.setStatus(
-      "actionStatusMessage",
-      this.config.actionSavingMessage || "현재 버튼 설정을 저장하는 중입니다...",
-      "info"
-    );
-
-    var inspector = this;
-    this.actionSaveTimer = setTimeout(function () {
-      inspector.actionSaveTimer = null;
-      inspector.saveActionSettings();
-    }, ACTION_SAVE_DEBOUNCE_MS);
-  };
-
-  StockPropertyInspector.prototype.applyGlobalSettings = function (settings) {
-    var mode = settings.updateMode || "websocket";
-
-    byId("appKey").value = settings.appKey || "";
-    byId("appSecret").value = settings.appSecret || "";
-    byId("updateMode").value = mode;
-    byId("pollIntervalSec").value = settings.pollIntervalSec || "30";
-    byId("throttleMs").value = settings.throttleMs || "1000";
-
-    this.updateModeRows(mode);
-    this.globalDirty = false;
-    this.updateGlobalControls();
+    var valid = !field.validate || field.validate(value);
+    var error = byId(field.id + "Error");
+    if (error) error.style.display = value && !valid ? "block" : "none";
+    return valid || (!value && field.allowEmpty !== false);
   };
 
   StockPropertyInspector.prototype.applyActionSettings = function (settings) {
-    var fields = this.config.fields || [];
-    var key;
-    var index;
+    var inspector = this;
+    (this.config.fields || []).forEach(function (field) {
+      inspector.setFieldValue(field, settings && settings[field.settingKey || field.id]);
+      inspector.validateField(field);
+    });
+  };
 
-    settings = settings || {};
+  StockPropertyInspector.prototype.actionPayload = function () {
+    var payload = { schemaVersion: 2 };
+    (this.config.fields || []).forEach(function (field) {
+      var value = byId(field.id).value;
+      payload[field.settingKey || field.id] = field.serialize
+        ? field.serialize(value)
+        : fieldType(field) === "select" ? value : value.trim();
+    });
+    return payload;
+  };
 
-    for (index = 0; index < fields.length; index += 1) {
-      key = this.getFieldSettingKey(fields[index]);
-      this.setFieldValue(fields[index], settings[key]);
-      this.validateActionField(fields[index]);
+  StockPropertyInspector.prototype.saveAction = function () {
+    var inspector = this;
+    var invalid = (this.config.fields || []).find(function (field) {
+      return !inspector.validateField(field);
+    });
+    if (invalid) {
+      this.setStatus("actionStatusMessage", invalid.invalidStatusMessage || "입력 값을 확인하세요.", "error");
+      return;
+    }
+    setSettings(this.actionPayload());
+    this.setStatus("actionStatusMessage", "현재 버튼 설정이 저장되었습니다.", "success");
+  };
+
+  StockPropertyInspector.prototype.queueActionSave = function () {
+    var inspector = this;
+    if (this.actionSaveTimer) clearTimeout(this.actionSaveTimer);
+    this.actionSaveTimer = setTimeout(function () {
+      inspector.actionSaveTimer = null;
+      inspector.saveAction();
+    }, ACTION_SAVE_DEBOUNCE_MS);
+  };
+
+  StockPropertyInspector.prototype.applySnapshot = function (snapshot) {
+    if (!snapshot || snapshot.schemaVersion !== 2) return;
+    this.settingsRevision = snapshot.settingsRevision;
+    byId("maskedAppKey").textContent = snapshot.maskedAppKey || "설정 안 됨";
+    byId("credentialSummary").textContent = snapshot.credentialsConfigured
+      ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
+      : "자격증명을 입력해야 시세를 조회할 수 있습니다.";
+    byId("appSecret").value = "";
+    byId("dataMode").value = snapshot.preferences.dataMode;
+    byId("renderIntervalMs").value = String(snapshot.preferences.renderIntervalMs);
+    byId("backupPollIntervalMs").value = String(snapshot.preferences.backupPollIntervalMs);
+    this.applyDiagnostics(snapshot.diagnostics);
+  };
+
+  StockPropertyInspector.prototype.applyDiagnostics = function (diagnostics) {
+    diagnostics = diagnostics || {};
+    var websocket = diagnostics.websocket || {};
+    var subscriptions = diagnostics.subscriptions || {};
+    var rest = diagnostics.restBackup || {};
+    var render = diagnostics.render || {};
+    byId("connectionBadge").textContent = websocket.state || "unknown";
+    byId("connectionSummary").textContent =
+      "WS " + (websocket.state || "unknown") +
+      " · 구독 " + (subscriptions.total || 0) +
+      " · REST 대기 " + (rest.queuedRequests || 0) +
+      " · 렌더 대기 " + (render.queuedTargets || 0);
+    byId("diagnosticsOutput").textContent = JSON.stringify(diagnostics, null, 2);
+  };
+
+  StockPropertyInspector.prototype.handleMessage = function (message) {
+    if (!message || typeof message !== "object") return;
+    if (message.snapshot) this.applySnapshot(message.snapshot);
+    if (message.type === "diagnostics/update" || message.type === "settings/update") return;
+    if (message.ok === false && message.error) {
+      this.setStatus("advancedStatusMessage", message.error.safeMessage || "요청을 처리하지 못했습니다.", "error");
+    } else if (message.ok === true) {
+      this.setStatus("advancedStatusMessage", "요청이 적용되었습니다.", "success");
+      byId("appSecret").value = "";
     }
   };
 
   StockPropertyInspector.prototype.bindEvents = function () {
     var inspector = this;
-    var fields = this.config.fields || [];
-    var index;
-
-    document.addEventListener("piDidReceiveGlobalSettings", function (evt) {
-      inspector.applyGlobalSettings(evt.detail || {});
+    document.addEventListener("piDidConnect", function () {
+      command("settings/request");
+    });
+    document.addEventListener("piDidReceiveSettings", function (event) {
+      inspector.applyActionSettings(event.detail || {});
+    });
+    document.addEventListener("piDidReceiveMessage", function (event) {
+      inspector.handleMessage(event.detail || {});
     });
 
-    document.addEventListener("piDidReceiveSettings", function (evt) {
-      inspector.applyActionSettings(evt.detail || {});
+    (this.config.fields || []).forEach(function (field) {
+      var input = byId(field.id);
+      input.addEventListener(field.saveOn || (fieldType(field) === "select" ? "change" : "input"), function () {
+        if (field.normalizeInput) this.value = field.normalizeInput(this.value);
+        inspector.validateField(field);
+        inspector.queueActionSave();
+      });
     });
 
-    byId("saveGlobalButton").addEventListener("click", function () {
-      inspector.saveGlobalSettings();
-    });
-
-    byId("appKey").addEventListener("input", function () {
-      inspector.setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
-    });
-    byId("appSecret").addEventListener("input", function () {
-      inspector.setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
-    });
-    byId("updateMode").addEventListener("change", function () {
-      inspector.updateModeRows(this.value);
-      inspector.setGlobalDirty("업데이트 방식이 변경되었습니다. 저장 후 모든 버튼에 반영됩니다.");
-    });
-    byId("pollIntervalSec").addEventListener("input", function () {
-      inspector.validatePollInterval(this.value);
-      inspector.setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
-    });
-    byId("throttleMs").addEventListener("input", function () {
-      inspector.validateThrottleMs(this.value);
-      inspector.setGlobalDirty("공통 설정이 변경되었습니다. 저장 버튼으로 적용하세요.");
-    });
-    byId("throttleMs").addEventListener("blur", function () {
-      var parsed = parseInt(this.value, 10);
-
-      if (!isNaN(parsed) && parsed < 200) {
-        this.value = "200";
-        byId("throttleMsError").style.display = "none";
-        inspector.setGlobalDirty("쓰로틀 값을 200ms로 보정했습니다. 저장 버튼으로 적용하세요.");
+    byId("saveCredentialsButton").addEventListener("click", function () {
+      var appKey = byId("appKey").value.trim();
+      var appSecret = byId("appSecret").value;
+      if (!appKey) {
+        inspector.setStatus("credentialStatusMessage", "App Key를 입력하세요.", "error");
+        return;
       }
+      var fields = { appKey: appKey, settingsRevision: inspector.settingsRevision };
+      if (appSecret) fields.appSecret = appSecret;
+      command("credentials/save", fields);
+      inspector.setStatus("credentialStatusMessage", "자격증명을 저장하는 중입니다.", "info");
     });
-
-    for (index = 0; index < fields.length; index += 1) {
-      (function (field) {
-        var element = byId(field.id);
-        var eventName =
-          field.saveOn || (getFieldType(field) === "select" ? "change" : "input");
-
-        element.addEventListener(eventName, function () {
-          if (typeof field.normalizeInput === "function") {
-            this.value = field.normalizeInput(this.value);
-          }
-
-          inspector.validateActionField(field);
-          inspector.queueActionSave();
-        });
-      })(fields[index]);
-    }
+    byId("clearCredentialsButton").addEventListener("click", function () {
+      command("credentials/clear", { settingsRevision: inspector.settingsRevision });
+    });
+    byId("savePreferencesButton").addEventListener("click", function () {
+      command("preferences/save", {
+        settingsRevision: inspector.settingsRevision,
+        preferences: {
+          dataMode: byId("dataMode").value,
+          renderIntervalMs: Number(byId("renderIntervalMs").value),
+          backupPollIntervalMs: Number(byId("backupPollIntervalMs").value),
+        },
+      });
+    });
+    byId("retryAuthButton").addEventListener("click", function () { command("auth/retry"); });
+    byId("reconnectWsButton").addEventListener("click", function () { command("ws/reconnect"); });
+    byId("refreshQuoteButton").addEventListener("click", function () { command("quote/refresh"); });
+    byId("refreshDiagnosticsButton").addEventListener("click", function () { command("diagnostics/request"); });
   };
 
-  function bootstrapStockPI(config) {
+  function bootstrap(config) {
     var root = byId(config.rootId || "piRoot");
-    var inspector;
-
-    if (!root) {
-      throw new Error("Property Inspector root element was not found.");
-    }
-
+    if (!root) throw new Error("Property Inspector root element was not found.");
     root.innerHTML = renderLayout(config);
-    inspector = new StockPropertyInspector(config);
+    var inspector = new StockPropertyInspector(config);
     inspector.bindEvents();
-    inspector.updateModeRows("websocket");
-    inspector.updateGlobalControls();
-
     return inspector;
   }
 
-  window.KISStockPI = {
-    bootstrap: bootstrapStockPI,
-  };
+  window.KISStockPI = { bootstrap: bootstrap };
 })();

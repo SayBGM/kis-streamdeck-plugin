@@ -60,6 +60,14 @@ export interface SubscriptionHandle {
   release(): void;
 }
 
+export interface SubscriptionSupervisorDiagnostics {
+  readonly total: number;
+  readonly states: Partial<Record<PhysicalSubscriptionState, number>>;
+  readonly queuedControls: number;
+  readonly rotationActive: boolean;
+  readonly rotationQueued: number;
+}
+
 export interface SubscriptionSupervisorOptions {
   readonly connection: ConnectionSupervisorPort;
   readonly now?: () => number;
@@ -327,6 +335,20 @@ export class SubscriptionSupervisor {
     const descriptor = this.normalizeDescriptor(descriptorInput);
     const entry = this.entries.get(descriptorKey(descriptor));
     return entry ? SubscriptionSupervisor.toSnapshot(entry) : undefined;
+  }
+
+  getDiagnostics(): SubscriptionSupervisorDiagnostics {
+    const states: Partial<Record<PhysicalSubscriptionState, number>> = {};
+    for (const entry of this.entries.values()) {
+      states[entry.state] = (states[entry.state] ?? 0) + 1;
+    }
+    return Object.freeze({
+      total: this.entries.size,
+      states: Object.freeze({ ...states }),
+      queuedControls: this.controlQueue.length + (this.currentJob ? 1 : 0),
+      rotationActive: this.rotationCurrent !== undefined,
+      rotationQueued: this.rotationQueue.length,
+    });
   }
 
   destroy(): void {
