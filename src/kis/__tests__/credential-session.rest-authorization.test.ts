@@ -169,7 +169,7 @@ describe("CredentialSession REST authorization lease", () => {
     });
     const port: CredentialSettingsPort = {
       whenReady: vi.fn(async () => snapshot(valid)),
-      getSnapshot: vi.fn(() => snapshot(++reads < 4 ? valid : invalidated)),
+      getSnapshot: vi.fn(() => snapshot(++reads < 3 ? valid : invalidated)),
       update: vi.fn(async () => snapshot(valid)),
     };
     const session = new CredentialSession(port, { now: () => 1_800_000_000_000 });

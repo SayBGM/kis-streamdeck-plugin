@@ -22,6 +22,7 @@ function expectedFingerprint(appKey: string, appSecret: string): string {
 function makeRepository(initial: unknown): {
   repository: SettingsRepository;
   readDisk: () => GlobalSettingsV2;
+  writeDisk: (settings: unknown) => void;
   persistence: SettingsPersistence & {
     getGlobalSettings: ReturnType<typeof vi.fn>;
     setGlobalSettings: ReturnType<typeof vi.fn>;
@@ -37,6 +38,7 @@ function makeRepository(initial: unknown): {
   return {
     repository: new SettingsRepository(persistence, { sleep: async () => {} }),
     readDisk: () => structuredClone(disk),
+    writeDisk: (settings: unknown) => { disk = structuredClone(settings) as GlobalSettingsV2; },
     persistence,
   };
 }
@@ -56,6 +58,95 @@ describe("CredentialSession credential state", () => {
       configured: true,
       credentialGeneration: 1,
       credentialFingerprint: expectedFingerprint("key", "secret"),
+    });
+  });
+
+  it("reconciles credentials written externally after an empty successful bootstrap", async () => {
+    const { repository, readDisk, writeDisk } = makeRepository(migrateGlobalSettings({}));
+    const session = new CredentialSession(repository);
+    await expect(session.initialize()).resolves.toMatchObject({ configured: false });
+
+    writeDisk(migrateGlobalSettings({ appKey: " external-key ", appSecret: " external-secret " }));
+    await repository.update(() => undefined);
+
+    await expect(session.reconcile()).resolves.toMatchObject({
+      configured: true,
+      credentialGeneration: 1,
+      credentialFingerprint: expectedFingerprint("external-key", "external-secret"),
+    });
+    expect(readDisk()).toMatchObject({
+      appKey: "external-key",
+      appSecret: "external-secret",
+      credentialGeneration: 1,
+      credentialFingerprint: expectedFingerprint("external-key", "external-secret"),
+    });
+  });
+
+  it("singleflights concurrent reconciliation when external credentials need repair", async () => {
+    const raw = migrateGlobalSettings({ appKey: "key", appSecret: "secret" });
+    const repaired = migrateGlobalSettings({
+      ...raw,
+      credentialFingerprint: expectedFingerprint("key", "secret"),
+      credentialGeneration: 1,
+      accessTokenVersion: 1,
+    });
+    const snapshot = (settings: GlobalSettingsV2) => Object.freeze({
+      settings,
+      status: Object.freeze({ baseKnown: true, persistenceDegraded: false }),
+    });
+    let current = snapshot(raw);
+    let resolveUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => { resolveUpdate = resolve; });
+    const port: CredentialSettingsPort = {
+      whenReady: vi.fn(async () => current),
+      getSnapshot: vi.fn(() => current),
+      update: vi.fn(async () => {
+        await updateGate;
+        current = snapshot(repaired);
+        return current;
+      }),
+    };
+    const session = new CredentialSession(port);
+
+    const first = session.reconcile();
+    const second = session.reconcile();
+    await vi.waitFor(() => expect(port.update).toHaveBeenCalledOnce());
+    resolveUpdate();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ configured: true, credentialGeneration: 1 }),
+      expect.objectContaining({ configured: true, credentialGeneration: 1 }),
+    ]);
+    expect(port.update).toHaveBeenCalledOnce();
+  });
+
+  it("does not rewrite or advance generation for a valid token-only self write", async () => {
+    const fingerprint = expectedFingerprint("key", "secret");
+    const { repository, readDisk, persistence } = makeRepository(migrateGlobalSettings({
+      appKey: "key",
+      appSecret: "secret",
+      credentialFingerprint: fingerprint,
+      credentialGeneration: 3,
+      accessTokenVersion: 4,
+    }));
+    const session = new CredentialSession(repository);
+    await session.initialize();
+    await repository.update((draft) => {
+      draft.accessToken = "token";
+      draft.accessTokenExpiry = 1_900_000_000_000;
+      draft.accessTokenFingerprint = fingerprint;
+      draft.accessTokenVersion = 5;
+    });
+    const writesAfterToken = persistence.setGlobalSettings.mock.calls.length;
+    const revisionAfterToken = readDisk().settingsRevision;
+
+    await session.reconcile();
+
+    expect(persistence.setGlobalSettings).toHaveBeenCalledTimes(writesAfterToken);
+    expect(readDisk()).toMatchObject({
+      settingsRevision: revisionAfterToken,
+      credentialGeneration: 3,
+      accessTokenVersion: 5,
     });
   });
 

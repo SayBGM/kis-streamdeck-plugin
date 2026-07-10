@@ -19,7 +19,10 @@ function fakeServices(): PluginRuntimeServices {
   };
   return {
     settingsRepository: settingsRepository as never,
-    credentialSession: { initialize: vi.fn(async () => ({ configured: false })) } as never,
+    credentialSession: {
+      initialize: vi.fn(async () => ({ configured: false })),
+      reconcile: vi.fn(async () => ({ configured: false })),
+    } as never,
     connectionSupervisor: { destroy: vi.fn() } as never,
     subscriptionSupervisor: { destroy: vi.fn() } as never,
     restCoordinator: {} as never,
@@ -73,6 +76,7 @@ describe("PluginRuntime", () => {
     const marker = { keep: true };
     updater?.(marker as never);
     expect(marker).toEqual({ keep: true });
+    expect(services.credentialSession.reconcile).toHaveBeenCalledOnce();
   });
 
   it("allows startup to retry after a transient credential bootstrap failure", async () => {
@@ -87,6 +91,19 @@ describe("PluginRuntime", () => {
 
     expect(services.settingsRepository.initialize).toHaveBeenCalledTimes(2);
     expect(services.credentialSession.initialize).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers a failed startup through a later settings refresh reconciliation", async () => {
+    const services = fakeServices();
+    vi.mocked(services.credentialSession.initialize)
+      .mockRejectedValueOnce(new Error("temporary"));
+    const runtime = new PluginRuntime(services);
+
+    await expect(runtime.initialize()).rejects.toThrow("temporary");
+    await expect(runtime.refreshGlobalSettings()).resolves.toBeUndefined();
+
+    expect(services.settingsRepository.update).toHaveBeenCalledOnce();
+    expect(services.credentialSession.reconcile).toHaveBeenCalledOnce();
   });
 
   it("composes one shared connection, subscription, REST and render service for both controllers", async () => {
@@ -146,6 +163,47 @@ describe("PluginRuntime", () => {
     const writesAfterBootstrap = setGlobalSettings.mock.calls.length;
     await runtime.refreshGlobalSettings();
     expect(setGlobalSettings).toHaveBeenCalledTimes(writesAfterBootstrap);
+    await runtime.destroy();
+  });
+
+  it("reconciles externally saved credentials and can issue approval without restart", async () => {
+    let current: GlobalSettings = {};
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ approval_key: "approval-after-refresh" }),
+    }));
+    const runtime = createPluginRuntime({
+      settingsPersistence: {
+        getGlobalSettings: vi.fn(async () => current),
+        setGlobalSettings: vi.fn(async (settings) => { current = settings; }),
+      },
+      credentialSessionOptions: { fetch },
+    });
+    await runtime.initialize();
+    current = {
+      ...current,
+      appKey: " external-key ",
+      appSecret: " external-secret ",
+    };
+
+    await runtime.refreshGlobalSettings();
+    const writesAfterReconcile = current.settingsRevision;
+    const approval = await runtime.services.credentialSession.getApprovalKey();
+
+    expect(current).toMatchObject({
+      appKey: "external-key",
+      appSecret: "external-secret",
+      credentialGeneration: 1,
+      credentialFingerprint: expect.any(String),
+    });
+    expect(approval).toMatchObject({
+      approvalKey: "approval-after-refresh",
+      credentialGeneration: 1,
+    });
+    expect(current.settingsRevision).toBe(writesAfterReconcile);
+    await runtime.refreshGlobalSettings();
+    expect(current.settingsRevision).toBe(writesAfterReconcile);
     await runtime.destroy();
   });
 

@@ -2,7 +2,10 @@ import { StockActionController } from "../actions/stock-action-controller.js";
 import { DiagnosticsStore } from "../core/diagnostics-store.js";
 import { MarketClock } from "../core/market-clock.js";
 import { ConnectionSupervisor } from "../kis/connection-supervisor.js";
-import { CredentialSession } from "../kis/credential-session.js";
+import {
+  CredentialSession,
+  type CredentialSessionOptions,
+} from "../kis/credential-session.js";
 import { RestCoordinator } from "../kis/rest-coordinator.js";
 import { SubscriptionSupervisor } from "../kis/subscription-supervisor.js";
 import {
@@ -39,6 +42,7 @@ export interface PluginRuntimeServices {
 export interface CreatePluginRuntimeOptions {
   readonly settingsPersistence: SettingsPersistence;
   readonly diagnostics?: DiagnosticsStore;
+  readonly credentialSessionOptions?: CredentialSessionOptions;
 }
 
 /** Owns the shared plugin services and their deterministic startup/shutdown order. */
@@ -80,6 +84,8 @@ export class PluginRuntime {
   async refreshGlobalSettings(): Promise<void> {
     if (this.destroyed) return;
     await this.services.settingsRepository.update(() => undefined);
+    if (this.destroyed) return;
+    await this.services.credentialSession.reconcile();
   }
 
   destroy(): Promise<void> {
@@ -118,7 +124,10 @@ export class PluginRuntime {
 export function createPluginRuntime(options: CreatePluginRuntimeOptions): PluginRuntime {
   const diagnostics = options.diagnostics ?? new DiagnosticsStore();
   const settingsRepository = new SettingsRepository(options.settingsPersistence);
-  const credentialSession = new CredentialSession(settingsRepository);
+  const credentialSession = new CredentialSession(
+    settingsRepository,
+    options.credentialSessionOptions,
+  );
   const connectionSupervisor = new ConnectionSupervisor({
     credentials: credentialSession,
     diagnostics,

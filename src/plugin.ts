@@ -24,10 +24,10 @@ streamDeck.settings.onDidReceiveGlobalSettings(() => {
 });
 
 streamDeck.actions.registerAction(
-  new DomesticStockAction(runtime.domesticController),
+  new DomesticStockAction(runtime.domesticController, runtime.diagnostics),
 );
 streamDeck.actions.registerAction(
-  new OverseasStockAction(runtime.overseasController),
+  new OverseasStockAction(runtime.overseasController, runtime.diagnostics),
 );
 
 void streamDeck.connect()

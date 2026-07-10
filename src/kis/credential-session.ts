@@ -387,7 +387,7 @@ export class CredentialSession {
   private readonly clearTimeout: CredentialSessionOptions["clearTimeout"];
   private readonly accessTokenFlights = new Map<string, Promise<AccessTokenLease>>();
   private readonly approvalKeyFlights = new Map<string, Promise<ApprovalKeyLease>>();
-  private initialization?: Promise<void>;
+  private reconciliation?: Promise<void>;
 
   constructor(repository: CredentialSettingsPort, options: CredentialSessionOptions = {}) {
     this.repository = repository;
@@ -400,21 +400,34 @@ export class CredentialSession {
   }
 
   async initialize(): Promise<CredentialIdentity> {
-    await this.ensureInitialized();
+    return this.reconcile();
+  }
+
+  /** Re-validates the latest repository snapshot and singleflights only needed repair. */
+  async reconcile(): Promise<CredentialIdentity> {
+    await this.repository.whenReady();
+    const current = this.repository.getSnapshot();
+    if (
+      current.status.baseKnown &&
+      !current.status.persistenceDegraded &&
+      !credentialBootstrapNeeded(current.settings)
+    ) {
+      return identityFromSnapshot(current);
+    }
+    await this.ensureReconciled();
     return identityFromSnapshot(this.repository.getSnapshot());
   }
 
-  private ensureInitialized(): Promise<void> {
-    if (this.initialization) return this.initialization;
+  private ensureReconciled(): Promise<void> {
+    if (this.reconciliation) return this.reconciliation;
 
-    const initialization = this.bootstrap().catch((error: unknown) => {
-      if (this.initialization === initialization) {
-        this.initialization = undefined;
+    const reconciliation = this.bootstrap().finally(() => {
+      if (this.reconciliation === reconciliation) {
+        this.reconciliation = undefined;
       }
-      throw error;
     });
-    this.initialization = initialization;
-    return initialization;
+    this.reconciliation = reconciliation;
+    return reconciliation;
   }
 
   private async bootstrap(): Promise<void> {

@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => {
   const calls: string[] = [];
   const onDidReceiveGlobalSettings = vi.fn();
-  const registerAction = vi.fn((action: { kind?: string; controller?: unknown }) => {
+  const registerAction = vi.fn((action: {
+    kind?: string;
+    controller?: unknown;
+    diagnostics?: unknown;
+  }) => {
     calls.push(`register:${action.kind}`);
   });
   const getGlobalSettings = vi.fn(async () => ({}));
@@ -13,9 +17,11 @@ const mocks = vi.hoisted(() => {
   const refreshGlobalSettings = vi.fn(async () => undefined);
   const domesticController = { kind: "domestic-controller" };
   const overseasController = { kind: "overseas-controller" };
+  const diagnostics = { kind: "diagnostics" };
   const runtime = {
     domesticController,
     overseasController,
+    diagnostics,
     initialize,
     refreshGlobalSettings,
   };
@@ -42,6 +48,7 @@ const mocks = vi.hoisted(() => {
     refreshGlobalSettings,
     domesticController,
     overseasController,
+    diagnostics,
     runtime,
     createPluginRuntime,
     settingsApi,
@@ -70,14 +77,14 @@ vi.mock("../runtime/plugin-runtime.js", () => ({
 vi.mock("../actions/domestic-stock.js", () => ({
   DomesticStockAction: class {
     readonly kind = "domestic";
-    constructor(readonly controller: unknown) {}
+    constructor(readonly controller: unknown, readonly diagnostics: unknown) {}
   },
 }));
 
 vi.mock("../actions/overseas-stock.js", () => ({
   OverseasStockAction: class {
     readonly kind = "overseas";
-    constructor(readonly controller: unknown) {}
+    constructor(readonly controller: unknown, readonly diagnostics: unknown) {}
   },
 }));
 
@@ -122,6 +129,8 @@ describe("plugin runtime integration", () => {
     const registered = mocks.registerAction.mock.calls.map(([action]) => action);
     expect(registered[0].controller).toBe(mocks.domesticController);
     expect(registered[1].controller).toBe(mocks.overseasController);
+    expect(registered[0].diagnostics).toBe(mocks.diagnostics);
+    expect(registered[1].diagnostics).toBe(mocks.diagnostics);
   });
 
   it("routes a global settings change through the runtime fresh-read transaction", async () => {
