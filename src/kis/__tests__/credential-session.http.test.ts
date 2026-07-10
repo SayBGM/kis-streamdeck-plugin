@@ -279,6 +279,27 @@ describe("CredentialSession HTTP issuance", () => {
     expect(JSON.stringify(caught)).not.toContain("raw-token");
   });
 
+  it.each([
+    [true, 500],
+    [false, 200],
+  ] as const)(
+    "rejects contradictory HTTP semantics ok=%s status=%d without persisting a token",
+    async (ok, status) => {
+      const { repository, readDisk } = makeRepository(configured());
+      const fetch = vi.fn<AuthFetch>().mockResolvedValue(
+        response(ok, status, { access_token: "must-not-be-stored", expires_in: 3600 }),
+      );
+      const session = new CredentialSession(repository, { fetch });
+
+      await expect(session.getAccessToken()).rejects.toMatchObject({
+        code: "PROTOCOL",
+        scope: "auth",
+        retryable: false,
+      });
+      expect(readDisk()).not.toHaveProperty("accessToken");
+    },
+  );
+
   it("rejects accessor payloads without invoking secret-bearing fields", async () => {
     const { repository } = makeRepository(configured());
     const tokenGetter = vi.fn(() => {

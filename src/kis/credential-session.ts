@@ -641,6 +641,9 @@ export class CredentialSession {
     ) {
       throw authBoundaryError("PROTOCOL", false, "인증 HTTP 응답 형식이 올바르지 않습니다.");
     }
+    if (ok !== (status >= 200 && status < 300)) {
+      throw authBoundaryError("PROTOCOL", false, "인증 HTTP 상태가 서로 일치하지 않습니다.");
+    }
 
     let payload: Readonly<Record<string, unknown>> | undefined;
     if (typeof json === "function") {
