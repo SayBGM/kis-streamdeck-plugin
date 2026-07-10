@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+- `SettingsRepository`, `CredentialSession`, `RestCoordinator`, `ConnectionSupervisor`, `SubscriptionSupervisor`, `MarketAdapter`, `StockActionController`, `RenderScheduler`, `DiagnosticsStore` 기반 v2 런타임 구조
+- 국내 주식·ETF·미국 주식의 공통 상태 머신 액션 엔진과 버튼 lifecycle generation fencing
+- allowlist 명령만 처리하고 Secret·token·approval key를 노출하지 않는 Property Inspector 설정·진단 프로토콜
+- Node.js 24 CI, 전체 line 80%와 핵심 런타임 그룹 branch 80% coverage 게이트
+- 실제 `.streamDeckPlugin`을 안전하게 추출하고 SDK 전이 의존성을 resolve하는 archive smoke test
+
+### Changed
+- `@elgato/streamdeck`을 정확히 2.1.0, `ws`를 정확히 8.21.0으로 고정
+- 최소 지원 버전을 Stream Deck 7.1과 플러그인 Node.js 24로 상향하고 SDKVersion 2 유지
+- 설정을 v2 스키마로 자동 이전하고 자동/REST 전용, 렌더 2·5·10초, 백업 15·30·60초 프리셋으로 단순화
+- WebSocket을 재연결·heartbeat·구독 제어·41개 lease 순환 상태 머신으로 교체
+- REST를 동시 4개·초당 10개 제한, 호출 우선순위, 공유 취소, 세션 캐시 기반 조정기로 교체
+- 일반 렌더를 trailing last-write-wins로 제한하고 실제 SVG 문자열 기반 LRU와 semantic 중복 제거 적용
+- release workflow가 공통 verify/package 스크립트를 재사용하도록 통합
+
+### Security
+- 취약한 이전 `ws` 잠금 버전을 제거하고 `npm audit --omit=dev`를 검증 게이트에 추가
+- fingerprint가 없는 legacy access token 폐기, 자격증명 세대 및 token-version CAS 적용
+- archive path traversal, 심볼릭 링크, 중복 경로와 비정상 크기 차단
+
 ## [1.3.4] - 2026-03-15
 
 ### Added

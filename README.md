@@ -1,236 +1,130 @@
-# KIS StreamDeck 실시간 주식 시세 플러그인
+# KIS StreamDeck 주식 시세 플러그인
 
 ![Preview](https://github.com/user-attachments/assets/e6d074fa-1227-4d36-a9fd-d5af7da1efc0)
 
-한국투자증권(KIS) Open API를 사용해 Stream Deck 키에 국내/미국 주식 시세를 표시하는 플러그인입니다. 버튼은 먼저 REST 스냅샷으로 채워지고, 이후 공통 업데이트 모드에 따라 WebSocket 실시간, WebSocket + 쓰로틀, 또는 REST 폴링으로 갱신됩니다.
+한국투자증권(KIS) Open API의 국내 주식·ETF와 미국 주식 시세를 Stream Deck 키에 표시합니다. 여러 키가 인증, REST 조정기, WebSocket 연결과 렌더 큐를 공유하며, 연결 장애가 발생하면 정책에 따라 REST 백업으로 자동 전환합니다. 한국투자증권 **실전투자** Open API 전용입니다.
 
-## 주요 기능
+## 지원 환경
 
-- 국내주식 버튼
-  - TR_ID: `H0UNCNT0`
-  - 입력값: `종목코드`, `종목명`
-- 미국주식 버튼
-  - TR_ID: `HDFSCNT0`
-  - 입력값: `티커 심볼`, `거래소(NAS/NYS/AMS)`, `종목명`
-- 최초 표시 속도 개선
-  - 버튼이 나타나면 REST 현재가를 먼저 조회해 바로 표시
-  - 이후 공통 업데이트 모드에 따라 실시간 또는 백업 경로로 갱신
-- 단일 WebSocket 연결 공유
-  - 모든 버튼 구독을 하나의 연결에서 관리
-  - 마지막 구독이 해제되면 연결도 자동 종료
-- 연결 안정성 강화
-  - `approval_key` 30분 자동 갱신
-  - 지수 백오프 재연결: 5초 → 10초 → 20초 … 최대 60초, ±10% 지터
-- 렌더링 성능 최적화
-  - `setImage()` 50ms 디바운스
-  - SVG Data URI LRU 캐시 500개
-- 카드 상태 표시 강화
-  - `LIVE` / `BACKUP` / `BROKEN` 연결 상태를 카드 하단 바와 상태 문구로 표시
-  - stale(지연), 수동 새로고침, 연결 회복, 오류 상태를 별도 카드/문구로 구분
-- 전역 인증 재사용
-  - `access_token`을 Global Settings에 저장해 재시작 후 재사용
-  - `App Key` 또는 `App Secret`이 바뀌면 이전 토큰은 자동 제거
+- Stream Deck 7.1 이상
+- Stream Deck 플러그인 Node.js 24 런타임
+- Stream Deck SDK 2 (`@elgato/streamdeck 2.1.0`)
+- macOS 10.15 이상 또는 Windows 10 이상
 
-## Property Inspector UX
+Stream Deck 6.x와 7.0은 지원하지 않습니다. 기존 국내·미국 액션 UUID(`com.kis.streamdeck.domestic-stock`, `com.kis.streamdeck.overseas-stock`)는 유지되므로 업데이트 후에도 배치한 키와 액션 설정이 이어집니다.
 
-### 1. 공통 설정: 수동 저장
+## 키 화면과 액션
 
-`KIS API 설정` 그룹은 모든 버튼이 공유하는 전역 설정입니다.
+- 국내 주식·ETF: 6자리 종목코드, 표시 이름, 주식/ETF 구분
+- 미국 주식: 1~6자 티커, 거래소(`NAS`/`NYS`/`AMS`), 표시 이름
+- 종목명·장 상태, 큰 현재가, 등락률과 작은 연결 상태를 144×144 SVG 카드에 표시
+- 실시간은 `LIVE`, REST 백업은 `BACKUP`, 연결 실패는 `BROKEN`, 오래된 시세는 지연 상태로 구분
+- 키를 누르면 현재 연결 정책을 바꾸지 않고 고우선순위 REST 새로고침을 한 번 실행
 
-- 입력 항목
-  - `App Key`
-  - `App Secret`
-  - `업데이트`
-- 저장 방식
-  - 이 그룹은 자동 저장되지 않습니다.
-  - 값을 바꾸면 저장 대기 상태가 되며, `공통 설정 저장` 버튼을 눌러야 반영됩니다.
-  - `공통 설정 저장` 버튼은 변경 사항이 있고 현재 보이는 입력값이 유효할 때만 활성화됩니다.
-- 업데이트 모드
-  - `실시간 (WebSocket)`: REST 스냅샷 후 WebSocket 체결 데이터로 갱신
-  - `WebSocket + 쓰로틀`: WebSocket은 유지하되 카드 렌더링 빈도를 `쓰로틀(ms)` 값으로 제한
-  - `주기적 (폴링)`: WebSocket을 사용하지 않고 REST만 `간격(초)`마다 재조회
-- 입력 검증
-  - `주기적 (폴링)` 선택 시 `간격(초)` 입력이 나타납니다.
-  - `간격(초)`는 `1~3600`만 허용하며, 비워두면 저장 시 기본값 `30`이 사용됩니다.
-  - `WebSocket + 쓰로틀` 선택 시 `쓰로틀(ms)` 입력이 나타납니다.
-  - `쓰로틀(ms)`는 `200` 이상만 허용하며, 비워두면 저장 시 기본값 `1000`이 사용됩니다.
-  - `쓰로틀(ms)`에 `200` 미만 값을 넣고 포커스를 벗어나면 자동으로 `200`으로 보정됩니다.
-- 반영 범위
-  - 자격증명은 저장 즉시 공용 인증 상태와 WebSocket 인증 갱신에 사용됩니다.
-  - `업데이트`, `간격(초)`, `쓰로틀(ms)`는 전역 기준값으로 저장되며, 버튼이 다시 초기화되거나 설정을 다시 받을 때 해당 값으로 구성됩니다.
+## 시세 정책
 
-### 2. 현재 버튼 설정: 자동 저장
+전역 환경설정에서 데이터 모드, 렌더 간격, REST 백업 간격을 선택합니다.
 
-`국내주식 설정` / `미국주식 설정` 그룹은 현재 선택한 버튼에만 저장됩니다.
+| 모드·상태 | 동작 |
+| --- | --- |
+| 자동·장중 시작 | WebSocket을 먼저 시작하고 5초간 데이터가 없을 때 즉시 REST 1회 후 백업 폴링 |
+| 자동·연결 끊김/지연/구독 대기·거절 | 즉시 REST 1회 후 15초·30초·60초 중 선택한 간격으로 반복, 유효한 WebSocket 데이터에서 중단 |
+| 자동·장 마감 | WebSocket 없이 종목·세션·자격증명 세대별 REST 1회 |
+| REST 전용·장중 | 즉시 REST 1회 후 15초·30초·60초 중 선택한 간격으로 반복 |
+| REST 전용·장 마감 | 세션별 REST 1회 |
+| 수동 새로고침 | 음수 캐시를 우회하는 고우선순위 REST 1회 |
 
-- 저장 방식
-  - 별도 저장 버튼이 없습니다.
-  - 마지막 입력 후 약 `350ms` 뒤 자동 저장됩니다.
-  - 형식이 잘못된 값은 자동 저장되지 않습니다.
-  - 빈 값으로 지우는 것도 저장됩니다.
-- 국내 버튼
-  - `종목코드`: 정확히 `6자리 숫자`만 허용
-  - `종목명`: 카드에 표시할 이름, 비워두면 `종목코드`를 표시
-- 미국 버튼
-  - `티커 심볼`: 정확히 `1~6자 영문(A-Z)`만 허용
-  - 입력 즉시 대문자로 정규화되어 저장
-  - 현재 검증 규칙상 점(`.`), 하이픈(`-`), 숫자가 들어간 티커는 저장되지 않습니다.
-  - `거래소`: `NAS` / `NYS` / `AMS`, 변경 즉시 자동 저장
-  - `종목명`: 카드에 표시할 이름, 비워두면 `티커`를 표시
-- 빈 값 저장 후 동작
-  - 국내 버튼에서 `종목코드`를 비우면 버튼은 `설정 필요` 카드로 돌아갑니다.
-  - 미국 버튼에서 `티커 심볼`을 비우면 버튼은 `설정 필요` 카드로 돌아갑니다.
+일반 체결 렌더는 선택한 **2초·5초·10초** trailing last-write-wins 창으로 합쳐집니다. 연결이나 지연 같은 제어 상태는 1초 창으로 합치고, 치명적인 설정 오류와 수동 요청은 즉시 표시합니다. 화면 의미와 최종 SVG가 모두 같으면 SVG 생성 또는 Stream Deck IPC를 생략합니다.
 
-## 카드 UX
-
-### 1. 초기/보조 카드
-
-| 카드 | 표시 조건 | 화면 문구 |
-| --- | --- | --- |
-| 설정 필요 | 버튼 설정에 `종목코드` 또는 `티커`가 없을 때 | `설정 필요` + `종목코드를 설정하세요` 또는 `티커를 설정하세요` |
-| 초기화 중 | 버튼이 나타나거나 설정이 바뀐 직후, 첫 데이터 준비 중 | `초기화 중` + `REST/실시간 연결 준비` |
-| 데이터 대기 | WebSocket 구독은 됐지만 아직 체결 데이터가 없을 때 | `데이터 대기` + `실시간 연결됨` |
-| 장 마감 대기 | 위 상태에서 시장 세션이 `CLOSED`일 때 | `장 마감` + `실시간 연결됨` |
-| 회복 카드 | `BACKUP` 또는 `BROKEN`에서 `LIVE`로 회복될 때 | 2초 동안 `실시간 복구` + `연결 회복` |
-
-### 2. 시세 카드
-
-실제 시세 카드에는 아래 정보가 표시됩니다.
-
-- 종목명
-- 종목코드 또는 티커
-- 현재가
-- 전일 대비
-- 등락률
-- 장 상태 pill
-
-장 상태 pill 라벨은 다음과 같습니다.
-
-- `프리`
-- `정규`
-- `애프터`
-- `마감`
-
-### 3. 연결 상태와 하단 표시
-
-시세 카드 하단에는 상태 문구와 4px 연결 바가 표시됩니다.
-
-| 연결 상태 | 하단 문구 | 하단 바 색상 |
-| --- | --- | --- |
-| `LIVE` | `실시간` | 초록 |
-| `BACKUP` | `백업` | 노랑 |
-| `BROKEN` | `연결 끊김` | 빨강 |
-
-추가 표시 규칙:
-
-- 수동 새로고침 중에는 하단 문구가 `새로고침 중`으로 바뀝니다.
-- stale 상태가 되면 종목명이 노란색으로 바뀝니다.
-- `BACKUP` 상태에서 stale이면 하단 문구가 `백업 · 지연`이 됩니다.
-- 연결 상태 문구가 없는 상황에서 stale이면 `지연`이 표시됩니다.
-- `주기적 (폴링)` 모드는 설계상 `BACKUP` 상태로 표시됩니다.
-- `WebSocket + 쓰로틀` 모드는 실시간 연결 상태를 유지하되, 화면 갱신만 쓰로틀됩니다.
-
-### 4. stale(지연) 기준
-
-- 기본 기준: 마지막 데이터 수신 후 `20초` 경과
-- `주기적 (폴링)` 모드: `max(폴링 간격 × 2, 20초)`
-
-즉, 폴링 간격이 길수록 stale 판정도 더 늦게 내려갑니다.
-
-### 5. 오류 카드
-
-오류가 발생하면 시세 카드 대신 오류 카드가 표시됩니다. 오류 카드는 연결 바를 표시하지 않습니다.
-
-| 에러 타입 | 카드 레이블 | 의미 |
-| --- | --- | --- |
-| `NO_CREDENTIAL` | `설정 필요` | 전역 `App Key` / `App Secret` 미설정 |
-| `AUTH_FAIL` | `인증 실패` | 인증 실패 또는 토큰/approval_key 발급 실패 |
-| `NETWORK_ERROR` | `연결 오류` | 네트워크 실패 또는 API 연결 오류 |
-| `INVALID_STOCK` | `종목 오류` | 종목코드/티커가 잘못됐거나 현재 시세 응답이 비어 있음 |
-
-모든 오류 카드는 하단에 `Property Inspector를 확인하세요` 안내 문구를 표시합니다.
-
-## 데이터 흐름
-
-1. 사용자가 공통 설정을 저장하거나 버튼별 설정을 입력합니다.
-2. 버튼이 나타나면 전역 자격증명과 버튼별 종목 설정을 검사합니다.
-3. 자격증명이 없으면 `NO_CREDENTIAL` 오류 카드, 종목 설정이 없으면 `설정 필요` 카드를 표시합니다.
-4. 설정이 준비되면 `초기화 중` 카드를 표시하고 REST 현재가를 먼저 조회합니다.
-5. 이후 공통 업데이트 모드에 따라 동작합니다.
-   - `websocket`: WebSocket 구독
-   - `hybrid`: WebSocket 구독 + 렌더링 쓰로틀
-   - `poll`: REST 주기 조회만 수행
-6. 키를 누르면 REST 기반 수동 새로고침을 실행합니다.
-7. 버튼이 사라지면 구독과 타이머를 정리합니다.
-
-## 설정 값
-
-- 전역 설정
-  - `appKey`
-  - `appSecret`
-  - `accessToken`
-  - `accessTokenExpiry`
-  - `updateMode`
-  - `pollIntervalSec`
-  - `throttleMs`
-- 국내 버튼 설정
-  - `stockCode` (예: `005930`)
-  - `stockName` (예: `삼성전자`)
-- 미국 버튼 설정
-  - `ticker` (예: `AAPL`)
-  - `exchange` (`NAS` / `NYS` / `AMS`)
-  - `stockName` (예: `Apple`)
-
-## 구조
+## 안정성 구조
 
 ```text
-com.kis.streamdeck.sdPlugin/
-├── manifest.json
-├── src/
-│   ├── plugin.ts                     # 진입점, 전역 설정 반영, PI 메시지 처리
-│   ├── actions/
-│   │   ├── domestic-stock.ts         # 국내 버튼 라이프사이클/구독/폴링/수동 새로고침
-│   │   ├── overseas-stock.ts         # 미국 버튼 라이프사이클/구독/폴링/수동 새로고침
-│   │   └── __tests__/
-│   ├── kis/
-│   │   ├── auth.ts                   # approval_key / access_token 발급 및 캐시
-│   │   ├── websocket-manager.ts      # 단일 WS 연결, 구독/해제, heartbeat, 재연결
-│   │   ├── rest-price.ts             # 초기/수동/폴링 현재가 조회
-│   │   ├── domestic-parser.ts
-│   │   ├── overseas-parser.ts
-│   │   ├── settings-store.ts         # 전역 설정 저장/대기
-│   │   └── __tests__/
-│   ├── renderer/
-│   │   ├── stock-card.ts             # 144x144 SVG 카드 렌더링
-│   │   └── __tests__/
-│   ├── types/
-│   │   └── index.ts
-│   └── utils/
-│       ├── timezone.ts
-│       └── logger.ts
-├── ui/
-│   ├── domestic-stock-pi.html
-│   ├── overseas-stock-pi.html
-│   ├── sdpi.css
-│   └── sdpi.js
-└── imgs/
+Stream Deck App
+  └─ plugin.ts
+      ├─ SettingsRepository       직렬화된 v2 설정, readiness barrier, 재시도
+      ├─ CredentialSession        자격증명 세대, 토큰 singleflight, 401 CAS
+      ├─ RestCoordinator          동시 4개/초당 10개, 우선순위, 공유 취소·캐시
+      ├─ ConnectionSupervisor     WebSocket 상태 머신, heartbeat, 재연결
+      ├─ SubscriptionSupervisor   desired/live/stale/parked/rejected, 41개 순환
+      ├─ MarketAdapter/Clock      국내 주식·ETF·미국 변환, 세션·DST 판정
+      ├─ StockActionController    모든 액션의 공통 정책과 세대 fencing
+      ├─ RenderScheduler          렌더 LWW, 버튼 세대, SVG LRU
+      └─ PiController             allowlist 명령, 정제된 설정·진단 응답
 ```
 
-## 개발
+### 인증과 REST
+
+- App Key/Secret의 fingerprint와 generation으로 이전 발급 결과가 새 자격증명에 섞이지 않게 합니다.
+- access token은 fingerprint와 version을 함께 저장하며, fingerprint가 없는 기존 토큰은 재사용하지 않습니다.
+- 같은 자격증명 세대의 토큰 발급은 singleflight로 합치고, 401 무효화는 token-version CAS로 최신 토큰을 보호합니다.
+- 인증 HTTP 시도는 10초 제한이며 KIS `EGW00133`은 60초 후 한 번만 재시도합니다.
+- REST는 `manual > initial > fallback` 순서, 최대 동시 4개·초당 실제 fetch 10개로 조정합니다.
+- 장 마감 성공 결과는 세션 안에서 재사용하며 실패는 30초만 음수 캐시합니다.
+
+### WebSocket과 구독
+
+- 연결은 `idle → connecting → open → reconnect_wait` 상태 머신이며 파괴할 때만 `stopped`가 됩니다.
+- 재연결은 5초·10초·20초·40초·60초와 지터를 사용하고, 30초간 정상 liveness 후 백오프를 초기화합니다.
+- KIS `PINGPONG` 원문 echo와 15초 유휴 ping/5초 timeout을 함께 검사합니다.
+- subscribe/unsubscribe는 최소 100ms 간격으로 한 건씩 전송하고, 제어 결과가 5초 동안 불명확하면 소켓을 재생성합니다.
+- 동시 LIVE 구독은 41개입니다. 초과 종목은 60초 lease마다 가장 오래된 LIVE와 parked를 교체하며, 미국 주간/야간 키 전환도 해제 확인 후 새 구독을 시작합니다.
+
+## Property Inspector와 진단
+
+Property Inspector(PI)는 버튼 종목 설정, 공통 연결 상태, 자격증명 저장, 접힌 고급 설정, 상세 진단 순서로 구성됩니다. PI는 Global Settings를 직접 읽거나 쓰지 않고 allowlist 기반 명령을 플러그인에 보냅니다.
+
+- App Secret, access token, approval key는 PI 응답과 진단 이벤트에 포함되지 않습니다.
+- 저장 결과는 요청 ID와 설정 revision으로 확인하며, 오래된 응답이 최신 입력을 덮지 않습니다.
+- 고급 설정에서 `자동`/`REST 전용`, 렌더 2초·5초·10초, 백업 15초·30초·60초를 선택합니다.
+- 진단은 인증, 토큰 만료, WebSocket·heartbeat, 구독 순환, REST 백업, 렌더 큐·캐시, 최근 오류를 보여줍니다.
+- 정제된 진단 이벤트는 최대 100개를 보관하고 PI가 열린 동안에만 2초마다 전송합니다.
+
+## 설정 자동 이전
+
+처음 읽은 설정은 `schemaVersion: 2`로 자동 이전됩니다. 설정 읽기에 실패한 상태에서는 쓰지 않으며, 이전 저장 실패 시 원본을 보존하고 1초·2초·4초 간격으로 세 번 재시도합니다.
+
+| v1 값 | v2 결과 |
+| --- | --- |
+| 모드 누락 또는 `websocket` | 자동, 렌더 2초 |
+| `hybrid`, throttle ≤ 2초 | 자동, 렌더 2초 |
+| `hybrid`, throttle 2~5초 | 자동, 렌더 5초 |
+| `hybrid`, throttle > 5초 | 자동, 렌더 10초 |
+| `poll` | REST 전용, 렌더 2초 |
+| poll ≤ 15초 / 16~30초 / > 30초 | 백업 15초 / 30초 / 60초 |
+
+버튼별 `stockCode`, `instrumentType`, `ticker`, `exchange`, `stockName` 키는 그대로 유지하고 `schemaVersion: 2`만 추가합니다.
+
+## 사용 준비
+
+1. 한국투자증권 Open API 포털에서 실전투자 App Key와 App Secret을 발급합니다.
+2. Stream Deck에 플러그인을 설치하고 국내 또는 미국 주식 액션을 배치합니다.
+3. Property Inspector에서 자격증명을 저장합니다.
+4. 종목코드/티커, 거래소와 표시 이름을 설정합니다.
+5. 필요하면 고급 설정에서 데이터·렌더·백업 정책을 조정합니다.
+
+## 개발과 검증
+
+개발과 CI는 Node.js 24를 사용합니다.
 
 ```bash
-npm run build           # Rollup 프로덕션 빌드 → bin/plugin.js
-npm run watch           # 변경 감지 빌드
-npm test                # Vitest 단위 테스트 실행
-npm run test:watch      # 테스트 감지 모드
-npm run test:coverage   # 커버리지 리포트 (coverage/)
-npm run local:install   # 빌드 + Stream Deck 앱에 로컬 설치
-npm run package:plugin  # 빌드 + .streamDeckPlugin 패키징
+npm ci
+npm run typecheck        # TypeScript strict 검사
+npm test                 # Vitest 전체 테스트
+npm run test:coverage    # 전체 line 80% + 핵심 그룹 branch 80% 게이트
+npm run build            # Rollup 빌드와 bundle/source map 검증
+npm run verify           # typecheck + coverage + build + production audit
+npm run local:install    # 로컬 Stream Deck 플러그인 설치
+npm run package:plugin   # 실제 archive 생성 + 안전 추출/모듈 resolve smoke
+npm run package:smoke    # 이미 생성된 archive만 다시 smoke 검증
 ```
 
-## 제약 사항
+패키지 smoke는 `.streamDeckPlugin`을 격리된 임시 디렉터리에 안전하게 추출해 manifest, 번들, UI/이미지, package와 production `node_modules` 구조를 검사합니다. archive 안에서 `@elgato/streamdeck`, `@elgato/utils`, `@elgato/schemas`, `zod`, `ws`가 실제로 resolve되어야 통과합니다. 경로 탈출, 심볼릭 링크, 중복 경로, 10MB 초과 archive 또는 50MB 초과 설치 크기는 거부하고 임시 파일은 항상 삭제합니다.
 
-- 한국투자증권 실전투자 Open API 기준으로 구현되어 있습니다.
-- WebSocket 연결은 단일 인스턴스로 공유합니다.
-- 미국주식 `tr_key`는 시간대에 따라 주간/야간 접두사가 자동 변경됩니다.
-- `src/plugin.ts`는 테스트 커버리지에서 제외됩니다.
+SDK 2.x의 비번들 런타임 의존성 때문에 이전 버전보다 패키지 크기가 증가합니다. 기준 환경의 예상 크기는 압축 약 1.2MB, 설치 약 7.8MB이며 OS와 npm 잠금 해석에 따라 조금 달라질 수 있습니다.
+
+## 제한 사항
+
+- KIS 실전투자 엔드포인트만 사용합니다. 모의투자 키와 엔드포인트는 지원하지 않습니다.
+- 시장 시계는 평일, 시간대, 미국 DST, 절전 복귀와 시스템 시계 변경을 처리하지만 거래소 **공휴일** 캘린더는 판정하지 않습니다. 공휴일에는 REST 결과 또는 시장 응답을 기준으로 표시될 수 있습니다.
+- 미국 주간/야간 WebSocket 키는 KIS 세션 시간에 맞춰 자동 전환합니다.
+- `src/plugin.ts`는 Stream Deck 런타임 진입점이라 테스트 coverage 대상에서 제외하지만, 빌드 source map과 archive smoke로 포함 여부를 검증합니다.

@@ -9,6 +9,7 @@
     "watch": "rollup -c -w",
     "local:install": "npm run build && node ./scripts/install-local-plugin.mjs",
     "package:plugin": "npm run build && node ./scripts/package-streamdeck-plugin.mjs",
+    "package:smoke": "node ./scripts/verify-plugin-package.mjs",
     "version:sync-manifest": "node ./scripts/sync-manifest-version.mjs",
     "version": "npm run version:sync-manifest && git add manifest.json",
     "release:patch": "npm version patch",
@@ -16,7 +17,7 @@
     "release:major": "npm version major",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && node ./scripts/verify-coverage.mjs",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test:coverage && npm run build && npm audit --omit=dev"
   },
