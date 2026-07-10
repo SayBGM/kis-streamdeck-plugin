@@ -691,6 +691,7 @@ describe("ConnectionSupervisor", () => {
     expect(supervisor.applyCredentialIdentity({
       configured: true,
       credentialGeneration: 1,
+      identityEpoch: 1,
     })).toBe(true);
     const oldSocket = await retainAndOpen();
     getApprovalKey.mockResolvedValue(lease("approval-2", 2));
@@ -698,6 +699,7 @@ describe("ConnectionSupervisor", () => {
     expect(supervisor.applyCredentialIdentity({
       configured: true,
       credentialGeneration: 2,
+      identityEpoch: 2,
     })).toBe(true);
 
     expect(oldSocket.terminateCalls).toBe(1);
@@ -709,13 +711,14 @@ describe("ConnectionSupervisor", () => {
   });
 
   it("keeps demand but suppresses approval and reconnect work while credentials are cleared", async () => {
-    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1 });
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1, identityEpoch: 1 });
     const oldSocket = await retainAndOpen();
     getApprovalKey.mockClear();
 
     expect(supervisor.applyCredentialIdentity({
       configured: false,
       credentialGeneration: 2,
+      identityEpoch: 2,
     })).toBe(true);
 
     expect(oldSocket.terminateCalls).toBe(1);
@@ -727,7 +730,7 @@ describe("ConnectionSupervisor", () => {
     expect(sockets).toHaveLength(1);
 
     getApprovalKey.mockResolvedValue(lease("approval-3", 3));
-    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 3 });
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 3, identityEpoch: 3 });
     await flush();
     expect(sockets).toHaveLength(2);
     expect(supervisor.demand).toBe(1);
@@ -739,11 +742,11 @@ describe("ConnectionSupervisor", () => {
     getApprovalKey.mockReset()
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
-    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1 });
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1, identityEpoch: 1 });
     void supervisor.retain();
     await flush();
 
-    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2 });
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2, identityEpoch: 2 });
     await flush();
     first.resolve(lease("approval-old", 1));
     await flush();
@@ -755,14 +758,15 @@ describe("ConnectionSupervisor", () => {
     expect(supervisor.approvalIdentity).toEqual({ credentialGeneration: 2 });
   });
 
-  it("does not churn the socket for token-only updates in the same credential generation", async () => {
-    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1 });
+  it("does not churn the socket for a duplicate delivery of the same identity epoch", async () => {
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1, identityEpoch: 1 });
     const socket = await retainAndOpen();
     const approvalCalls = getApprovalKey.mock.calls.length;
 
     expect(supervisor.applyCredentialIdentity({
       configured: true,
       credentialGeneration: 1,
+      identityEpoch: 1,
     })).toBe(true);
 
     expect(socket.terminateCalls).toBe(0);
@@ -771,14 +775,32 @@ describe("ConnectionSupervisor", () => {
     expect(sockets).toHaveLength(1);
   });
 
+  it("fences the socket for a newer identity epoch even when persisted generation is unchanged", async () => {
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1, identityEpoch: 1 });
+    const oldSocket = await retainAndOpen();
+    getApprovalKey.mockResolvedValue(lease("same-generation-new-identity", 1));
+
+    expect(supervisor.applyCredentialIdentity({
+      configured: true,
+      credentialGeneration: 1,
+      identityEpoch: 2,
+    })).toBe(true);
+    await flush();
+
+    expect(oldSocket.terminateCalls).toBe(1);
+    expect(sockets).toHaveLength(2);
+    expect(supervisor.approvalIdentity).toEqual({ credentialGeneration: 1 });
+  });
+
   it("ignores a late lower credential identity and never restarts after destroy", async () => {
     getApprovalKey.mockResolvedValue(lease("approval-2", 2));
-    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2 });
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2, identityEpoch: 2 });
     const socket = await retainAndOpen();
 
     expect(supervisor.applyCredentialIdentity({
       configured: false,
       credentialGeneration: 1,
+      identityEpoch: 1,
     })).toBe(false);
     expect(socket.terminateCalls).toBe(0);
 
@@ -786,13 +808,55 @@ describe("ConnectionSupervisor", () => {
     expect(supervisor.applyCredentialIdentity({
       configured: true,
       credentialGeneration: 3,
+      identityEpoch: 3,
     })).toBe(false);
     await flush();
     expect(sockets).toHaveLength(1);
   });
 
+  it("accepts an authoritative lower persisted generation only when its local epoch is newer", async () => {
+    getApprovalKey.mockResolvedValueOnce(lease("approval-high", 10));
+    supervisor.applyCredentialIdentity({
+      configured: true,
+      credentialGeneration: 10,
+      identityEpoch: 5,
+    });
+    const oldSocket = await retainAndOpen();
+    getApprovalKey.mockResolvedValueOnce(lease("approval-reset", 1));
+
+    expect(supervisor.applyCredentialIdentity({
+      configured: true,
+      credentialGeneration: 1,
+      identityEpoch: 6,
+    })).toBe(true);
+    await flush();
+
+    expect(oldSocket.terminateCalls).toBe(1);
+    expect(sockets).toHaveLength(2);
+    expect(supervisor.approvalIdentity).toEqual({ credentialGeneration: 1 });
+    expect(supervisor.demand).toBe(1);
+  });
+
+  it("ignores a late prior epoch even when it carries a higher persisted generation", async () => {
+    getApprovalKey.mockResolvedValue(lease("approval-current", 2));
+    supervisor.applyCredentialIdentity({
+      configured: true,
+      credentialGeneration: 2,
+      identityEpoch: 8,
+    });
+    const socket = await retainAndOpen();
+
+    expect(supervisor.applyCredentialIdentity({
+      configured: false,
+      credentialGeneration: 99,
+      identityEpoch: 7,
+    })).toBe(false);
+    expect(socket.terminateCalls).toBe(0);
+    expect(supervisor.state).toBe("open");
+  });
+
   it("recovers a retained subscription live → pending → live across an identity reconnect", async () => {
-    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1 });
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1, identityEpoch: 1 });
     const subscriptions = new SubscriptionSupervisor({
       connection: supervisor,
       now: () => now,
@@ -819,7 +883,7 @@ describe("ConnectionSupervisor", () => {
     expect(handle.snapshot?.state).toBe("live");
 
     getApprovalKey.mockResolvedValue(lease("approval-2", 2));
-    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2 });
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2, identityEpoch: 2 });
     expect(handle.snapshot?.state).toBe("desired");
     await flush();
     sockets[1].readyState = 1;

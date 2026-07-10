@@ -1,11 +1,13 @@
 import { StockActionController } from "../actions/stock-action-controller.js";
 import { DiagnosticsStore } from "../core/diagnostics-store.js";
 import { MarketClock } from "../core/market-clock.js";
-import { ConnectionSupervisor } from "../kis/connection-supervisor.js";
+import {
+  ConnectionSupervisor,
+  type ConnectionSupervisorOptions,
+} from "../kis/connection-supervisor.js";
 import {
   CredentialSession,
   fingerprintCredentials,
-  type CredentialIdentity,
   type CredentialSessionOptions,
 } from "../kis/credential-session.js";
 import { RestCoordinator } from "../kis/rest-coordinator.js";
@@ -51,7 +53,23 @@ export interface CreatePluginRuntimeOptions {
   readonly settingsPersistence: SettingsPersistence;
   readonly diagnostics?: DiagnosticsStore;
   readonly credentialSessionOptions?: CredentialSessionOptions;
+  readonly connectionSupervisorOptions?: Omit<
+    ConnectionSupervisorOptions,
+    "credentials" | "diagnostics"
+  >;
   readonly piSender?: PiOutboundPort;
+}
+
+interface RuntimeCredentialIdentity {
+  readonly configured: boolean;
+  readonly credentialGeneration: number;
+  readonly tuple: string;
+}
+
+function ownDataProperty(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 
 /** Owns the shared plugin services and their deterministic startup/shutdown order. */
@@ -60,6 +78,8 @@ export class PluginRuntime {
   private destruction?: Promise<void>;
   private destroyed = false;
   private unsubscribeCredentialIdentity?: () => void;
+  private credentialIdentityTuple?: string;
+  private credentialIdentityEpoch = 0;
 
   constructor(readonly services: PluginRuntimeServices) {}
 
@@ -101,9 +121,7 @@ export class PluginRuntime {
     this.observeCredentialIdentity();
     await this.services.settingsRepository.update(() => undefined);
     if (this.destroyed) return;
-    const identity = await this.services.credentialSession.reconcile();
-    if (this.destroyed) return;
-    this.applyCredentialIdentity(identity);
+    await this.services.credentialSession.reconcile();
   }
 
   destroy(): Promise<void> {
@@ -117,45 +135,72 @@ export class PluginRuntime {
   private async initializeOnce(): Promise<void> {
     await this.services.settingsRepository.initialize();
     if (this.destroyed) return;
-    const identity = await this.services.credentialSession.initialize();
-    if (this.destroyed) return;
-    this.applyCredentialIdentity(identity);
-  }
-
-  private applyCredentialIdentity(identity: CredentialIdentity): void {
-    if (this.destroyed) return;
-    this.services.connectionSupervisor.applyCredentialIdentity({
-      configured: identity.configured,
-      credentialGeneration: identity.credentialGeneration,
-    });
+    await this.services.credentialSession.initialize();
   }
 
   private observeCredentialIdentity(): void {
     if (this.destroyed || this.unsubscribeCredentialIdentity) return;
     this.unsubscribeCredentialIdentity = this.services.settingsRepository.subscribe((snapshot) => {
       if (this.destroyed) return;
-      this.applyCredentialIdentity(this.identityFromSnapshot(snapshot));
+      this.applyCredentialSnapshot(snapshot);
     });
   }
 
-  private identityFromSnapshot(snapshot: SettingsSnapshot): CredentialIdentity {
-    const credentialGeneration = Number.isSafeInteger(snapshot.settings.credentialGeneration) &&
-      snapshot.settings.credentialGeneration >= 0
-      ? snapshot.settings.credentialGeneration
-      : 0;
+  private applyCredentialSnapshot(snapshot: SettingsSnapshot): void {
+    const identity = this.identityFromSnapshot(snapshot);
+    if (identity.tuple === this.credentialIdentityTuple) return;
+    this.credentialIdentityTuple = identity.tuple;
+    this.credentialIdentityEpoch += 1;
+    this.services.connectionSupervisor.applyCredentialIdentity({
+      configured: identity.configured,
+      credentialGeneration: identity.credentialGeneration,
+      identityEpoch: this.credentialIdentityEpoch,
+    });
+  }
+
+  private identityFromSnapshot(snapshot: SettingsSnapshot): RuntimeCredentialIdentity {
+    let credentialGeneration = 0;
     let configured = false;
+    let fingerprint = "invalid";
+    let baseKnown = false;
+    let persistenceDegraded = false;
     try {
-      const appKey = snapshot.settings.appKey?.trim() ?? "";
-      const appSecret = snapshot.settings.appSecret?.trim() ?? "";
-      configured = snapshot.status.baseKnown &&
-        !snapshot.status.persistenceDegraded &&
+      const settings = ownDataProperty(snapshot, "settings");
+      const status = ownDataProperty(snapshot, "status");
+      const generation = ownDataProperty(settings, "credentialGeneration");
+      credentialGeneration = Number.isSafeInteger(generation) && (generation as number) >= 0
+        ? generation as number
+        : 0;
+      baseKnown = ownDataProperty(status, "baseKnown") === true;
+      persistenceDegraded = ownDataProperty(status, "persistenceDegraded") === true;
+      const rawAppKey = ownDataProperty(settings, "appKey");
+      const rawAppSecret = ownDataProperty(settings, "appSecret");
+      const appKey = typeof rawAppKey === "string" ? rawAppKey.trim() : "";
+      const appSecret = typeof rawAppSecret === "string" ? rawAppSecret.trim() : "";
+      fingerprint = "none";
+      if (appKey.length > 0 && appSecret.length > 0) {
+        fingerprint = fingerprintCredentials(appKey, appSecret);
+      }
+      configured = baseKnown &&
+        !persistenceDegraded &&
         appKey.length > 0 &&
         appSecret.length > 0 &&
-        snapshot.settings.credentialFingerprint === fingerprintCredentials(appKey, appSecret);
+        ownDataProperty(settings, "credentialFingerprint") === fingerprint;
     } catch {
       configured = false;
+      fingerprint = "invalid";
+      credentialGeneration = 0;
+      baseKnown = false;
+      persistenceDegraded = true;
     }
-    return Object.freeze({ configured, credentialGeneration });
+    const tuple = [
+      baseKnown ? "ready" : "unknown",
+      persistenceDegraded ? "degraded" : "healthy",
+      configured ? "configured" : "unconfigured",
+      String(credentialGeneration),
+      fingerprint,
+    ].join(":");
+    return Object.freeze({ configured, credentialGeneration, tuple });
   }
 
   private async destroyOnce(): Promise<void> {
@@ -189,6 +234,7 @@ export function createPluginRuntime(options: CreatePluginRuntimeOptions): Plugin
     { ...options.credentialSessionOptions, diagnostics },
   );
   const connectionSupervisor = new ConnectionSupervisor({
+    ...options.connectionSupervisorOptions,
     credentials: credentialSession,
     diagnostics,
   });

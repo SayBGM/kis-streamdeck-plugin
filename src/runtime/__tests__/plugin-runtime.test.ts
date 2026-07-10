@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { GlobalSettings } from "../../types/index.js";
 import { domesticStockAdapter } from "../../markets/market-adapter.js";
 import { fingerprintCredentials } from "../../kis/credential-session.js";
+import type { SocketLike } from "../../kis/connection-supervisor.js";
 import type { SettingsListener } from "../../settings/settings-repository.js";
 import {
   createPluginRuntime,
@@ -13,6 +14,53 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+type SocketListener = (...args: unknown[]) => void;
+
+class RuntimeFakeSocket implements SocketLike {
+  readyState = 0;
+  terminateCalls = 0;
+  readonly sent: string[] = [];
+  private readonly listeners = new Map<string, SocketListener[]>();
+
+  on(event: string, listener: SocketListener): this {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
+    return this;
+  }
+
+  send(data: string): void { this.sent.push(data); }
+  terminate(): void { this.terminateCalls += 1; this.readyState = 3; }
+  ping(): void {}
+
+  emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args);
+  }
+}
+
+async function flush(): Promise<void> {
+  for (let index = 0; index < 24; index += 1) await Promise.resolve();
+}
+
+function configuredSettings(
+  appKey: string,
+  appSecret: string,
+  credentialGeneration: number,
+): GlobalSettings {
+  return {
+    schemaVersion: 2,
+    settingsRevision: credentialGeneration,
+    appKey,
+    appSecret,
+    credentialFingerprint: fingerprintCredentials(appKey, appSecret),
+    credentialGeneration,
+    accessTokenVersion: credentialGeneration,
+    preferences: {
+      dataMode: "automatic",
+      renderIntervalMs: 2_000,
+      backupPollIntervalMs: 15_000,
+    },
+  };
 }
 
 function fakeServices(): PluginRuntimeServices {
@@ -71,13 +119,10 @@ describe("PluginRuntime", () => {
     ready.resolve({ settings: {}, status: {} });
     await first;
     expect(order).toEqual(["settings:start", "settings:ready", "credentials"]);
-    expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenCalledWith({
-      configured: false,
-      credentialGeneration: 0,
-    });
+    expect(services.connectionSupervisor.applyCredentialIdentity).not.toHaveBeenCalled();
   });
 
-  it("propagates reconciled external credential identity to the connection fence", async () => {
+  it("does not let a late reconcile return bypass the ordered settings observer", async () => {
     const services = fakeServices();
     vi.mocked(services.credentialSession.reconcile).mockResolvedValueOnce({
       configured: true,
@@ -88,13 +133,7 @@ describe("PluginRuntime", () => {
 
     await runtime.refreshGlobalSettings();
 
-    expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenCalledWith({
-      configured: true,
-      credentialGeneration: 7,
-    });
-    expect(services.connectionSupervisor.applyCredentialIdentity).not.toHaveBeenCalledWith(
-      expect.objectContaining({ credentialFingerprint: expect.anything() }),
-    );
+    expect(services.connectionSupervisor.applyCredentialIdentity).not.toHaveBeenCalled();
   });
 
   it("observes PI-style credential saves and clears without exposing the fingerprint", async () => {
@@ -130,12 +169,61 @@ describe("PluginRuntime", () => {
     expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenLastCalledWith({
       configured: true,
       credentialGeneration: 2,
+      identityEpoch: 1,
     });
 
+    vi.mocked(services.connectionSupervisor.applyCredentialIdentity).mockClear();
     await listener?.({
       settings: {
         schemaVersion: 2,
         settingsRevision: 5,
+        appKey: "key-2",
+        appSecret: "secret-2",
+        credentialFingerprint: fingerprint,
+        credentialGeneration: 2,
+        accessToken: "token-only-update",
+        accessTokenExpiry: Date.now() + 60_000,
+        accessTokenFingerprint: fingerprint,
+        accessTokenVersion: 2,
+        preferences: {
+          dataMode: "automatic",
+          renderIntervalMs: 2_000,
+          backupPollIntervalMs: 15_000,
+        },
+      },
+      status: { baseKnown: true, persistenceDegraded: false },
+    });
+    expect(services.connectionSupervisor.applyCredentialIdentity).not.toHaveBeenCalled();
+
+    const replacementFingerprint = fingerprintCredentials("key-replaced", "secret-replaced");
+    await listener?.({
+      settings: {
+        schemaVersion: 2,
+        settingsRevision: 6,
+        appKey: "key-replaced",
+        appSecret: "secret-replaced",
+        credentialFingerprint: replacementFingerprint,
+        credentialGeneration: 2,
+        accessTokenVersion: 3,
+        preferences: {
+          dataMode: "automatic",
+          renderIntervalMs: 2_000,
+          backupPollIntervalMs: 15_000,
+        },
+      },
+      status: { baseKnown: true, persistenceDegraded: false },
+    });
+    expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenLastCalledWith({
+      configured: true,
+      credentialGeneration: 2,
+      identityEpoch: 2,
+    });
+
+    vi.mocked(services.connectionSupervisor.applyCredentialIdentity).mockClear();
+    await listener?.({
+      settings: {
+        schemaVersion: 2,
+        settingsRevision: 7,
         credentialGeneration: 3,
         accessTokenVersion: 2,
         preferences: {
@@ -149,12 +237,43 @@ describe("PluginRuntime", () => {
     expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenLastCalledWith({
       configured: false,
       credentialGeneration: 3,
+      identityEpoch: 3,
     });
     expect(JSON.stringify(vi.mocked(services.connectionSupervisor.applyCredentialIdentity).mock.calls))
       .not.toContain(fingerprint);
 
     await runtime.destroy();
     expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("does not invoke credential accessors while deriving the internal identity tuple", async () => {
+    const services = fakeServices();
+    let listener: SettingsListener | undefined;
+    vi.mocked(services.settingsRepository.subscribe).mockImplementation((next) => {
+      listener = next;
+      return vi.fn();
+    });
+    const runtime = new PluginRuntime(services);
+    await runtime.initialize();
+    const appKeyGetter = vi.fn(() => "must-not-be-read");
+    const unsafeSettings = {};
+    Object.defineProperty(unsafeSettings, "appKey", {
+      enumerable: true,
+      get: appKeyGetter,
+    });
+
+    await listener?.({
+      settings: unsafeSettings,
+      status: { baseKnown: true, persistenceDegraded: false },
+    } as never);
+
+    expect(appKeyGetter).not.toHaveBeenCalled();
+    expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenLastCalledWith({
+      configured: false,
+      credentialGeneration: 0,
+      identityEpoch: 1,
+    });
+    await runtime.destroy();
   });
 
   it("fences the connection immediately for PI credential save and clear commands", async () => {
@@ -182,6 +301,7 @@ describe("PluginRuntime", () => {
     expect(applyIdentity).toHaveBeenLastCalledWith({
       configured: true,
       credentialGeneration: current.credentialGeneration,
+      identityEpoch: expect.any(Number),
     });
 
     applyIdentity.mockClear();
@@ -193,7 +313,99 @@ describe("PluginRuntime", () => {
     expect(applyIdentity).toHaveBeenLastCalledWith({
       configured: false,
       credentialGeneration: current.credentialGeneration,
+      identityEpoch: expect.any(Number),
     });
+    await runtime.destroy();
+  });
+
+  it("replaces an open high-generation socket after an external legacy credential reset", async () => {
+    let current: GlobalSettings = configuredSettings("old-key", "old-secret", 10);
+    const sockets: RuntimeFakeSocket[] = [];
+    let approvalCalls = 0;
+    const runtime = createPluginRuntime({
+      settingsPersistence: {
+        getGlobalSettings: vi.fn(async () => current),
+        setGlobalSettings: vi.fn(async (settings) => { current = settings; }),
+      },
+      credentialSessionOptions: {
+        fetch: vi.fn(async () => ({
+          ok: true,
+          status: 200,
+          json: async () => ({ approval_key: ++approvalCalls === 1 ? "old-approval" : "new-approval" }),
+        })),
+      },
+      connectionSupervisorOptions: {
+        socketFactory: () => {
+          const socket = new RuntimeFakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+    });
+    await runtime.initialize();
+    void runtime.services.connectionSupervisor.retain();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    expect(runtime.services.connectionSupervisor.demand).toBe(1);
+    expect(runtime.services.connectionSupervisor.state).toBe("connecting");
+    expect(approvalCalls).toBe(1);
+    sockets[0].readyState = 1;
+    sockets[0].emit("open");
+    expect(runtime.services.connectionSupervisor.state).toBe("open");
+
+    current = { appKey: "legacy-new-key", appSecret: "legacy-new-secret" };
+    await runtime.refreshGlobalSettings();
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+
+    expect(sockets[0].terminateCalls).toBe(1);
+    expect(sockets).toHaveLength(2);
+    expect(runtime.services.connectionSupervisor.approvalIdentity)
+      .toEqual({ credentialGeneration: 1 });
+    expect(current).toMatchObject({
+      appKey: "legacy-new-key",
+      credentialGeneration: 1,
+      credentialFingerprint: fingerprintCredentials("legacy-new-key", "legacy-new-secret"),
+    });
+    await runtime.destroy();
+  });
+
+  it("closes an open high-generation socket without reconnecting after an external legacy clear", async () => {
+    let current: GlobalSettings = configuredSettings("old-key", "old-secret", 10);
+    const sockets: RuntimeFakeSocket[] = [];
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ approval_key: "old-approval" }),
+    }));
+    const runtime = createPluginRuntime({
+      settingsPersistence: {
+        getGlobalSettings: vi.fn(async () => current),
+        setGlobalSettings: vi.fn(async (settings) => { current = settings; }),
+      },
+      credentialSessionOptions: { fetch },
+      connectionSupervisorOptions: {
+        socketFactory: () => {
+          const socket = new RuntimeFakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+    });
+    await runtime.initialize();
+    void runtime.services.connectionSupervisor.retain();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0].readyState = 1;
+    sockets[0].emit("open");
+
+    current = {};
+    await runtime.refreshGlobalSettings();
+    runtime.services.connectionSupervisor.forceReconnect("must-stay-cleared");
+    await flush();
+
+    expect(sockets[0].terminateCalls).toBe(1);
+    expect(sockets).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(runtime.services.connectionSupervisor.state).toBe("idle");
+    expect(runtime.services.connectionSupervisor.demand).toBe(1);
     await runtime.destroy();
   });
 

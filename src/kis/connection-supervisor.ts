@@ -28,6 +28,8 @@ export interface ConnectionSupervisorDiagnostics {
 export interface ConnectionCredentialIdentity {
   readonly configured: boolean;
   readonly credentialGeneration: number;
+  /** Process-local authority order; persisted generations may reset after legacy replacement. */
+  readonly identityEpoch: number;
 }
 
 /** 최소 WebSocket 표면입니다. 테스트는 이 인터페이스만 구현하면 됩니다. */
@@ -269,15 +271,15 @@ export class ConnectionSupervisor {
     const normalized = this.normalizeCredentialIdentity(identity);
     if (!normalized || this.currentState === "stopped") return false;
     const previous = this.credentialIdentity;
-    if (previous && normalized.credentialGeneration < previous.credentialGeneration) {
+    if (previous && normalized.identityEpoch < previous.identityEpoch) {
       return false;
     }
     if (
       previous &&
-      normalized.credentialGeneration === previous.credentialGeneration &&
-      normalized.configured === previous.configured
+      normalized.identityEpoch === previous.identityEpoch
     ) {
-      return true;
+      return normalized.credentialGeneration === previous.credentialGeneration &&
+        normalized.configured === previous.configured;
     }
 
     this.credentialIdentity = normalized;
@@ -1100,13 +1102,16 @@ export class ConnectionSupervisor {
         typeof value !== "object" ||
         typeof value.configured !== "boolean" ||
         !Number.isSafeInteger(value.credentialGeneration) ||
-        value.credentialGeneration < 0
+        value.credentialGeneration < 0 ||
+        !Number.isSafeInteger(value.identityEpoch) ||
+        value.identityEpoch < 0
       ) {
         return undefined;
       }
       return Object.freeze({
         configured: value.configured,
         credentialGeneration: value.credentialGeneration,
+        identityEpoch: value.identityEpoch,
       });
     } catch {
       return undefined;
