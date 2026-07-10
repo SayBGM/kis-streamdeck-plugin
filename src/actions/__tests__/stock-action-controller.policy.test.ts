@@ -161,7 +161,12 @@ class FakeSubscriptions {
 }
 
 class FakeRest {
-  requests: Array<{ priority: string; signal?: AbortSignal; resolve: (value: QuoteSample) => void }> = [];
+  requests: Array<{
+    priority: string;
+    signal?: AbortSignal;
+    resolve: (value: QuoteSample) => void;
+    reject: (error: unknown) => void;
+  }> = [];
 
   requestQuote(input: { priority: string; signal?: AbortSignal }): Promise<QuoteSample> {
     return new Promise((resolve, reject) => {
@@ -171,7 +176,7 @@ class FakeRest {
       }
       const onAbort = () => reject(new Error("aborted"));
       input.signal?.addEventListener("abort", onAbort, { once: true });
-      this.requests.push({ priority: input.priority, signal: input.signal, resolve });
+      this.requests.push({ priority: input.priority, signal: input.signal, resolve, reject });
     });
   }
 }
@@ -419,5 +424,117 @@ describe("StockActionController automatic policy and lifecycle", () => {
     expect(test.subscriptions.subscriptions).toHaveLength(0);
     expect(test.rest.requests).toHaveLength(0);
     expect(test.images.at(-1)?.error?.code).toBe("NO_CREDENTIALS");
+  });
+
+  it.each(["desired", "stale", "parked", "rejected"] as const)(
+    "유효 WS 이후 %s 상태는 즉시 fallback REST를 시작한다",
+    async (state) => {
+      const test = setup();
+      test.settings.resolve();
+      await test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage: vi.fn() },
+      });
+      test.subscriptions.data(70_000);
+
+      test.subscriptions.state(state);
+      await Promise.resolve();
+
+      expect(test.rest.requests.map((request) => request.priority)).toEqual(["fallback"]);
+    },
+  );
+
+  it("초기 rejected도 grace를 기다리지 않고 fallback을 시작한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    test.subscriptions.state("rejected");
+    await Promise.resolve();
+
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["fallback"]);
+  });
+
+  it("REST 전용 장중은 즉시 initial 요청 후 설정 간격으로 fallback을 반복한다", async () => {
+    const test = setup();
+    test.settings.resolve({
+      preferences: {
+        dataMode: "rest-only",
+        renderIntervalMs: 2_000,
+        backupPollIntervalMs: 15_000,
+      },
+    });
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(test.subscriptions.subscriptions).toHaveLength(0);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial"]);
+    test.rest.requests[0]!.resolve(quote("rest", 70_000));
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial", "fallback"]);
+  });
+
+  it("장 마감은 모드와 관계없이 세션별 initial REST 한 번만 수행한다", async () => {
+    const test = setup();
+    test.clock.current = snapshot("CLOSED", 4_000);
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(test.subscriptions.subscriptions).toHaveLength(0);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial"]);
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(test.rest.requests).toHaveLength(1);
+  });
+
+  it("수동 갱신은 중복 요청을 singleflight하고 자동 정책의 5초 grace를 유지한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    const first = test.controller.manualRefresh("a");
+    const second = test.controller.manualRefresh("a");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["manual"]);
+    expect(test.images.at(-1)?.refreshing).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual(["manual", "fallback"]);
+    test.rest.requests[0]!.resolve(quote("rest", 72_000));
+    await Promise.all([first, second]);
+  });
+
+  it("fallback 실패 시 데이터가 없으면 BROKEN 오류 화면을 표시한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    test.rest.requests[0]!.reject(new Error("network"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(test.images.at(-1)?.connection).toBe("BROKEN");
+    expect(test.images.at(-1)?.error?.code).toBe("NETWORK");
   });
 });
