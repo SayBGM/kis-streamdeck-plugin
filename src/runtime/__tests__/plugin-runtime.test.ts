@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GlobalSettings } from "../../types/index.js";
 import { domesticStockAdapter } from "../../markets/market-adapter.js";
+import { fingerprintCredentials } from "../../kis/credential-session.js";
+import type { SettingsListener } from "../../settings/settings-repository.js";
 import {
   createPluginRuntime,
   PluginRuntime,
@@ -17,6 +19,7 @@ function fakeServices(): PluginRuntimeServices {
   const settingsRepository = {
     initialize: vi.fn(async () => ({ settings: {}, status: {} })),
     update: vi.fn(async () => ({ settings: {}, status: {} })),
+    subscribe: vi.fn(() => vi.fn()),
   };
   return {
     settingsRepository: settingsRepository as never,
@@ -24,7 +27,10 @@ function fakeServices(): PluginRuntimeServices {
       initialize: vi.fn(async () => ({ configured: false })),
       reconcile: vi.fn(async () => ({ configured: false })),
     } as never,
-    connectionSupervisor: { destroy: vi.fn() } as never,
+    connectionSupervisor: {
+      applyCredentialIdentity: vi.fn(),
+      destroy: vi.fn(),
+    } as never,
     subscriptionSupervisor: { destroy: vi.fn() } as never,
     restCoordinator: {} as never,
     renderScheduler: { destroy: vi.fn() } as never,
@@ -65,6 +71,130 @@ describe("PluginRuntime", () => {
     ready.resolve({ settings: {}, status: {} });
     await first;
     expect(order).toEqual(["settings:start", "settings:ready", "credentials"]);
+    expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenCalledWith({
+      configured: false,
+      credentialGeneration: 0,
+    });
+  });
+
+  it("propagates reconciled external credential identity to the connection fence", async () => {
+    const services = fakeServices();
+    vi.mocked(services.credentialSession.reconcile).mockResolvedValueOnce({
+      configured: true,
+      credentialGeneration: 7,
+      credentialFingerprint: "must-not-cross-connection-boundary",
+    });
+    const runtime = new PluginRuntime(services);
+
+    await runtime.refreshGlobalSettings();
+
+    expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenCalledWith({
+      configured: true,
+      credentialGeneration: 7,
+    });
+    expect(services.connectionSupervisor.applyCredentialIdentity).not.toHaveBeenCalledWith(
+      expect.objectContaining({ credentialFingerprint: expect.anything() }),
+    );
+  });
+
+  it("observes PI-style credential saves and clears without exposing the fingerprint", async () => {
+    const services = fakeServices();
+    let listener: SettingsListener | undefined;
+    const unsubscribe = vi.fn();
+    vi.mocked(services.settingsRepository.subscribe).mockImplementation((next) => {
+      listener = next;
+      return unsubscribe;
+    });
+    const runtime = new PluginRuntime(services);
+    await runtime.initialize();
+    vi.mocked(services.connectionSupervisor.applyCredentialIdentity).mockClear();
+
+    const fingerprint = fingerprintCredentials("key-2", "secret-2");
+    await listener?.({
+      settings: {
+        schemaVersion: 2,
+        settingsRevision: 4,
+        appKey: "key-2",
+        appSecret: "secret-2",
+        credentialFingerprint: fingerprint,
+        credentialGeneration: 2,
+        accessTokenVersion: 1,
+        preferences: {
+          dataMode: "automatic",
+          renderIntervalMs: 2_000,
+          backupPollIntervalMs: 15_000,
+        },
+      },
+      status: { baseKnown: true, persistenceDegraded: false },
+    });
+    expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenLastCalledWith({
+      configured: true,
+      credentialGeneration: 2,
+    });
+
+    await listener?.({
+      settings: {
+        schemaVersion: 2,
+        settingsRevision: 5,
+        credentialGeneration: 3,
+        accessTokenVersion: 2,
+        preferences: {
+          dataMode: "automatic",
+          renderIntervalMs: 2_000,
+          backupPollIntervalMs: 15_000,
+        },
+      },
+      status: { baseKnown: true, persistenceDegraded: false },
+    });
+    expect(services.connectionSupervisor.applyCredentialIdentity).toHaveBeenLastCalledWith({
+      configured: false,
+      credentialGeneration: 3,
+    });
+    expect(JSON.stringify(vi.mocked(services.connectionSupervisor.applyCredentialIdentity).mock.calls))
+      .not.toContain(fingerprint);
+
+    await runtime.destroy();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("fences the connection immediately for PI credential save and clear commands", async () => {
+    let current: GlobalSettings = {};
+    const runtime = createPluginRuntime({
+      settingsPersistence: {
+        getGlobalSettings: vi.fn(async () => current),
+        setGlobalSettings: vi.fn(async (settings) => { current = settings; }),
+      },
+    });
+    await runtime.initialize();
+    const applyIdentity = vi.spyOn(
+      runtime.services.connectionSupervisor,
+      "applyCredentialIdentity",
+    );
+    applyIdentity.mockClear();
+
+    await runtime.piController.handleCommand("pi", "domestic", {
+      type: "credentials/save",
+      requestId: "save-1",
+      settingsRevision: current.settingsRevision ?? 0,
+      appKey: "new-key",
+      appSecret: "new-secret",
+    });
+    expect(applyIdentity).toHaveBeenLastCalledWith({
+      configured: true,
+      credentialGeneration: current.credentialGeneration,
+    });
+
+    applyIdentity.mockClear();
+    await runtime.piController.handleCommand("pi", "domestic", {
+      type: "credentials/clear",
+      requestId: "clear-1",
+      settingsRevision: current.settingsRevision ?? 0,
+    });
+    expect(applyIdentity).toHaveBeenLastCalledWith({
+      configured: false,
+      credentialGeneration: current.credentialGeneration,
+    });
+    await runtime.destroy();
   });
 
   it("serializes a global settings event through a fresh repository read", async () => {

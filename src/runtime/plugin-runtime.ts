@@ -4,6 +4,8 @@ import { MarketClock } from "../core/market-clock.js";
 import { ConnectionSupervisor } from "../kis/connection-supervisor.js";
 import {
   CredentialSession,
+  fingerprintCredentials,
+  type CredentialIdentity,
   type CredentialSessionOptions,
 } from "../kis/credential-session.js";
 import { RestCoordinator } from "../kis/rest-coordinator.js";
@@ -27,6 +29,7 @@ import {
 import {
   SettingsRepository,
   type SettingsPersistence,
+  type SettingsSnapshot,
 } from "../settings/settings-repository.js";
 import type { Market } from "../types/index.js";
 
@@ -56,6 +59,7 @@ export class PluginRuntime {
   private initialization?: Promise<void>;
   private destruction?: Promise<void>;
   private destroyed = false;
+  private unsubscribeCredentialIdentity?: () => void;
 
   constructor(readonly services: PluginRuntimeServices) {}
 
@@ -76,6 +80,7 @@ export class PluginRuntime {
   }
 
   initialize(): Promise<void> {
+    this.observeCredentialIdentity();
     if (!this.initialization) {
       const operation = this.initializeOnce();
       const retryable = operation.catch((error: unknown) => {
@@ -93,9 +98,12 @@ export class PluginRuntime {
    */
   async refreshGlobalSettings(): Promise<void> {
     if (this.destroyed) return;
+    this.observeCredentialIdentity();
     await this.services.settingsRepository.update(() => undefined);
     if (this.destroyed) return;
-    await this.services.credentialSession.reconcile();
+    const identity = await this.services.credentialSession.reconcile();
+    if (this.destroyed) return;
+    this.applyCredentialIdentity(identity);
   }
 
   destroy(): Promise<void> {
@@ -109,10 +117,51 @@ export class PluginRuntime {
   private async initializeOnce(): Promise<void> {
     await this.services.settingsRepository.initialize();
     if (this.destroyed) return;
-    await this.services.credentialSession.initialize();
+    const identity = await this.services.credentialSession.initialize();
+    if (this.destroyed) return;
+    this.applyCredentialIdentity(identity);
+  }
+
+  private applyCredentialIdentity(identity: CredentialIdentity): void {
+    if (this.destroyed) return;
+    this.services.connectionSupervisor.applyCredentialIdentity({
+      configured: identity.configured,
+      credentialGeneration: identity.credentialGeneration,
+    });
+  }
+
+  private observeCredentialIdentity(): void {
+    if (this.destroyed || this.unsubscribeCredentialIdentity) return;
+    this.unsubscribeCredentialIdentity = this.services.settingsRepository.subscribe((snapshot) => {
+      if (this.destroyed) return;
+      this.applyCredentialIdentity(this.identityFromSnapshot(snapshot));
+    });
+  }
+
+  private identityFromSnapshot(snapshot: SettingsSnapshot): CredentialIdentity {
+    const credentialGeneration = Number.isSafeInteger(snapshot.settings.credentialGeneration) &&
+      snapshot.settings.credentialGeneration >= 0
+      ? snapshot.settings.credentialGeneration
+      : 0;
+    let configured = false;
+    try {
+      const appKey = snapshot.settings.appKey?.trim() ?? "";
+      const appSecret = snapshot.settings.appSecret?.trim() ?? "";
+      configured = snapshot.status.baseKnown &&
+        !snapshot.status.persistenceDegraded &&
+        appKey.length > 0 &&
+        appSecret.length > 0 &&
+        snapshot.settings.credentialFingerprint === fingerprintCredentials(appKey, appSecret);
+    } catch {
+      configured = false;
+    }
+    return Object.freeze({ configured, credentialGeneration });
   }
 
   private async destroyOnce(): Promise<void> {
+    const unsubscribeCredentialIdentity = this.unsubscribeCredentialIdentity;
+    this.unsubscribeCredentialIdentity = undefined;
+    try { unsubscribeCredentialIdentity?.(); } catch { /* best-effort shutdown */ }
     const cleanup = [
       () => this.services.piController.destroy(),
       () => this.services.subscriptionSupervisor.destroy(),

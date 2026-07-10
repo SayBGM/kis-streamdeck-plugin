@@ -4,6 +4,7 @@ import {
   ConnectionSupervisor,
   type SocketLike,
 } from "../connection-supervisor.js";
+import { SubscriptionSupervisor } from "../subscription-supervisor.js";
 
 type Listener = (...args: unknown[]) => void;
 
@@ -59,6 +60,12 @@ function lease(
 async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 describe("ConnectionSupervisor", () => {
@@ -678,6 +685,155 @@ describe("ConnectionSupervisor", () => {
       },
       body: { input: { tr_id: "TR", tr_key: "KEY" } },
     })]);
+  });
+
+  it("breaks the old socket before reconnecting with a newer credential generation", async () => {
+    expect(supervisor.applyCredentialIdentity({
+      configured: true,
+      credentialGeneration: 1,
+    })).toBe(true);
+    const oldSocket = await retainAndOpen();
+    getApprovalKey.mockResolvedValue(lease("approval-2", 2));
+
+    expect(supervisor.applyCredentialIdentity({
+      configured: true,
+      credentialGeneration: 2,
+    })).toBe(true);
+
+    expect(oldSocket.terminateCalls).toBe(1);
+    expect(supervisor.demand).toBe(1);
+    expect(supervisor.state).toBe("connecting");
+    await flush();
+    expect(sockets).toHaveLength(2);
+    expect(supervisor.approvalIdentity).toEqual({ credentialGeneration: 2 });
+  });
+
+  it("keeps demand but suppresses approval and reconnect work while credentials are cleared", async () => {
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1 });
+    const oldSocket = await retainAndOpen();
+    getApprovalKey.mockClear();
+
+    expect(supervisor.applyCredentialIdentity({
+      configured: false,
+      credentialGeneration: 2,
+    })).toBe(true);
+
+    expect(oldSocket.terminateCalls).toBe(1);
+    expect(supervisor.state).toBe("idle");
+    expect(supervisor.demand).toBe(1);
+    advance(120_000);
+    await flush();
+    expect(getApprovalKey).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+
+    getApprovalKey.mockResolvedValue(lease("approval-3", 3));
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 3 });
+    await flush();
+    expect(sockets).toHaveLength(2);
+    expect(supervisor.demand).toBe(1);
+  });
+
+  it("fences an in-flight approval result from the old credential generation", async () => {
+    const first = deferred<ApprovalKeyLease>();
+    const second = deferred<ApprovalKeyLease>();
+    getApprovalKey.mockReset()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1 });
+    void supervisor.retain();
+    await flush();
+
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2 });
+    await flush();
+    first.resolve(lease("approval-old", 1));
+    await flush();
+    expect(sockets).toHaveLength(0);
+
+    second.resolve(lease("approval-new", 2));
+    await flush();
+    expect(sockets).toHaveLength(1);
+    expect(supervisor.approvalIdentity).toEqual({ credentialGeneration: 2 });
+  });
+
+  it("does not churn the socket for token-only updates in the same credential generation", async () => {
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1 });
+    const socket = await retainAndOpen();
+    const approvalCalls = getApprovalKey.mock.calls.length;
+
+    expect(supervisor.applyCredentialIdentity({
+      configured: true,
+      credentialGeneration: 1,
+    })).toBe(true);
+
+    expect(socket.terminateCalls).toBe(0);
+    expect(supervisor.state).toBe("open");
+    expect(getApprovalKey).toHaveBeenCalledTimes(approvalCalls);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("ignores a late lower credential identity and never restarts after destroy", async () => {
+    getApprovalKey.mockResolvedValue(lease("approval-2", 2));
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2 });
+    const socket = await retainAndOpen();
+
+    expect(supervisor.applyCredentialIdentity({
+      configured: false,
+      credentialGeneration: 1,
+    })).toBe(false);
+    expect(socket.terminateCalls).toBe(0);
+
+    supervisor.destroy();
+    expect(supervisor.applyCredentialIdentity({
+      configured: true,
+      credentialGeneration: 3,
+    })).toBe(false);
+    await flush();
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("recovers a retained subscription live → pending → live across an identity reconnect", async () => {
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 1 });
+    const subscriptions = new SubscriptionSupervisor({
+      connection: supervisor,
+      now: () => now,
+      monotonicNow: () => now,
+      setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    });
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    const handle = subscriptions.subscribe(descriptor);
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    expect(supervisor.demand).toBe(1);
+    expect(supervisor.state).toBe("connecting");
+    expect(getApprovalKey).toHaveBeenCalledOnce();
+    expect(supervisor.approvalIdentity).toEqual({ credentialGeneration: 1 });
+    sockets[0].readyState = 1;
+    sockets[0].emit("open");
+    await flush();
+    sockets[0].emit("message", JSON.stringify({
+      header: { tr_id: descriptor.trId },
+      body: { msg_cd: "OPSP0000", output: { tr_key: descriptor.trKey } },
+    }));
+    expect(handle.snapshot?.state).toBe("live");
+
+    getApprovalKey.mockResolvedValue(lease("approval-2", 2));
+    supervisor.applyCredentialIdentity({ configured: true, credentialGeneration: 2 });
+    expect(handle.snapshot?.state).toBe("desired");
+    await flush();
+    sockets[1].readyState = 1;
+    sockets[1].emit("open");
+    await flush();
+    advance(100);
+    expect(handle.snapshot?.state).toBe("pending");
+    sockets[1].emit("message", JSON.stringify({
+      header: { tr_id: descriptor.trId },
+      body: { msg_cd: "OPSP0000", output: { tr_key: descriptor.trKey } },
+    }));
+    expect(handle.snapshot?.state).toBe("live");
+    expect(supervisor.demand).toBe(1);
+    subscriptions.destroy();
   });
 
   it("fails a raw send safely and begins recovery", async () => {

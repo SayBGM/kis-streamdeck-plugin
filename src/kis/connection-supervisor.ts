@@ -24,6 +24,12 @@ export interface ConnectionSupervisorDiagnostics {
   readonly reconnectAttempts: number;
 }
 
+/** WebSocket 계층에 secret/fingerprint를 넘기지 않는 최소 자격증명 경계입니다. */
+export interface ConnectionCredentialIdentity {
+  readonly configured: boolean;
+  readonly credentialGeneration: number;
+}
+
 /** 최소 WebSocket 표면입니다. 테스트는 이 인터페이스만 구현하면 됩니다. */
 export interface SocketLike {
   readonly readyState: number;
@@ -73,6 +79,7 @@ interface ApprovalIdentity {
 
 interface ApprovalRequest {
   readonly epoch: number;
+  readonly credentialGeneration?: number;
   readonly promise: Promise<ApprovalKeyLease | undefined>;
 }
 
@@ -181,6 +188,7 @@ export class ConnectionSupervisor {
   private approval: ApprovalKeyLease | undefined;
   private approvalRequestEpoch = 0;
   private approvalRequest: ApprovalRequest | undefined;
+  private credentialIdentity: ConnectionCredentialIdentity | undefined;
   private readonly messageListeners = new Set<SupervisorListener<string>>();
   private readonly stateListeners = new Set<SupervisorListener<ConnectionState>>();
 
@@ -253,9 +261,56 @@ export class ConnectionSupervisor {
     return this.ensureConnection();
   }
 
+  /**
+   * 자격증명 identity가 바뀌면 기존 approval/socket/control capability를 한 번에
+   * 폐기합니다. retain demand는 유지되므로 새 identity가 구성되면 즉시 복구합니다.
+   */
+  applyCredentialIdentity(identity: ConnectionCredentialIdentity): boolean {
+    const normalized = this.normalizeCredentialIdentity(identity);
+    if (!normalized || this.currentState === "stopped") return false;
+    const previous = this.credentialIdentity;
+    if (previous && normalized.credentialGeneration < previous.credentialGeneration) {
+      return false;
+    }
+    if (
+      previous &&
+      normalized.credentialGeneration === previous.credentialGeneration &&
+      normalized.configured === previous.configured
+    ) {
+      return true;
+    }
+
+    this.credentialIdentity = normalized;
+    this.clearReconnectTimer();
+    this.clearApprovalRefreshTimer();
+    this.clearSocketTimers();
+    const changedError = supervisorError(
+      "SETTINGS",
+      normalized.configured,
+      normalized.configured
+        ? "자격증명이 변경되어 WebSocket 연결을 다시 시작합니다."
+        : "자격증명이 없어 WebSocket 연결을 중지했습니다.",
+    );
+    this.cancelAttempt(changedError);
+    this.cancelReconnectWait(changedError);
+    this.disposeCurrentSocket();
+    this.invalidateApprovalLease();
+
+    if (!normalized.configured || this.retainCount === 0) {
+      this.setState("idle");
+      return true;
+    }
+    void this.beginConnect().catch(() => undefined);
+    return true;
+  }
+
   /** 명시적 재연결. 대기 중이면 기존 단일 타이머를 유지합니다. */
   forceReconnect(_reason = "requested"): void {
-    if (this.currentState === "stopped" || this.retainCount === 0) return;
+    if (
+      this.currentState === "stopped" ||
+      this.retainCount === 0 ||
+      this.credentialIdentity?.configured === false
+    ) return;
     if (this.currentState === "reconnect_wait") return;
     this.recover("forced reconnect");
   }
@@ -265,7 +320,9 @@ export class ConnectionSupervisor {
    * 기존 승인 키는 유지됩니다. 이전 갱신 결과는 request epoch로 폐기합니다.
    */
   async refreshApprovalKey(): Promise<boolean> {
-    if (this.currentState === "stopped") return false;
+    if (this.currentState === "stopped" || this.credentialIdentity?.configured === false) {
+      return false;
+    }
     try {
       const lease = await this.getOrStartApprovalRequest().promise;
       if (!lease) return false;
@@ -321,6 +378,7 @@ export class ConnectionSupervisor {
 
   private ensureConnection(): Promise<void> {
     if (this.currentState === "stopped") return Promise.reject(stoppedError());
+    if (this.credentialIdentity?.configured === false) return Promise.resolve();
     if (this.retainCount === 0 || this.currentState === "open") return Promise.resolve();
     if (this.currentState === "connecting" && this.connectionAttempt) {
       return this.connectionAttempt.promise;
@@ -332,6 +390,10 @@ export class ConnectionSupervisor {
   }
 
   private beginConnect(): Promise<void> {
+    if (this.credentialIdentity?.configured === false) {
+      this.setState("idle");
+      return Promise.resolve();
+    }
     this.clearReconnectTimer();
     const attempt = this.createAttempt();
     this.connectionAttempt = attempt;
@@ -414,7 +476,14 @@ export class ConnectionSupervisor {
         try {
           const lease = await this.getOrStartApprovalRequest().promise;
           if (!this.isCurrentAttempt(attempt)) return;
-          if (!lease) continue;
+          if (!lease) {
+            this.failAttempt(attempt, supervisorError(
+              "AUTH_REJECTED",
+              true,
+              "현재 자격증명 세대의 승인 키를 가져오지 못했습니다.",
+            ));
+            return;
+          }
         } catch {
           this.failAttempt(attempt, supervisorError(
             "AUTH_REJECTED",
@@ -467,8 +536,9 @@ export class ConnectionSupervisor {
   private getOrStartApprovalRequest(): ApprovalRequest {
     if (this.approvalRequest) return this.approvalRequest;
     const epoch = ++this.approvalRequestEpoch;
-    const promise = this.performApprovalRequest(epoch);
-    const request: ApprovalRequest = { epoch, promise };
+    const credentialGeneration = this.credentialIdentity?.credentialGeneration;
+    const promise = this.performApprovalRequest(epoch, credentialGeneration);
+    const request: ApprovalRequest = { epoch, credentialGeneration, promise };
     this.approvalRequest = request;
     void promise.then(
       () => this.clearApprovalRequest(request),
@@ -477,9 +547,22 @@ export class ConnectionSupervisor {
     return request;
   }
 
-  private async performApprovalRequest(epoch: number): Promise<ApprovalKeyLease | undefined> {
+  private async performApprovalRequest(
+    epoch: number,
+    credentialGeneration: number | undefined,
+  ): Promise<ApprovalKeyLease | undefined> {
     const lease = this.normalizeApprovalLease(await this.credentials.getApprovalKey());
     if (this.isStopped() || epoch !== this.approvalRequestEpoch) return undefined;
+    if (
+      this.credentialIdentity &&
+      (
+        !this.credentialIdentity.configured ||
+        credentialGeneration !== this.credentialIdentity.credentialGeneration ||
+        lease.credentialGeneration !== this.credentialIdentity.credentialGeneration
+      )
+    ) {
+      return undefined;
+    }
     if (
       this.approval &&
       lease.credentialGeneration < this.approval.credentialGeneration
@@ -564,6 +647,10 @@ export class ConnectionSupervisor {
 
   private scheduleReconnect(): void {
     if (this.currentState === "stopped") return;
+    if (this.credentialIdentity?.configured === false) {
+      this.setState("idle");
+      return;
+    }
     if (this.retainCount === 0) {
       this.setState("idle");
       return;
@@ -769,7 +856,12 @@ export class ConnectionSupervisor {
   }
 
   private startApprovalRefreshTimer(): void {
-    if (this.retainCount === 0 || this.currentState === "stopped" || this.approvalRefreshTimer !== undefined) return;
+    if (
+      this.retainCount === 0 ||
+      this.currentState === "stopped" ||
+      this.credentialIdentity?.configured === false ||
+      this.approvalRefreshTimer !== undefined
+    ) return;
     try {
       this.approvalRefreshTimer = this.setIntervalFn(() => {
         void this.refreshApprovalKey().catch(() => undefined);
@@ -926,7 +1018,8 @@ export class ConnectionSupervisor {
   private isCurrentAttempt(attempt: ConnectionAttempt): boolean {
     return this.currentState === "connecting" &&
       this.connectionAttempt === attempt &&
-      this.retainCount > 0;
+      this.retainCount > 0 &&
+      this.credentialIdentity?.configured !== false;
   }
 
   private isStopped(): boolean {
@@ -996,6 +1089,28 @@ export class ConnectionSupervisor {
       credentialGeneration: value.credentialGeneration,
       credentialFingerprint: value.credentialFingerprint,
     });
+  }
+
+  private normalizeCredentialIdentity(
+    value: ConnectionCredentialIdentity,
+  ): ConnectionCredentialIdentity | undefined {
+    try {
+      if (
+        !value ||
+        typeof value !== "object" ||
+        typeof value.configured !== "boolean" ||
+        !Number.isSafeInteger(value.credentialGeneration) ||
+        value.credentialGeneration < 0
+      ) {
+        return undefined;
+      }
+      return Object.freeze({
+        configured: value.configured,
+        credentialGeneration: value.credentialGeneration,
+      });
+    } catch {
+      return undefined;
+    }
   }
 
   private isValidControlCommand(command: KisControlCommand): boolean {

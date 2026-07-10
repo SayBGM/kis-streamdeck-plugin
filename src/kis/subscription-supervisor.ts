@@ -236,6 +236,7 @@ export class SubscriptionSupervisor {
     const descriptor = this.normalizeDescriptor(descriptorInput);
     const key = descriptorKey(descriptor);
     let entry = this.entries.get(key);
+    let retainConnection = false;
     if (!entry) {
       entry = {
         key,
@@ -258,10 +259,7 @@ export class SubscriptionSupervisor {
         waitingTarget: undefined,
       };
       this.entries.set(key, entry);
-      void Promise.resolve(this.connection.retain()).then(
-        () => this.pump(),
-        () => this.recordSettingsFailure(),
-      );
+      retainConnection = true;
     }
     this.retiredDataKeys.delete(key);
     const reappeared = entry.removing && entry.refs.size === 0;
@@ -269,6 +267,14 @@ export class SubscriptionSupervisor {
 
     const ref: Ref = { observer: this.normalizeObserver(observer), entry, released: false };
     entry.refs.add(ref);
+    if (retainConnection) {
+      // retain() may synchronously publish `connecting`; the ref must already exist
+      // so that the state handler cannot delete this new desired entry reentrantly.
+      void Promise.resolve(this.connection.retain()).then(
+        () => this.pump(),
+        () => this.recordSettingsFailure(),
+      );
+    }
     this.enforceSubscriptionCap();
     if (reappeared) this.wakeRetargetWaiters(entry);
     this.publishState(entry, ref);
