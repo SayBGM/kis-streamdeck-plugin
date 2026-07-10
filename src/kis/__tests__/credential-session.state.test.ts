@@ -8,6 +8,7 @@ import {
 import {
   CredentialSession,
   fingerprintCredentials,
+  type CredentialSettingsPort,
 } from "../credential-session.js";
 
 function expectedFingerprint(appKey: string, appSecret: string): string {
@@ -41,6 +42,85 @@ function makeRepository(initial: unknown): {
 }
 
 describe("CredentialSession credential state", () => {
+  it("returns the latest identity after credentials are saved following bootstrap", async () => {
+    const { repository } = makeRepository(migrateGlobalSettings({}));
+    const session = new CredentialSession(repository);
+
+    await expect(session.initialize()).resolves.toEqual({
+      configured: false,
+      credentialGeneration: 0,
+    });
+    await session.saveCredentials("key", "secret");
+
+    await expect(session.initialize()).resolves.toMatchObject({
+      configured: true,
+      credentialGeneration: 1,
+      credentialFingerprint: expectedFingerprint("key", "secret"),
+    });
+  });
+
+  it("returns the latest identity after credentials are cleared following bootstrap", async () => {
+    const fingerprint = expectedFingerprint("key", "secret");
+    const { repository } = makeRepository(migrateGlobalSettings({
+      appKey: "key",
+      appSecret: "secret",
+      credentialFingerprint: fingerprint,
+      credentialGeneration: 4,
+      accessTokenVersion: 6,
+    }));
+    const session = new CredentialSession(repository);
+
+    await expect(session.initialize()).resolves.toMatchObject({ configured: true });
+    await session.clearCredentials();
+
+    await expect(session.initialize()).resolves.toEqual({
+      configured: false,
+      credentialGeneration: 5,
+    });
+  });
+
+  it("treats readiness only as a barrier and reads the latest repository snapshot", async () => {
+    const staleSettings = migrateGlobalSettings({});
+    const latestSettings = migrateGlobalSettings({
+      appKey: "key",
+      appSecret: "secret",
+      credentialFingerprint: expectedFingerprint("key", "secret"),
+      credentialGeneration: 2,
+    });
+    const staleSnapshot = Object.freeze({
+      settings: staleSettings,
+      status: Object.freeze({ baseKnown: true, persistenceDegraded: false }),
+    });
+    const latestSnapshot = Object.freeze({
+      settings: latestSettings,
+      status: Object.freeze({ baseKnown: true, persistenceDegraded: false }),
+    });
+    let releaseReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      releaseReady = resolve;
+    });
+    const port: CredentialSettingsPort = {
+      whenReady: vi.fn(async () => {
+        await ready;
+        return staleSnapshot;
+      }),
+      getSnapshot: vi.fn(() => latestSnapshot),
+      update: vi.fn(async () => latestSnapshot),
+    };
+    const session = new CredentialSession(port);
+
+    const pending = session.initialize();
+    releaseReady();
+
+    await expect(pending).resolves.toMatchObject({
+      configured: true,
+      credentialGeneration: 2,
+      credentialFingerprint: expectedFingerprint("key", "secret"),
+    });
+    expect(port.getSnapshot).toHaveBeenCalled();
+    expect(port.update).not.toHaveBeenCalled();
+  });
+
   it("singleflights concurrent bootstrap and memoizes the successful normalized state", async () => {
     const fingerprint = expectedFingerprint("key", "secret");
     const { repository, persistence } = makeRepository(migrateGlobalSettings({
@@ -416,6 +496,35 @@ describe("CredentialSession credential state", () => {
 
     expect(caught).toMatchObject({ code: "PROTOCOL", scope: "auth" });
     expect(JSON.stringify(caught)).not.toContain("raw-secret");
+    expect(readDisk()).toHaveProperty("accessToken", "current-token");
+  });
+
+  it("rejects a revoked invalidation proxy without leaking a native TypeError", async () => {
+    const now = 1_800_000_000_000;
+    const fingerprint = expectedFingerprint("key", "secret");
+    const { repository, readDisk } = makeRepository(migrateGlobalSettings({
+      appKey: "key",
+      appSecret: "secret",
+      credentialFingerprint: fingerprint,
+      credentialGeneration: 3,
+      accessToken: "current-token",
+      accessTokenExpiry: now + 60 * 60_000,
+      accessTokenFingerprint: fingerprint,
+      accessTokenVersion: 9,
+    }));
+    const session = new CredentialSession(repository, { now: () => now });
+    const revoked = Proxy.revocable({
+      credentialGeneration: 3,
+      credentialFingerprint: fingerprint,
+      tokenVersion: 9,
+    }, {});
+    revoked.revoke();
+
+    const caught = await session.invalidateAccessToken(revoked.proxy).catch((error) => error);
+
+    expect(caught).toMatchObject({ code: "PROTOCOL", scope: "auth" });
+    expect(caught).not.toBeInstanceOf(TypeError);
+    expect(JSON.stringify(caught)).not.toContain("revoked");
     expect(readDisk()).toHaveProperty("accessToken", "current-token");
   });
 

@@ -293,7 +293,7 @@ function credentialFlightKey(credentials: NormalizedCredentials): string {
 }
 
 function parseAccessTokenExpectation(value: unknown): AccessTokenExpectation {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (typeof value !== "object" || value === null) {
     throw invalidAuthInputError();
   }
 
@@ -301,6 +301,7 @@ function parseAccessTokenExpectation(value: unknown): AccessTokenExpectation {
   let symbols: symbol[];
   let descriptors: Record<string, PropertyDescriptor>;
   try {
+    if (Array.isArray(value)) throw invalidAuthInputError();
     prototype = Object.getPrototypeOf(value) as object | null;
     symbols = Object.getOwnPropertySymbols(value);
     descriptors = Object.getOwnPropertyDescriptors(value);
@@ -348,7 +349,7 @@ export class CredentialSession {
   private readonly clearTimeout: CredentialSessionOptions["clearTimeout"];
   private readonly accessTokenFlights = new Map<string, Promise<AccessTokenLease>>();
   private readonly approvalKeyFlights = new Map<string, Promise<ApprovalKeyLease>>();
-  private initialization?: Promise<CredentialIdentity>;
+  private initialization?: Promise<void>;
 
   constructor(repository: CredentialSettingsPort, options: CredentialSessionOptions = {}) {
     this.repository = repository;
@@ -359,7 +360,12 @@ export class CredentialSession {
     this.clearTimeout = options.clearTimeout ?? defaultClearTimeout;
   }
 
-  initialize(): Promise<CredentialIdentity> {
+  async initialize(): Promise<CredentialIdentity> {
+    await this.ensureInitialized();
+    return identityFromSnapshot(this.repository.getSnapshot());
+  }
+
+  private ensureInitialized(): Promise<void> {
     if (this.initialization) return this.initialization;
 
     const initialization = this.bootstrap().catch((error: unknown) => {
@@ -372,14 +378,15 @@ export class CredentialSession {
     return initialization;
   }
 
-  private async bootstrap(): Promise<CredentialIdentity> {
-    const ready = await this.repository.whenReady();
+  private async bootstrap(): Promise<void> {
+    await this.repository.whenReady();
+    const current = this.repository.getSnapshot();
     if (
-      ready.status.baseKnown &&
-      !ready.status.persistenceDegraded &&
-      !credentialBootstrapNeeded(ready.settings)
+      current.status.baseKnown &&
+      !current.status.persistenceDegraded &&
+      !credentialBootstrapNeeded(current.settings)
     ) {
-      return identityFromSnapshot(ready);
+      return;
     }
 
     const snapshot = await this.repository.update((draft) => {
@@ -416,7 +423,6 @@ export class CredentialSession {
     if (!snapshot.status.baseKnown || snapshot.status.persistenceDegraded) {
       throw settingsReadinessError();
     }
-    return identityFromSnapshot(snapshot);
   }
 
   async saveCredentials(appKey: unknown, appSecret: unknown): Promise<CredentialIdentity> {
