@@ -68,6 +68,13 @@ interface ApprovalRequest {
   readonly promise: Promise<ApprovalKeyLease | undefined>;
 }
 
+interface ReconnectWait {
+  readonly promise: Promise<void>;
+  resolve(): void;
+  reject(error: KisError): void;
+  settled: boolean;
+}
+
 const SOCKET_OPEN = 1;
 const CONNECT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_IDLE_MS = 15_000;
@@ -146,6 +153,7 @@ export class ConnectionSupervisor {
   private socketEpoch = 0;
   private attemptEpoch = 0;
   private connectionAttempt: ConnectionAttempt | undefined;
+  private reconnectWait: ReconnectWait | undefined;
   private reconnectTimer: TimerHandle | undefined;
   private connectTimeoutTimer: TimerHandle | undefined;
   private heartbeatIntervalTimer: TimerHandle | undefined;
@@ -154,6 +162,10 @@ export class ConnectionSupervisor {
   private stableLivenessTimer: TimerHandle | undefined;
   private reconnectAttempts = 0;
   private reconnectGeneration = 0;
+  private connectTimeoutGeneration = 0;
+  private heartbeatIntervalGeneration = 0;
+  private heartbeatTimeoutGeneration = 0;
+  private stableLivenessGeneration = 0;
   private lastActivityAt = 0;
   private openedAt = 0;
   private hasConfirmedLiveness = false;
@@ -281,8 +293,9 @@ export class ConnectionSupervisor {
     this.clearApprovalRefreshTimer();
     this.clearSocketTimers();
     this.cancelAttempt(stoppedError());
+    this.cancelReconnectWait(stoppedError());
     this.disposeCurrentSocket();
-    this.approval = undefined;
+    this.invalidateApprovalLease();
     this.setState("stopped");
     this.messageListeners.clear();
     this.stateListeners.clear();
@@ -295,7 +308,7 @@ export class ConnectionSupervisor {
       return this.connectionAttempt.promise;
     }
     if (this.currentState === "reconnect_wait") {
-      return Promise.resolve();
+      return this.getOrCreateReconnectWait().promise;
     }
     return this.beginConnect();
   }
@@ -335,6 +348,46 @@ export class ConnectionSupervisor {
       settled: false,
     };
     return attempt;
+  }
+
+  private getOrCreateReconnectWait(): ReconnectWait {
+    if (this.reconnectWait) return this.reconnectWait;
+    let resolvePromise!: () => void;
+    let rejectPromise!: (error: KisError) => void;
+    const reconnectWait: ReconnectWait = {
+      promise: new Promise<void>((resolve, reject) => {
+        resolvePromise = resolve;
+        rejectPromise = reject;
+      }),
+      resolve: () => {
+        if (reconnectWait.settled) return;
+        reconnectWait.settled = true;
+        resolvePromise();
+      },
+      reject: (error) => {
+        if (reconnectWait.settled) return;
+        reconnectWait.settled = true;
+        rejectPromise(error);
+      },
+      settled: false,
+    };
+    this.reconnectWait = reconnectWait;
+    void reconnectWait.promise.catch(() => undefined);
+    return reconnectWait;
+  }
+
+  private resolveReconnectWait(): void {
+    const reconnectWait = this.reconnectWait;
+    if (!reconnectWait) return;
+    this.reconnectWait = undefined;
+    reconnectWait.resolve();
+  }
+
+  private cancelReconnectWait(error: KisError): void {
+    const reconnectWait = this.reconnectWait;
+    if (!reconnectWait) return;
+    this.reconnectWait = undefined;
+    reconnectWait.reject(error);
   }
 
   private async acquireApprovalAndCreateSocket(attempt: ConnectionAttempt): Promise<void> {
@@ -424,6 +477,12 @@ export class ConnectionSupervisor {
     if (this.approvalRequest === request) this.approvalRequest = undefined;
   }
 
+  private invalidateApprovalLease(): void {
+    this.approval = undefined;
+    this.approvalRequestEpoch += 1;
+    this.approvalRequest = undefined;
+  }
+
   private handleOpen(socket: SocketLike, socketEpoch: number, attempt: ConnectionAttempt): void {
     if (!this.isCurrentSocket(socket, socketEpoch) || !this.isCurrentAttempt(attempt)) return;
     this.clearConnectTimeout();
@@ -437,6 +496,7 @@ export class ConnectionSupervisor {
     if (!this.isCurrentSocket(socket, socketEpoch) || this.currentState !== "open") {
       return;
     }
+    this.resolveReconnectWait();
     this.startHeartbeat(socket, socketEpoch);
     this.startStableLivenessTimer(socket, socketEpoch);
   }
@@ -445,8 +505,8 @@ export class ConnectionSupervisor {
     if (!this.isCurrentSocket(socket, socketEpoch)) return;
     this.handleActivity(socket, socketEpoch);
     const raw = this.toRawMessage(data);
-    this.publish(this.messageListeners, raw);
     if (this.isPingPong(raw)) this.sendRaw(raw);
+    this.publish(this.messageListeners, raw);
   }
 
   private handleActivity(socket: SocketLike, socketEpoch: number): void {
@@ -468,6 +528,7 @@ export class ConnectionSupervisor {
     this.recordError(error);
     attempt.reject(error);
     this.connectionAttempt = undefined;
+    this.cancelReconnectWait(error);
     this.disposeCurrentSocket();
     this.clearSocketTimers();
     this.scheduleReconnect();
@@ -490,6 +551,7 @@ export class ConnectionSupervisor {
       return;
     }
     if (this.reconnectTimer !== undefined) return;
+    const reconnectWait = this.getOrCreateReconnectWait();
     const delay = this.nextReconnectDelay();
     const generation = ++this.reconnectGeneration;
     this.setState("reconnect_wait");
@@ -498,6 +560,13 @@ export class ConnectionSupervisor {
       this.currentState !== "reconnect_wait" ||
       this.retainCount === 0
     ) {
+      if (this.reconnectWait === reconnectWait) {
+        this.cancelReconnectWait(supervisorError(
+          "NETWORK",
+          true,
+          "WebSocket 재연결 시도가 취소되었습니다.",
+        ));
+      }
       return;
     }
     try {
@@ -519,7 +588,11 @@ export class ConnectionSupervisor {
       }
       this.reconnectTimer = timer;
       this.reconnectAttempts = Math.min(this.reconnectAttempts + 1, RECONNECT_DELAYS_MS.length - 1);
-      this.diagnostics.increment("websocketReconnects");
+      try {
+        this.diagnostics.increment("websocketReconnects");
+      } catch {
+        // Diagnostics cannot cancel an already-armed reconnect timer.
+      }
     } catch {
       this.setState("idle");
       this.recordFailure("NETWORK", true, "WebSocket 재연결 타이머를 시작하지 못했습니다.");
@@ -540,9 +613,12 @@ export class ConnectionSupervisor {
 
   private startConnectTimeout(socket: SocketLike, socketEpoch: number, attempt: ConnectionAttempt): void {
     this.clearConnectTimeout();
+    const generation = ++this.connectTimeoutGeneration;
     try {
-      this.connectTimeoutTimer = this.setTimeoutFn(() => {
+      const timer = this.setTimeoutFn(() => {
+        if (generation !== this.connectTimeoutGeneration) return;
         this.connectTimeoutTimer = undefined;
+        this.connectTimeoutGeneration += 1;
         if (!this.isCurrentSocket(socket, socketEpoch) || !this.isCurrentAttempt(attempt)) return;
         this.failAttempt(attempt, supervisorError(
           "TIMEOUT",
@@ -550,6 +626,19 @@ export class ConnectionSupervisor {
           "WebSocket 연결 시간이 초과되었습니다.",
         ));
       }, CONNECT_TIMEOUT_MS);
+      if (
+        generation !== this.connectTimeoutGeneration ||
+        !this.isCurrentSocket(socket, socketEpoch) ||
+        !this.isCurrentAttempt(attempt)
+      ) {
+        try {
+          this.clearTimeoutFn(timer);
+        } catch {
+          // The generation guard makes an already-queued callback inert.
+        }
+        return;
+      }
+      this.connectTimeoutTimer = timer;
     } catch {
       this.failAttempt(attempt, supervisorError(
         "NETWORK",
@@ -561,8 +650,10 @@ export class ConnectionSupervisor {
 
   private startHeartbeat(socket: SocketLike, socketEpoch: number): void {
     this.clearHeartbeatTimers();
+    const generation = ++this.heartbeatIntervalGeneration;
     try {
-      this.heartbeatIntervalTimer = this.setIntervalFn(() => {
+      const timer = this.setIntervalFn(() => {
+        if (generation !== this.heartbeatIntervalGeneration) return;
         if (!this.isCurrentSocket(socket, socketEpoch) || this.currentState !== "open") return;
         if (this.awaitingHeartbeat || this.safeNow() - this.lastActivityAt < HEARTBEAT_IDLE_MS) return;
         if (typeof socket.ping !== "function") {
@@ -577,6 +668,19 @@ export class ConnectionSupervisor {
           this.recover("heartbeat ping failed");
         }
       }, HEARTBEAT_IDLE_MS);
+      if (
+        generation !== this.heartbeatIntervalGeneration ||
+        !this.isCurrentSocket(socket, socketEpoch) ||
+        this.currentState !== "open"
+      ) {
+        try {
+          this.clearIntervalFn(timer);
+        } catch {
+          // The generation guard makes an already-queued callback inert.
+        }
+        return;
+      }
+      this.heartbeatIntervalTimer = timer;
     } catch {
       this.recover("heartbeat timer failed");
     }
@@ -584,12 +688,28 @@ export class ConnectionSupervisor {
 
   private startHeartbeatTimeout(socket: SocketLike, socketEpoch: number): void {
     this.clearHeartbeatTimeout();
+    const generation = ++this.heartbeatTimeoutGeneration;
     try {
-      this.heartbeatTimeoutTimer = this.setTimeoutFn(() => {
+      const timer = this.setTimeoutFn(() => {
+        if (generation !== this.heartbeatTimeoutGeneration) return;
         this.heartbeatTimeoutTimer = undefined;
+        this.heartbeatTimeoutGeneration += 1;
         if (!this.isCurrentSocket(socket, socketEpoch) || !this.awaitingHeartbeat) return;
         this.recover("heartbeat timeout");
       }, HEARTBEAT_TIMEOUT_MS);
+      if (
+        generation !== this.heartbeatTimeoutGeneration ||
+        !this.isCurrentSocket(socket, socketEpoch) ||
+        !this.awaitingHeartbeat
+      ) {
+        try {
+          this.clearTimeoutFn(timer);
+        } catch {
+          // The generation guard makes an already-queued callback inert.
+        }
+        return;
+      }
+      this.heartbeatTimeoutTimer = timer;
     } catch {
       this.recover("heartbeat timeout timer failed");
     }
@@ -597,12 +717,28 @@ export class ConnectionSupervisor {
 
   private startStableLivenessTimer(socket: SocketLike, socketEpoch: number): void {
     this.clearStableLivenessTimer();
+    const generation = ++this.stableLivenessGeneration;
     try {
-      this.stableLivenessTimer = this.setTimeoutFn(() => {
+      const timer = this.setTimeoutFn(() => {
+        if (generation !== this.stableLivenessGeneration) return;
         this.stableLivenessTimer = undefined;
+        this.stableLivenessGeneration += 1;
         if (!this.isCurrentSocket(socket, socketEpoch) || this.currentState !== "open") return;
         this.resetBackoffAfterConfirmedLiveness(socket, socketEpoch);
       }, STABLE_LIVENESS_MS);
+      if (
+        generation !== this.stableLivenessGeneration ||
+        !this.isCurrentSocket(socket, socketEpoch) ||
+        this.currentState !== "open"
+      ) {
+        try {
+          this.clearTimeoutFn(timer);
+        } catch {
+          // The generation guard makes an already-queued callback inert.
+        }
+        return;
+      }
+      this.stableLivenessTimer = timer;
     } catch {
       // The retry counter staying elevated is safer than treating an unknown timer state as healthy.
     }
@@ -624,7 +760,13 @@ export class ConnectionSupervisor {
     this.clearApprovalRefreshTimer();
     this.clearSocketTimers();
     this.cancelAttempt();
+    this.cancelReconnectWait(supervisorError(
+      "NETWORK",
+      true,
+      "WebSocket 수요가 없어 재연결을 취소했습니다.",
+    ));
     this.disposeCurrentSocket();
+    this.invalidateApprovalLease();
     this.setState("idle");
   }
 
@@ -665,46 +807,57 @@ export class ConnectionSupervisor {
   }
 
   private clearConnectTimeout(): void {
-    if (this.connectTimeoutTimer === undefined) return;
-    try {
-      this.clearTimeoutFn(this.connectTimeoutTimer);
-    } catch {
-      // An old callback still has an epoch guard.
-    }
+    const timer = this.connectTimeoutTimer;
     this.connectTimeoutTimer = undefined;
+    this.connectTimeoutGeneration += 1;
+    if (timer !== undefined) {
+      try {
+        this.clearTimeoutFn(timer);
+      } catch {
+        // An old callback still has a generation guard.
+      }
+    }
   }
 
   private clearHeartbeatTimers(): void {
-    if (this.heartbeatIntervalTimer !== undefined) {
+    const timer = this.heartbeatIntervalTimer;
+    this.heartbeatIntervalTimer = undefined;
+    this.heartbeatIntervalGeneration += 1;
+    if (timer !== undefined) {
       try {
-        this.clearIntervalFn(this.heartbeatIntervalTimer);
+        this.clearIntervalFn(timer);
       } catch {
-        // Epoch guards protect a timer that cannot be cleared.
+        // Generation guards protect a timer that cannot be cleared.
       }
-      this.heartbeatIntervalTimer = undefined;
     }
     this.clearHeartbeatTimeout();
     this.awaitingHeartbeat = false;
   }
 
   private clearHeartbeatTimeout(): void {
-    if (this.heartbeatTimeoutTimer === undefined) return;
-    try {
-      this.clearTimeoutFn(this.heartbeatTimeoutTimer);
-    } catch {
-      // Epoch guards protect a timer that cannot be cleared.
-    }
+    const timer = this.heartbeatTimeoutTimer;
     this.heartbeatTimeoutTimer = undefined;
+    this.heartbeatTimeoutGeneration += 1;
+    if (timer !== undefined) {
+      try {
+        this.clearTimeoutFn(timer);
+      } catch {
+        // Generation guards protect a timer that cannot be cleared.
+      }
+    }
   }
 
   private clearStableLivenessTimer(): void {
-    if (this.stableLivenessTimer === undefined) return;
-    try {
-      this.clearTimeoutFn(this.stableLivenessTimer);
-    } catch {
-      // The callback validates the current socket before mutating state.
-    }
+    const timer = this.stableLivenessTimer;
     this.stableLivenessTimer = undefined;
+    this.stableLivenessGeneration += 1;
+    if (timer !== undefined) {
+      try {
+        this.clearTimeoutFn(timer);
+      } catch {
+        // The callback validates its generation before mutating state.
+      }
+    }
   }
 
   private resetBackoffAfterConfirmedLiveness(

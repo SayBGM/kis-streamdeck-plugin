@@ -217,6 +217,46 @@ describe("ConnectionSupervisor", () => {
     expect(sockets).toHaveLength(1);
   });
 
+  it("reacquires approval and rearms the 30 minute refresh timer when demand reappears", async () => {
+    const first = await retainAndOpen();
+    supervisor.release();
+
+    void supervisor.retain();
+    await flush();
+    const second = sockets[1];
+    second.readyState = 1;
+    second.emit("open");
+    await flush();
+
+    expect(first.terminateCalls).toBe(1);
+    expect(getApprovalKey).toHaveBeenCalledTimes(2);
+    expect(intervals.filter(({ milliseconds }) => milliseconds === 30 * 60_000)).toHaveLength(2);
+  });
+
+  it("ignores an approval request that resolves after demand returns with a new request", async () => {
+    let resolveOld!: (value: ApprovalKeyLease) => void;
+    const oldApproval = new Promise<ApprovalKeyLease>((resolve) => { resolveOld = resolve; });
+    let resolveCurrent!: (value: ApprovalKeyLease) => void;
+    const currentApproval = new Promise<ApprovalKeyLease>((resolve) => { resolveCurrent = resolve; });
+    getApprovalKey.mockReset().mockReturnValueOnce(oldApproval).mockReturnValueOnce(currentApproval);
+
+    void supervisor.retain();
+    await flush();
+    supervisor.release();
+    void supervisor.retain();
+    await flush();
+    expect(getApprovalKey).toHaveBeenCalledTimes(2);
+
+    resolveOld(lease("old", 1));
+    await flush();
+    expect(sockets).toHaveLength(0);
+    resolveCurrent(lease("current", 2));
+    await flush();
+
+    expect(sockets).toHaveLength(1);
+    expect(supervisor.approvalIdentity).toEqual({ credentialGeneration: 2 });
+  });
+
   it("cannot be retained, restarted, or sent after destroy", async () => {
     const socket = await retainAndOpen();
     supervisor.destroy();
@@ -258,6 +298,47 @@ describe("ConnectionSupervisor", () => {
     advance(5_000);
     await flush();
     expect(sockets).toHaveLength(2);
+  });
+
+  it("keeps retain and setDemand callers pending until the current reconnect cycle opens", async () => {
+    const first = await retainAndOpen();
+    first.emit("close");
+    const retained = supervisor.retain();
+    const demandUpdated = supervisor.setDemand(3);
+    let settled = false;
+    void retained.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    expect(demandUpdated).toBe(retained);
+    await flush();
+    expect(settled).toBe(false);
+    advance(4_999);
+    await flush();
+    expect(settled).toBe(false);
+    advance(1);
+    await flush();
+    expect(sockets).toHaveLength(2);
+    expect(settled).toBe(false);
+
+    sockets[1].readyState = 1;
+    sockets[1].emit("open");
+    await expect(retained).resolves.toBeUndefined();
+  });
+
+  it("rejects reconnect waiters when their current reconnect attempt fails", async () => {
+    const first = await retainAndOpen();
+    first.emit("close");
+    const retained = supervisor.retain();
+
+    advance(5_000);
+    await flush();
+    expect(sockets).toHaveLength(2);
+    advance(10_000);
+
+    await expect(retained).rejects.toMatchObject({ code: "TIMEOUT" });
+    expect(supervisor.state).toBe("reconnect_wait");
   });
 
   it("ignores a cancelled reconnect callback after a newer reconnect timer is armed", async () => {
@@ -472,6 +553,22 @@ describe("ConnectionSupervisor", () => {
     expect(socket.sent).toEqual([json, "PINGPONG hello"]);
   });
 
+  it("echoes PINGPONG before an observer can destroy the current transport", async () => {
+    const socket = await retainAndOpen();
+    const raw = '{"header":{"tr_id":"PINGPONG"},"body":{"nonce":"exact"}}';
+    const observed: string[] = [];
+    supervisor.onMessage((message) => {
+      observed.push(message);
+      supervisor.destroy();
+    });
+
+    socket.emit("message", raw);
+
+    expect(socket.sent).toEqual([raw]);
+    expect(observed).toEqual([raw]);
+    expect(supervisor.state).toBe("stopped");
+  });
+
   it("pings after 15 seconds idle and reconnects only when no pong or activity arrives", async () => {
     const socket = await retainAndOpen();
     advance(15_000);
@@ -587,6 +684,105 @@ describe("ConnectionSupervisor", () => {
     expect(timerFailure.state).toBe("idle");
     expect(localSockets).toHaveLength(1);
     timerFailure.destroy();
+  });
+
+  it("keeps a reconnect timer functional when diagnostics increment throws", async () => {
+    const localSockets: FakeSocket[] = [];
+    const local = new ConnectionSupervisor({
+      socketFactory: () => {
+        const socket = new FakeSocket();
+        localSockets.push(socket);
+        return socket;
+      },
+      credentials: { getApprovalKey: vi.fn().mockResolvedValue(lease()) },
+      now: () => now,
+      random: () => 0.5,
+      setTimeout,
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      setInterval,
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+      diagnostics: {
+        increment: () => { throw new Error("diagnostics unavailable"); },
+        record: () => undefined,
+      },
+    });
+
+    void local.retain();
+    await flush();
+    localSockets[0].readyState = 1;
+    localSockets[0].emit("open");
+    localSockets[0].emit("close");
+    expect(local.state).toBe("reconnect_wait");
+
+    advance(5_000);
+    await flush();
+    expect(localSockets).toHaveLength(2);
+    local.destroy();
+  });
+
+  it("does not retain a stale synchronous connect-timeout handle", async () => {
+    const clearTimeoutSpy = vi.fn();
+    const timeoutHandle = { kind: "connect" };
+    const reconnectHandle = { kind: "reconnect" };
+    const local = new ConnectionSupervisor({
+      socketFactory: () => new FakeSocket(),
+      credentials: { getApprovalKey: vi.fn().mockResolvedValue(lease()) },
+      setTimeout: (callback, milliseconds) => {
+        if (milliseconds === 10_000) callback();
+        return milliseconds === 10_000 ? timeoutHandle : reconnectHandle;
+      },
+      clearTimeout: clearTimeoutSpy,
+      setInterval,
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    });
+
+    void local.retain();
+    await flush();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(timeoutHandle);
+    expect(local.state).toBe("reconnect_wait");
+    local.destroy();
+  });
+
+  it("does not retain a stale synchronous heartbeat-timeout handle", async () => {
+    const localSockets: FakeSocket[] = [];
+    const clearTimeoutSpy = vi.fn();
+    const connectHandle = { kind: "connect" };
+    const heartbeatHandle = { kind: "heartbeat" };
+    const reconnectHandle = { kind: "reconnect" };
+    let heartbeatTick: (() => void) | undefined;
+    const local = new ConnectionSupervisor({
+      socketFactory: () => {
+        const socket = new FakeSocket();
+        localSockets.push(socket);
+        return socket;
+      },
+      credentials: { getApprovalKey: vi.fn().mockResolvedValue(lease()) },
+      now: () => now,
+      setTimeout: (callback, milliseconds) => {
+        if (milliseconds === 5_000) callback();
+        if (milliseconds === 5_000) return heartbeatHandle;
+        if (milliseconds === 10_000) return connectHandle;
+        return reconnectHandle;
+      },
+      clearTimeout: clearTimeoutSpy,
+      setInterval: (callback, milliseconds) => {
+        if (milliseconds === 15_000) heartbeatTick = callback;
+        return { milliseconds };
+      },
+      clearInterval: () => undefined,
+    });
+
+    void local.retain();
+    await flush();
+    localSockets[0].readyState = 1;
+    localSockets[0].emit("open");
+    now += 15_000;
+    heartbeatTick!();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(heartbeatHandle);
+    expect(local.state).toBe("reconnect_wait");
+    local.destroy();
   });
 
   it("isolates throwing and rejected message/state listeners", async () => {
