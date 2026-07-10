@@ -95,6 +95,8 @@ interface Entry {
   retarget: Retarget | undefined;
   rotationOutgoing: Entry | undefined;
   rotationIncoming: boolean;
+  readonly waitingRetargetSources: Set<Entry>;
+  waitingTarget: Entry | undefined;
 }
 
 interface ConnectionDemand {
@@ -244,6 +246,8 @@ export class SubscriptionSupervisor {
         retarget: undefined,
         rotationOutgoing: undefined,
         rotationIncoming: false,
+        waitingRetargetSources: new Set(),
+        waitingTarget: undefined,
       };
       this.entries.set(key, entry);
       void Promise.resolve(this.connection.retain()).then(
@@ -329,10 +333,16 @@ export class SubscriptionSupervisor {
     this.clearControlTimers();
     this.staleGeneration += 1;
     this.rotationGeneration += 1;
-    if (this.staleTimer !== undefined) this.clearIntervalFn(this.staleTimer);
-    if (this.rotationTimer !== undefined) this.clearIntervalFn(this.rotationTimer);
+    const staleTimer = this.staleTimer;
+    const rotationTimer = this.rotationTimer;
     this.staleTimer = undefined;
     this.rotationTimer = undefined;
+    if (staleTimer !== undefined) {
+      try { this.clearIntervalFn(staleTimer); } catch { /* best effort cleanup */ }
+    }
+    if (rotationTimer !== undefined) {
+      try { this.clearIntervalFn(rotationTimer); } catch { /* best effort cleanup */ }
+    }
     this.unsubscribeMessage();
     this.unsubscribeState();
     for (const entry of [...this.entries.values()]) {
@@ -580,8 +590,6 @@ export class SubscriptionSupervisor {
         if (entry.refs.size === 0 || entry.removing || entry.retarget) this.enqueueUnsubscribe(entry);
         this.finishRotationIncoming(entry);
       } else {
-        this.setEntryState(entry, "rejected");
-        if (!this.isCurrentEntry(entry)) return;
         const error = Object.freeze(new KisError({
           code: "SUBSCRIPTION_REJECTED",
           scope: "websocket",
@@ -594,6 +602,8 @@ export class SubscriptionSupervisor {
         } catch {
           // Diagnostics must not affect the control queue.
         }
+        this.setEntryState(entry, "rejected");
+        if (!this.isCurrentEntry(entry)) return;
         if (entry.retarget) this.completeRetarget(entry);
         else if (entry.refs.size === 0) this.deleteEntry(entry);
         this.finishRotationIncoming(entry);
@@ -851,6 +861,7 @@ export class SubscriptionSupervisor {
   private completeRetarget(entry: Entry): void {
     const retarget = entry.retarget;
     if (!retarget || this.entries.get(entry.key) !== entry) return;
+    this.detachRetargetWaiter(entry);
     if (entry.refs.size === 0) {
       entry.retarget = undefined;
       this.deleteEntry(entry);
@@ -869,7 +880,8 @@ export class SubscriptionSupervisor {
         this.deleteEntry(existing);
         existing = undefined;
       } else {
-        // pending subscribe가 끝난 뒤의 unsubscribe를 먼저 처리하도록 source를 보존합니다.
+        // pending subscribe가 끝난 뒤의 unsubscribe/delete를 먼저 처리하도록 source를 보존합니다.
+        this.registerRetargetWaiter(entry, existing);
         return;
       }
     }
@@ -893,8 +905,10 @@ export class SubscriptionSupervisor {
         queuedAction: undefined,
         removing: false,
         retarget: undefined,
-        rotationOutgoing: undefined,
-        rotationIncoming: false,
+      rotationOutgoing: undefined,
+      rotationIncoming: false,
+      waitingRetargetSources: new Set(),
+      waitingTarget: undefined,
       };
     if (!existing) {
       this.entries.set(next.key, next);
@@ -932,6 +946,30 @@ export class SubscriptionSupervisor {
       if (job.entry === entry && job.action === "unsubscribe") this.controlQueue.splice(index, 1);
     }
     entry.removing = false;
+  }
+
+  private registerRetargetWaiter(source: Entry, target: Entry): void {
+    if (source.waitingTarget === target) return;
+    this.detachRetargetWaiter(source);
+    source.waitingTarget = target;
+    target.waitingRetargetSources.add(source);
+  }
+
+  private detachRetargetWaiter(source: Entry): void {
+    const target = source.waitingTarget;
+    if (!target) return;
+    target.waitingRetargetSources.delete(source);
+    source.waitingTarget = undefined;
+  }
+
+  private wakeRetargetWaiters(target: Entry): void {
+    const sources = [...target.waitingRetargetSources];
+    target.waitingRetargetSources.clear();
+    for (const source of sources) {
+      if (source.waitingTarget !== target) continue;
+      source.waitingTarget = undefined;
+      if (this.isCurrentEntry(source) && source.retarget) this.completeRetarget(source);
+    }
   }
 
   private rejectRetarget(entry: Entry, error: KisError): void {
@@ -974,12 +1012,14 @@ export class SubscriptionSupervisor {
   private deleteEntry(entry: Entry): void {
     if (this.entries.get(entry.key) !== entry) return;
     this.cancelRotationFor(entry);
+    this.detachRetargetWaiter(entry);
     this.entries.delete(entry.key);
     entry.generation += 1;
     entry.queuedAction = undefined;
     for (const ref of entry.refs) ref.entry = undefined;
     entry.refs.clear();
     this.releaseDemand(entry);
+    this.wakeRetargetWaiters(entry);
     this.rebalanceSubscriptions();
   }
 
@@ -1051,19 +1091,26 @@ export class SubscriptionSupervisor {
 
   private clearControlTimeout(): void {
     this.controlTimeoutGeneration += 1;
-    if (this.controlTimeout === undefined) return;
-    this.clearTimeoutFn(this.controlTimeout);
+    const handle = this.controlTimeout;
     this.controlTimeout = undefined;
+    if (handle === undefined) return;
+    try { this.clearTimeoutFn(handle); } catch { /* best effort cleanup */ }
   }
 
   private clearControlTimers(): void {
     this.clearControlTimeout();
     this.controlSendGeneration += 1;
     this.controlRetryGeneration += 1;
-    if (this.controlSendTimer !== undefined) this.clearTimeoutFn(this.controlSendTimer);
-    if (this.controlRetryTimer !== undefined) this.clearTimeoutFn(this.controlRetryTimer);
+    const sendTimer = this.controlSendTimer;
+    const retryTimer = this.controlRetryTimer;
     this.controlSendTimer = undefined;
     this.controlRetryTimer = undefined;
+    if (sendTimer !== undefined) {
+      try { this.clearTimeoutFn(sendTimer); } catch { /* best effort cleanup */ }
+    }
+    if (retryTimer !== undefined) {
+      try { this.clearTimeoutFn(retryTimer); } catch { /* best effort cleanup */ }
+    }
   }
 
   private armControlTimeout(job: ControlJob): void {
@@ -1155,7 +1202,9 @@ export class SubscriptionSupervisor {
       }, ROTATION_LEASE_MS);
     } catch {
       this.staleGeneration += 1;
-      if (this.staleTimer !== undefined) this.clearIntervalFn(this.staleTimer);
+      if (this.staleTimer !== undefined) {
+        try { this.clearIntervalFn(this.staleTimer); } catch { /* best effort rollback */ }
+      }
       this.staleTimer = undefined;
       this.unsubscribeMessage();
       this.unsubscribeState();

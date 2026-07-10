@@ -775,7 +775,7 @@ describe("SubscriptionSupervisor", () => {
   it("rolls back constructor listeners when the second interval cannot be armed", () => {
     const isolatedConnection = new FakeConnection();
     let intervalCalls = 0;
-    const clearInterval = vi.fn();
+    const clearInterval = vi.fn(() => { throw new Error("stale interval clear failed"); });
 
     expect(() => new SubscriptionSupervisor({
       connection: isolatedConnection,
@@ -810,5 +810,68 @@ describe("SubscriptionSupervisor", () => {
     expect(isolatedConnection.reconnects).toBe(1);
     expect(synchronous.getSnapshot(descriptor)?.state).toBe("desired");
     synchronous.destroy();
+  });
+
+  it("wakes a rejected source retarget after its pending removing target finishes unsubscribe", async () => {
+    const source = { trId: "H0UNCNT0", trKey: "000111" } as const;
+    const target = { trId: "H0UNCNT0", trKey: "000112" } as const;
+    const sourceHandle = supervisor.subscribe(source);
+    await flush();
+    connection.emitRaw(control(source.trId, source.trKey, "ERROR"));
+    const targetHandle = supervisor.subscribe(target);
+    advance(100);
+    targetHandle.release();
+
+    const retargeted = supervisor.retargetAll(source, target);
+    connection.emitRaw(control(target.trId, target.trKey));
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...target });
+    connection.emitRaw(control(target.trId, target.trKey, "OPSP0002"));
+    await retargeted;
+    advance(100);
+
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...target });
+    expect(sourceHandle.descriptor).toEqual(target);
+  });
+
+  it("commits rejected diagnostics before a rejected-state callback destroys the supervisor", async () => {
+    const diagnostics = { record: vi.fn(), increment: vi.fn() };
+    const isolatedConnection = new FakeConnection();
+    const isolated = new SubscriptionSupervisor({
+      connection: isolatedConnection,
+      diagnostics,
+      setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    });
+    const descriptor = { trId: "H0UNCNT0", trKey: "000113" } as const;
+    isolated.subscribe(descriptor, {
+      onState: (snapshot) => {
+        if (snapshot.state === "rejected") isolated.destroy();
+      },
+    });
+    await flush();
+    isolatedConnection.emitRaw(control(descriptor.trId, descriptor.trKey, "ERROR"));
+
+    expect(diagnostics.record).toHaveBeenCalledTimes(1);
+    expect(diagnostics.increment).toHaveBeenCalledWith("subscriptionRejects");
+  });
+
+  it("keeps ACK state progress and destroy cleanup when clear callbacks throw", async () => {
+    const isolatedConnection = new FakeConnection();
+    const throwing = new SubscriptionSupervisor({
+      connection: isolatedConnection,
+      clearTimeout: () => { throw new Error("clear timeout failed"); },
+      clearInterval: () => { throw new Error("clear interval failed"); },
+    });
+    const descriptor = { trId: "H0UNCNT0", trKey: "000114" } as const;
+    const handle = throwing.subscribe(descriptor);
+    await flush();
+
+    expect(() => isolatedConnection.emitRaw(control(descriptor.trId, descriptor.trKey))).not.toThrow();
+    expect(handle.snapshot?.state).toBe("live");
+    expect(() => throwing.destroy()).not.toThrow();
+    expect(isolatedConnection.listenerCount).toBe(0);
   });
 });
