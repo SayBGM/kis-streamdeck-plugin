@@ -554,10 +554,17 @@ export class CredentialSession {
 
   async getRestAuthorization(): Promise<RestAuthorizationLease> {
     const token = await this.getAccessToken();
-    const credentials = await this.currentCredentials();
+    const settings = this.repository.getSnapshot().settings;
+    const credentials = credentialsFromSettings(settings);
     if (
+      !credentials ||
       token.credentialGeneration !== credentials.generation ||
-      token.credentialFingerprint !== credentials.fingerprint
+      token.credentialFingerprint !== credentials.fingerprint ||
+      settings.credentialFingerprint !== credentials.fingerprint ||
+      settings.accessToken !== token.token ||
+      settings.accessTokenExpiry !== token.expiresAt ||
+      settings.accessTokenFingerprint !== token.credentialFingerprint ||
+      settings.accessTokenVersion !== token.tokenVersion
     ) {
       throw authBoundaryError(
         "AUTH_REJECTED",

@@ -5,6 +5,7 @@ import {
   CredentialSession,
   fingerprintCredentials,
   type AuthFetch,
+  type CredentialSettingsPort,
 } from "../credential-session.js";
 
 function makeSession(
@@ -76,6 +77,41 @@ describe("CredentialSession REST authorization lease", () => {
     });
 
     await expect(pending).rejects.toMatchObject({
+      code: "AUTH_REJECTED",
+      scope: "auth",
+    });
+  });
+
+  it("rejects a persisted lease invalidated between token lookup and authorization binding", async () => {
+    const fingerprint = fingerprintCredentials("key", "secret");
+    const valid = migrateGlobalSettings({
+      appKey: "key",
+      appSecret: "secret",
+      credentialFingerprint: fingerprint,
+      credentialGeneration: 4,
+      accessToken: "token",
+      accessTokenExpiry: 1_900_000_000_000,
+      accessTokenFingerprint: fingerprint,
+      accessTokenVersion: 9,
+    });
+    const invalidated = structuredClone(valid);
+    delete invalidated.accessToken;
+    delete invalidated.accessTokenExpiry;
+    delete invalidated.accessTokenFingerprint;
+    invalidated.accessTokenVersion = 10;
+    let reads = 0;
+    const snapshot = (settings: GlobalSettingsV2) => Object.freeze({
+      settings,
+      status: Object.freeze({ baseKnown: true, persistenceDegraded: false }),
+    });
+    const port: CredentialSettingsPort = {
+      whenReady: vi.fn(async () => snapshot(valid)),
+      getSnapshot: vi.fn(() => snapshot(++reads < 4 ? valid : invalidated)),
+      update: vi.fn(async () => snapshot(valid)),
+    };
+    const session = new CredentialSession(port, { now: () => 1_800_000_000_000 });
+
+    await expect(session.getRestAuthorization()).rejects.toMatchObject({
       code: "AUTH_REJECTED",
       scope: "auth",
     });
