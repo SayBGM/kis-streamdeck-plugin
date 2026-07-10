@@ -5,7 +5,7 @@
   "type": "module",
   "main": "bin/plugin.js",
   "scripts": {
-    "build": "rollup -c",
+    "build": "rollup -c --forceExit",
     "watch": "rollup -c -w",
     "local:install": "npm run build && node ./scripts/install-local-plugin.mjs",
     "package:plugin": "npm run build && node ./scripts/package-streamdeck-plugin.mjs",

@@ -8,7 +8,7 @@ import { DomesticStockAction } from "../domestic-stock.js";
 
 function controller() {
   return {
-    appear: vi.fn(async () => undefined),
+    appear: vi.fn(async (_input: unknown) => undefined),
     updateSettings: vi.fn(async () => undefined),
     disappear: vi.fn(async () => undefined),
     manualRefresh: vi.fn(async () => undefined),
