@@ -43,6 +43,7 @@ describe("migrateGlobalSettings", () => {
     ["hybrid", "2001", "automatic", 5_000],
     ["hybrid", "5000", "automatic", 5_000],
     ["hybrid", "5001", "automatic", 10_000],
+    ["hybrid", "2001oops", "automatic", 2_000],
     ["poll", "5001", "rest-only", 2_000],
   ] as const)(
     "maps legacy mode %s with throttle %s to %s/%d",
@@ -61,6 +62,7 @@ describe("migrateGlobalSettings", () => {
     ["16", 30_000],
     ["30", 30_000],
     ["31", 60_000],
+    ["31oops", 30_000],
   ] as const)("maps poll interval %s to %dms", (pollIntervalSec, expected) => {
     const migrated = migrateGlobalSettings({ pollIntervalSec });
 
@@ -118,6 +120,7 @@ describe("migrateGlobalSettings", () => {
   });
 
   it("is idempotent for normalized v2 settings", () => {
+    const extension = { nested: ["keep"] };
     const once = migrateGlobalSettings({
       schemaVersion: 2,
       settingsRevision: 4,
@@ -127,11 +130,45 @@ describe("migrateGlobalSettings", () => {
         dataMode: "rest-only",
         renderIntervalMs: 10_000,
         backupPollIntervalMs: 60_000,
+        extension,
       },
       external: "keep",
     });
 
+    expect(once.preferences.extension).toEqual({ nested: ["keep"] });
+    expect(once.preferences.extension).not.toBe(extension);
     expect(migrateGlobalSettings(once)).toEqual(once);
+  });
+
+  it("preserves preference extensions while overwriting known fields canonically", () => {
+    const preferences = {
+      dataMode: "invalid",
+      renderIntervalMs: 1234,
+      backupPollIntervalMs: 1234,
+      extension: { enabled: true },
+    };
+
+    const migrated = migrateGlobalSettings({
+      updateMode: "hybrid",
+      throttleMs: "5001",
+      pollIntervalSec: "31",
+      preferences,
+    });
+
+    expect(migrated.preferences).toEqual({
+      dataMode: "automatic",
+      renderIntervalMs: 10_000,
+      backupPollIntervalMs: 60_000,
+      extension: { enabled: true },
+    });
+    expect(migrated.preferences).not.toBe(preferences);
+    expect(migrated.preferences.extension).not.toBe(preferences.extension);
+    expect(preferences).toEqual({
+      dataMode: "invalid",
+      renderIntervalMs: 1234,
+      backupPollIntervalMs: 1234,
+      extension: { enabled: true },
+    });
   });
 });
 

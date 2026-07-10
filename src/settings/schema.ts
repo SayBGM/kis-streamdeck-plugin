@@ -96,15 +96,21 @@ function safeCounter(value: unknown): number {
     : 0;
 }
 
-function parsedInteger(value: unknown): number | null {
-  if (typeof value !== "string" && typeof value !== "number") return null;
-  const parsed = Number.parseInt(String(value), 10);
+function parsedNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value !== "string") return null;
+
+  const normalized = value.trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized)) return null;
+  const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
 function migrateRenderInterval(updateMode: unknown, throttleMs: unknown): RenderIntervalMs {
   if (updateMode !== "hybrid") return 2_000;
-  const parsed = parsedInteger(throttleMs);
+  const parsed = parsedNumber(throttleMs);
   if (parsed === null) return 2_000;
   if (parsed <= 2_000) return 2_000;
   if (parsed <= 5_000) return 5_000;
@@ -112,7 +118,7 @@ function migrateRenderInterval(updateMode: unknown, throttleMs: unknown): Render
 }
 
 function migrateBackupPollInterval(pollIntervalSec: unknown): BackupPollIntervalMs {
-  const parsed = parsedInteger(pollIntervalSec);
+  const parsed = parsedNumber(pollIntervalSec);
   if (parsed === null) return 30_000;
   if (parsed <= 15) return 15_000;
   if (parsed <= 30) return 30_000;
@@ -121,6 +127,7 @@ function migrateBackupPollInterval(pollIntervalSec: unknown): BackupPollInterval
 
 function normalizePreferences(record: Readonly<Record<string, unknown>>): GlobalPreferencesV2 {
   const candidate = isRecord(record.preferences) ? record.preferences : {};
+  const migrated = cloneRecord(candidate);
   const legacyMode = record.updateMode;
   const dataMode: DataMode = candidate.dataMode === "automatic" || candidate.dataMode === "rest-only"
     ? candidate.dataMode
@@ -140,11 +147,10 @@ function normalizePreferences(record: Readonly<Record<string, unknown>>): Global
       ? candidate.backupPollIntervalMs
       : migrateBackupPollInterval(record.pollIntervalSec);
 
-  return {
-    dataMode,
-    renderIntervalMs,
-    backupPollIntervalMs,
-  };
+  migrated.dataMode = dataMode;
+  migrated.renderIntervalMs = renderIntervalMs;
+  migrated.backupPollIntervalMs = backupPollIntervalMs;
+  return migrated as GlobalPreferencesV2;
 }
 
 export function migrateGlobalSettings(input: unknown): GlobalSettingsV2 {
