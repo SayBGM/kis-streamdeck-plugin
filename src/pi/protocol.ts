@@ -73,8 +73,32 @@ const SIMPLE_COMMAND_TYPES = new Set([
   "quote/refresh",
 ]);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function readPlainDataObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return null;
+    }
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      return null;
+    }
+
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const data = Object.create(null) as Record<string, unknown>;
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (!descriptor.enumerable || !("value" in descriptor)) {
+        return null;
+      }
+      data[key] = descriptor.value;
+    }
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -87,56 +111,97 @@ function isRequestId(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function isPreferences(value: unknown): value is PiPreferences {
-  if (!isRecord(value) || !hasExactKeys(value, [
+function copyNullPrototype<T extends object>(
+  entries: ReadonlyArray<readonly [string, unknown]>,
+): T {
+  const copy = Object.create(null) as Record<string, unknown>;
+  for (const [key, value] of entries) {
+    copy[key] = value;
+  }
+  return copy as T;
+}
+
+function parsePreferences(value: unknown): PiPreferences | null {
+  const data = readPlainDataObject(value);
+  if (!data || !hasExactKeys(data, [
     "dataMode",
     "renderIntervalMs",
     "backupPollIntervalMs",
   ])) {
-    return false;
+    return null;
   }
-  return (
-    (value.dataMode === "automatic" || value.dataMode === "rest-only") &&
-    (value.renderIntervalMs === 2_000 ||
-      value.renderIntervalMs === 5_000 ||
-      value.renderIntervalMs === 10_000) &&
-    (value.backupPollIntervalMs === 15_000 ||
-      value.backupPollIntervalMs === 30_000 ||
-      value.backupPollIntervalMs === 60_000)
-  );
+  if (!(
+    (data.dataMode === "automatic" || data.dataMode === "rest-only") &&
+    (data.renderIntervalMs === 2_000 ||
+      data.renderIntervalMs === 5_000 ||
+      data.renderIntervalMs === 10_000) &&
+    (data.backupPollIntervalMs === 15_000 ||
+      data.backupPollIntervalMs === 30_000 ||
+      data.backupPollIntervalMs === 60_000)
+  )) {
+    return null;
+  }
+  return copyNullPrototype<PiPreferences>([
+    ["dataMode", data.dataMode],
+    ["renderIntervalMs", data.renderIntervalMs],
+    ["backupPollIntervalMs", data.backupPollIntervalMs],
+  ]);
+}
+
+function parseCommand(value: unknown): PiCommand | null {
+  const data = readPlainDataObject(value);
+  if (!data || !isRequestId(data.requestId) || typeof data.type !== "string") {
+    return null;
+  }
+
+  if (SIMPLE_COMMAND_TYPES.has(data.type)) {
+    if (!hasExactKeys(data, ["type", "requestId"])) return null;
+    return copyNullPrototype<PiCommand>([
+      ["type", data.type],
+      ["requestId", data.requestId],
+    ]);
+  }
+
+  if (data.type === "credentials/save") {
+    const allowedKeys = data.appSecret === undefined
+      ? ["type", "requestId", "appKey"]
+      : ["type", "requestId", "appKey", "appSecret"];
+    if (
+      !hasExactKeys(data, allowedKeys) ||
+      typeof data.appKey !== "string" ||
+      data.appKey.trim().length === 0 ||
+      (data.appSecret !== undefined && typeof data.appSecret !== "string")
+    ) {
+      return null;
+    }
+    return copyNullPrototype<PiCommand>([
+      ["type", data.type],
+      ["requestId", data.requestId],
+      ["appKey", data.appKey],
+      ...(data.appSecret === undefined
+        ? []
+        : [["appSecret", data.appSecret] as const]),
+    ]);
+  }
+
+  if (data.type === "preferences/save") {
+    if (!hasExactKeys(data, ["type", "requestId", "preferences"])) return null;
+    const preferences = parsePreferences(data.preferences);
+    if (!preferences) return null;
+    return copyNullPrototype<PiCommand>([
+      ["type", data.type],
+      ["requestId", data.requestId],
+      ["preferences", preferences],
+    ]);
+  }
+
+  return null;
 }
 
 export function validatePiCommand(value: unknown): value is PiCommand {
-  if (!isRecord(value) || !isRequestId(value.requestId) || typeof value.type !== "string") {
-    return false;
-  }
-
-  if (SIMPLE_COMMAND_TYPES.has(value.type)) {
-    return hasExactKeys(value, ["type", "requestId"]);
-  }
-
-  if (value.type === "credentials/save") {
-    const allowedKeys = value.appSecret === undefined
-      ? ["type", "requestId", "appKey"]
-      : ["type", "requestId", "appKey", "appSecret"];
-    return (
-      hasExactKeys(value, allowedKeys) &&
-      typeof value.appKey === "string" &&
-      value.appKey.trim().length > 0 &&
-      (value.appSecret === undefined || typeof value.appSecret === "string")
-    );
-  }
-
-  if (value.type === "preferences/save") {
-    return (
-      hasExactKeys(value, ["type", "requestId", "preferences"]) &&
-      isPreferences(value.preferences)
-    );
-  }
-
-  return false;
+  return parseCommand(value) !== null;
 }
 
 export function parsePiCommand(value: unknown): PiCommand | null {
-  return validatePiCommand(value) ? value : null;
+  return parseCommand(value);
 }

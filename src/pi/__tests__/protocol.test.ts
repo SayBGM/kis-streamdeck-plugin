@@ -60,4 +60,67 @@ describe("PI protocol", () => {
 
     expect(JSON.stringify(response)).not.toMatch(/appSecret|accessToken|approval/i);
   });
+
+  it("does not execute accessor properties while rejecting commands", () => {
+    let getterReads = 0;
+    const command = {
+      type: "settings/request",
+      get requestId() {
+        getterReads += 1;
+        return "r1";
+      },
+    };
+
+    expect(parsePiCommand(command)).toBeNull();
+    expect(getterReads).toBe(0);
+  });
+
+  it("rejects objects with custom prototypes", () => {
+    const command = Object.assign(
+      Object.create({ token: "prototype-secret", toJSON: () => "secret" }),
+      { type: "settings/request", requestId: "r1" },
+    );
+
+    expect(parsePiCommand(command)).toBeNull();
+    expect(validatePiCommand(command)).toBe(false);
+  });
+
+  it("returns fresh null-prototype copies of allowlisted command fields", () => {
+    const preferences = {
+      dataMode: "automatic",
+      renderIntervalMs: 5_000,
+      backupPollIntervalMs: 30_000,
+    };
+    const command = {
+      type: "preferences/save",
+      requestId: "r1",
+      preferences,
+    };
+
+    const parsed = parsePiCommand(command);
+
+    expect(parsed).not.toBe(command);
+    expect(Object.getPrototypeOf(parsed)).toBeNull();
+    expect(parsed).toEqual(command);
+    if (parsed?.type !== "preferences/save") {
+      throw new Error("unexpected parsed command");
+    }
+    expect(parsed.preferences).not.toBe(preferences);
+    expect(Object.getPrototypeOf(parsed.preferences)).toBeNull();
+  });
+
+  it("does not preserve values inherited from Object.prototype", () => {
+    Object.defineProperty(Object.prototype, "piProtocolSecret", {
+      configurable: true,
+      value: "prototype-secret",
+    });
+    try {
+      const parsed = parsePiCommand({ type: "settings/request", requestId: "r1" });
+
+      expect(parsed).not.toBeNull();
+      expect("piProtocolSecret" in (parsed as object)).toBe(false);
+    } finally {
+      delete (Object.prototype as { piProtocolSecret?: string }).piProtocolSecret;
+    }
+  });
 });

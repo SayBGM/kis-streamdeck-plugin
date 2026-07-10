@@ -101,7 +101,11 @@ export class DiagnosticsStore {
   private publish(): void {
     const snapshot = this.snapshot();
     for (const listener of this.listeners) {
-      listener(cloneSnapshot(snapshot));
+      try {
+        listener(cloneSnapshot(snapshot));
+      } catch {
+        // Diagnostics observers must not break the operation being observed.
+      }
     }
   }
 }

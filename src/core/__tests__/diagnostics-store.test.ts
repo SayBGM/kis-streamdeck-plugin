@@ -60,4 +60,21 @@ describe("DiagnosticsStore", () => {
 
     expect(store.snapshot().counters).toEqual({});
   });
+
+  it.each([
+    ["record", (store: DiagnosticsStore) => store.record(settingsError(1))],
+    ["increment", (store: DiagnosticsStore) => store.increment("settingsFailures")],
+  ])("isolates throwing listeners during %s", (_operation, publish) => {
+    const store = new DiagnosticsStore();
+    const throwingListener = vi.fn(() => {
+      throw new Error("listener failure");
+    });
+    const followingListener = vi.fn();
+    store.subscribe(throwingListener);
+    store.subscribe(followingListener);
+
+    expect(() => publish(store)).not.toThrow();
+    expect(throwingListener).toHaveBeenCalledTimes(1);
+    expect(followingListener).toHaveBeenCalledTimes(1);
+  });
 });
