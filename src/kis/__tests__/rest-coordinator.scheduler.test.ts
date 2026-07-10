@@ -5,7 +5,6 @@ import type {
   AccessTokenExpectation,
   CredentialIdentity,
   PreparedRestAuthorization,
-  PreparedRestFetch,
   PreparedRestRequest,
   RestAuthorizationLease,
 } from "../credential-session.js";
@@ -26,7 +25,7 @@ const lease: RestAuthorizationLease = Object.freeze({
   tokenVersion: 5,
 });
 
-function preparedAuthorization(): PreparedRestAuthorization {
+function preparedAuthorization(restFetch: RestFetch): PreparedRestAuthorization {
   let used = false;
   return Object.freeze({
     expectation: Object.freeze({
@@ -35,10 +34,10 @@ function preparedAuthorization(): PreparedRestAuthorization {
       tokenVersion: lease.tokenVersion,
     }),
     isCurrent: () => true,
-    execute: (request: PreparedRestRequest, fetch: PreparedRestFetch) => {
+    execute: (request: PreparedRestRequest) => {
       if (used) throw new Error("used capability");
       used = true;
-      return fetch(request.url, {
+      return restFetch(request.url, {
         method: "GET",
         headers: {
           authorization: `Bearer ${lease.token}`,
@@ -52,7 +51,7 @@ function preparedAuthorization(): PreparedRestAuthorization {
   });
 }
 
-function credentials(): RestCredentialPort & {
+function credentials(restFetch: RestFetch): RestCredentialPort & {
   invalidateAccessToken: ReturnType<typeof vi.fn>;
 } {
   return {
@@ -61,7 +60,7 @@ function credentials(): RestCredentialPort & {
       credentialGeneration: lease.credentialGeneration,
       credentialFingerprint: fingerprint,
     })),
-    prepareRestAuthorization: vi.fn(async () => preparedAuthorization()),
+    prepareRestAuthorization: vi.fn(async () => preparedAuthorization(restFetch)),
     invalidateAccessToken: vi.fn(async (_expected: AccessTokenExpectation) => true),
   };
 }
@@ -98,7 +97,7 @@ describe("RestCoordinator scheduler", () => {
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
       resolvers.push(resolve);
     }));
-    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
+    const coordinator = new RestCoordinator(credentials(fetch), { now: () => marketNow });
     const requests = Array.from({ length: 5 }, (_, index) => coordinator.requestQuote({
       adapter: domesticStockAdapter,
       instrument: instrument(index + 1),
@@ -124,8 +123,7 @@ describe("RestCoordinator scheduler", () => {
       starts.push(Date.now());
       return successfulResponse();
     });
-    const coordinator = new RestCoordinator(credentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(credentials(fetch), {
       now: () => Date.now(),
     });
     const requests = Array.from({ length: 11 }, (_, index) => coordinator.requestQuote({
@@ -151,19 +149,19 @@ describe("RestCoordinator scheduler", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const authorizationResolvers: Array<() => void> = [];
-    const port = credentials();
-    port.prepareRestAuthorization = vi.fn(
-      () => new Promise<PreparedRestAuthorization>((resolve) => {
-      authorizationResolvers.push(() => {
-        resolve(preparedAuthorization());
-      });
-    }));
     const starts: number[] = [];
     const fetch = vi.fn<RestFetch>(async () => {
       starts.push(Date.now());
       return successfulResponse();
     });
-    const coordinator = new RestCoordinator(port, { fetch, now: () => Date.now() });
+    const port = credentials(fetch);
+    port.prepareRestAuthorization = vi.fn(
+      () => new Promise<PreparedRestAuthorization>((resolve) => {
+      authorizationResolvers.push(() => {
+        resolve(preparedAuthorization(fetch));
+      });
+    }));
+    const coordinator = new RestCoordinator(port, { now: () => Date.now() });
     const requests = Array.from({ length: 14 }, (_, index) => coordinator.requestQuote({
       adapter: domesticStockAdapter,
       instrument: instrument(index + 1),
@@ -192,7 +190,7 @@ describe("RestCoordinator scheduler", () => {
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
       resolvers.push(resolve);
     }));
-    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
+    const coordinator = new RestCoordinator(credentials(fetch), { now: () => marketNow });
     const pending = [1, 2, 3, 4].map((index) => coordinator.requestQuote({
       adapter: domesticStockAdapter,
       instrument: instrument(index),
@@ -249,7 +247,7 @@ describe("RestCoordinator scheduler", () => {
       transportSignal = init.signal;
       return new Promise((resolve) => { resolveFetch = resolve; });
     });
-    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
+    const coordinator = new RestCoordinator(credentials(fetch), { now: () => marketNow });
     const firstAbort = new AbortController();
     const secondAbort = new AbortController();
     const input = {
@@ -280,7 +278,7 @@ describe("RestCoordinator scheduler", () => {
       status: 200,
       json: () => new Promise((resolve) => { jsonResolvers.push(resolve); }),
     }));
-    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
+    const coordinator = new RestCoordinator(credentials(fetch), { now: () => marketNow });
     const abort = new AbortController();
     const input = {
       adapter: domesticStockAdapter,
@@ -327,8 +325,7 @@ describe("RestCoordinator scheduler", () => {
         }
         return successfulResponse("5000");
       });
-      const coordinator = new RestCoordinator(credentials(), {
-        fetch,
+      const coordinator = new RestCoordinator(credentials(fetch), {
         now: () => marketNow,
       });
       const controllers = Array.from({ length: 4 }, () => new AbortController());
@@ -362,8 +359,7 @@ describe("RestCoordinator scheduler", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(credentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(credentials(fetch), {
       now: () => marketNow,
       rateNow: () => Date.now(),
     });
@@ -401,8 +397,7 @@ describe("RestCoordinator scheduler", () => {
     vi.useFakeTimers();
     let rateTime = 0;
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(credentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(credentials(fetch), {
       now: () => marketNow,
       rateNow: () => rateTime,
     });
@@ -431,8 +426,7 @@ describe("RestCoordinator scheduler", () => {
   it("handles synchronous rate-timer callbacks without retaining a stale timer", async () => {
     let rateTime = 0;
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(credentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(credentials(fetch), {
       now: () => marketNow,
       rateNow: () => rateTime,
       setTimeout: (callback, milliseconds) => {
@@ -459,8 +453,7 @@ describe("RestCoordinator scheduler", () => {
     let rateTime = 0;
     let timerThrows = true;
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(credentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(credentials(fetch), {
       now: () => marketNow,
       rateNow: () => rateTime,
       setTimeout: () => {
@@ -501,7 +494,7 @@ describe("RestCoordinator scheduler", () => {
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {
       resolvers.push(resolve);
     }));
-    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
+    const coordinator = new RestCoordinator(credentials(fetch), { now: () => marketNow });
     const running = [1, 2, 3, 4].map((index) => coordinator.requestQuote({
       adapter: domesticStockAdapter,
       instrument: instrument(index),
@@ -530,7 +523,7 @@ describe("RestCoordinator scheduler", () => {
 
   it("cleans a settled dedupe flight so an open-market request can run again", async () => {
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(credentials(), { fetch, now: () => marketNow });
+    const coordinator = new RestCoordinator(credentials(fetch), { now: () => marketNow });
     const input = {
       adapter: domesticStockAdapter,
       instrument: instrument(1),

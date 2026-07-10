@@ -41,7 +41,6 @@ export type RestFetch = (url: string, init: RestFetchInit) => Promise<unknown>;
 export type RestTimerHandle = unknown;
 
 export interface RestCoordinatorOptions {
-  readonly fetch?: RestFetch;
   readonly now?: () => number;
   readonly rateNow?: () => number;
   readonly setTimeout?: (callback: () => void, milliseconds: number) => RestTimerHandle;
@@ -122,10 +121,6 @@ const PRIORITY_RANK: Readonly<Record<RestRequestPriority, number>> = {
   initial: 1,
   fallback: 2,
 };
-
-function defaultFetch(url: string, init: RestFetchInit): Promise<unknown> {
-  return fetch(url, init);
-}
 
 function defaultSetTimeout(callback: () => void, milliseconds: number): RestTimerHandle {
   return setTimeout(callback, milliseconds);
@@ -440,7 +435,6 @@ function descriptorUrl(descriptor: KisRestDescriptor): { url: string; trId: stri
 
 export class RestCoordinator {
   private readonly credentials: RestCredentialPort;
-  private readonly fetch: RestFetch;
   private readonly now: () => number;
   private readonly rateNow: () => number;
   private readonly setTimeout: NonNullable<RestCoordinatorOptions["setTimeout"]>;
@@ -460,7 +454,6 @@ export class RestCoordinator {
 
   constructor(credentials: RestCredentialPort, options: RestCoordinatorOptions = {}) {
     this.credentials = credentials;
-    this.fetch = options.fetch ?? defaultFetch;
     this.now = options.now ?? Date.now;
     this.rateNow = options.rateNow ?? defaultRateNow;
     this.setTimeout = options.setTimeout ?? defaultSetTimeout;
@@ -823,7 +816,7 @@ export class RestCoordinator {
             url: target.url,
             trId: target.trId,
             signal: flight.controller.signal,
-          }, this.fetch);
+          });
         } catch (error) {
           if (!authorization.isCurrent()) {
             flight.transportStarted = false;

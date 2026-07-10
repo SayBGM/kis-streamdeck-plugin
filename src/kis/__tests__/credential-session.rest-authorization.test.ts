@@ -13,6 +13,7 @@ function makeSession(
   initial: GlobalSettingsV2,
   fetch: AuthFetch,
   now = 1_800_000_000_000,
+  restFetch?: PreparedRestFetch,
 ): { session: CredentialSession; save: (settings: GlobalSettingsV2) => void } {
   let disk = structuredClone(initial);
   const repository = new SettingsRepository({
@@ -22,7 +23,7 @@ function makeSession(
     }),
   }, { sleep: async () => {} });
   return {
-    session: new CredentialSession(repository, { fetch, now: () => now }),
+    session: new CredentialSession(repository, { fetch, now: () => now, restFetch }),
     save: (settings) => { disk = structuredClone(settings); },
   };
 }
@@ -30,6 +31,7 @@ function makeSession(
 describe("CredentialSession REST authorization lease", () => {
   it("scopes REST secrets to the capability's one-shot transport", async () => {
     const fingerprint = fingerprintCredentials("key", "secret");
+    const restFetch = vi.fn<PreparedRestFetch>(async () => ({ ok: true }));
     const { session } = makeSession(migrateGlobalSettings({
       appKey: "key",
       appSecret: "secret",
@@ -39,25 +41,32 @@ describe("CredentialSession REST authorization lease", () => {
       accessTokenExpiry: 1_900_000_000_000,
       accessTokenFingerprint: fingerprint,
       accessTokenVersion: 2,
-    }), vi.fn<AuthFetch>());
+    }), vi.fn<AuthFetch>(), 1_800_000_000_000, restFetch);
 
     const capability = await session.prepareRestAuthorization();
-    const transport = vi.fn<PreparedRestFetch>(async () => ({ ok: true }));
     await expect(capability.execute({
       url: "https://openapi.koreainvestment.com:9443/uapi/test",
       trId: "TEST0001",
       signal: new AbortController().signal,
-    }, transport)).resolves.toEqual({ ok: true });
-    expect(transport.mock.calls[0][1].headers).toMatchObject({
+    })).resolves.toEqual({ ok: true });
+    expect(restFetch.mock.calls[0][1].headers).toMatchObject({
       authorization: "Bearer token",
       appkey: "key",
       appsecret: "secret",
     });
-    expect(() => capability.execute({
+
+    const secondCapability = await session.prepareRestAuthorization();
+    const maliciousTransport = vi.fn<PreparedRestFetch>();
+    await expect((secondCapability.execute as unknown as (
+      request: Parameters<typeof secondCapability.execute>[0],
+      transport: PreparedRestFetch,
+    ) => Promise<unknown>)({
       url: "https://openapi.koreainvestment.com:9443/uapi/test",
       trId: "TEST0001",
       signal: new AbortController().signal,
-    }, transport)).toThrow();
+    }, maliciousTransport)).resolves.toEqual({ ok: true });
+    expect(maliciousTransport).not.toHaveBeenCalled();
+    expect(restFetch).toHaveBeenCalledTimes(2);
   });
 
   it("prepares an opaque one-shot capability with no secret-bearing data properties", async () => {

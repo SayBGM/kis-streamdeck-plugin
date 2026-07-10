@@ -10,7 +10,6 @@ import type {
   AccessTokenExpectation,
   CredentialIdentity,
   PreparedRestAuthorization,
-  PreparedRestFetch,
   PreparedRestRequest,
   RestAuthorizationLease,
 } from "../credential-session.js";
@@ -44,6 +43,7 @@ function identity(lease: RestAuthorizationLease): CredentialIdentity {
 function preparedAuthorization(
   lease: RestAuthorizationLease,
   current: () => RestAuthorizationLease,
+  restFetch: RestFetch,
 ): PreparedRestAuthorization {
   let used = false;
   const expectation = Object.freeze({
@@ -61,7 +61,7 @@ function preparedAuthorization(
   return Object.freeze({
     expectation,
     isCurrent,
-    execute: (request: PreparedRestRequest, fetch: PreparedRestFetch) => {
+    execute: (request: PreparedRestRequest) => {
       if (used || !isCurrent()) {
         throw new KisError({
           code: "AUTH_REJECTED",
@@ -71,7 +71,7 @@ function preparedAuthorization(
         });
       }
       used = true;
-      return fetch(request.url, {
+      return restFetch(request.url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json; charset=utf-8",
@@ -87,7 +87,10 @@ function preparedAuthorization(
   });
 }
 
-function mutableCredentials(initial = authorization()): RestCredentialPort & {
+function mutableCredentials(
+  initial = authorization(),
+  restFetch: RestFetch = async () => successfulResponse(),
+): RestCredentialPort & {
   current: RestAuthorizationLease;
   initialize: ReturnType<typeof vi.fn>;
   prepareRestAuthorization: ReturnType<typeof vi.fn>;
@@ -99,7 +102,7 @@ function mutableCredentials(initial = authorization()): RestCredentialPort & {
     set current(value: RestAuthorizationLease) { current = value; },
     initialize: vi.fn(async () => identity(current)),
     prepareRestAuthorization: vi.fn(async () =>
-      preparedAuthorization(current, () => current)),
+      preparedAuthorization(current, () => current, restFetch)),
     invalidateAccessToken: vi.fn(async (_expected: AccessTokenExpectation) => true),
   };
   return port;
@@ -198,10 +201,9 @@ async function flush(rounds = 20): Promise<void> {
 
 describe("RestCoordinator HTTP boundary", () => {
   it("builds the descriptor URL and exact KIS authorization headers", async () => {
-    const credentials = mutableCredentials();
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const credentials = mutableCredentials(authorization(), fetch);
     const coordinator = new RestCoordinator(credentials, {
-      fetch,
       now: () => openNow,
     });
 
@@ -233,9 +235,9 @@ describe("RestCoordinator HTTP boundary", () => {
   });
 
   it("invalidates a rejected token using the exact generation-version CAS lease", async () => {
-    const credentials = mutableCredentials(authorization(8, 13));
     const fetch = vi.fn<RestFetch>().mockResolvedValue({ ok: false, status: 401 });
-    const coordinator = new RestCoordinator(credentials, { fetch, now: () => openNow });
+    const credentials = mutableCredentials(authorization(8, 13), fetch);
+    const coordinator = new RestCoordinator(credentials, { now: () => openNow });
 
     const error = await request(coordinator).catch((value: unknown) => value) as {
       readonly code?: unknown;
@@ -252,7 +254,10 @@ describe("RestCoordinator HTTP boundary", () => {
   });
 
   it("does not negative-cache 401 and immediately retries with the replacement token", async () => {
-    const credentials = mutableCredentials(authorization(3, 5));
+    const fetch = vi.fn<RestFetch>()
+      .mockResolvedValueOnce({ ok: false, status: 401 })
+      .mockResolvedValueOnce(successfulResponse("72000"));
+    const credentials = mutableCredentials(authorization(3, 5), fetch);
     credentials.invalidateAccessToken.mockImplementation(async () => {
       credentials.current = Object.freeze({
         ...authorization(3, 6),
@@ -260,10 +265,7 @@ describe("RestCoordinator HTTP boundary", () => {
       });
       return true;
     });
-    const fetch = vi.fn<RestFetch>()
-      .mockResolvedValueOnce({ ok: false, status: 401 })
-      .mockResolvedValueOnce(successfulResponse("72000"));
-    const coordinator = new RestCoordinator(credentials, { fetch, now: () => openNow });
+    const coordinator = new RestCoordinator(credentials, { now: () => openNow });
 
     await expect(request(coordinator)).rejects.toMatchObject({ code: "AUTH_REJECTED" });
     await expect(request(coordinator)).resolves.toMatchObject({ price: 72_000 });
@@ -272,7 +274,12 @@ describe("RestCoordinator HTTP boundary", () => {
   });
 
   it("refreshes an authorization invalidated while its flight waits for the transport gate", async () => {
-    const credentials = mutableCredentials(authorization(3, 5));
+    let calls = 0;
+    const fetch = vi.fn<RestFetch>(async () => {
+      calls += 1;
+      return calls === 1 ? { ok: false, status: 401 } : successfulResponse("72000");
+    });
+    const credentials = mutableCredentials(authorization(3, 5), fetch);
     credentials.invalidateAccessToken.mockImplementation(async () => {
       credentials.current = Object.freeze({
         ...authorization(3, 6),
@@ -280,12 +287,7 @@ describe("RestCoordinator HTTP boundary", () => {
       });
       return true;
     });
-    let calls = 0;
-    const fetch = vi.fn<RestFetch>(async () => {
-      calls += 1;
-      return calls === 1 ? { ok: false, status: 401 } : successfulResponse("72000");
-    });
-    const coordinator = new RestCoordinator(credentials, { fetch, now: () => openNow });
+    const coordinator = new RestCoordinator(credentials, { now: () => openNow });
     const results = await Promise.allSettled(Array.from({ length: 11 }, (_, index) =>
       coordinator.requestQuote({
         adapter: domesticStockAdapter,
@@ -308,8 +310,8 @@ describe("RestCoordinator HTTP boundary", () => {
     ["primitive payload", { ok: true, status: 200, json: async () => "raw-secret" }],
     ["business rejection", { ok: true, status: 200, json: async () => ({ rt_cd: "1", msg1: "raw-secret" }) }],
   ])("sanitizes malformed HTTP boundaries: %s", async (_label, response) => {
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch: vi.fn<RestFetch>().mockResolvedValue(response),
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(response);
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => openNow,
     });
     const error = await request(coordinator).catch((value: unknown) => value) as {
@@ -327,8 +329,8 @@ describe("RestCoordinator HTTP boundary", () => {
     const malicious = new Proxy({}, {
       get() { throw new Error("access-token-3 app-secret-3"); },
     });
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch: vi.fn<RestFetch>().mockResolvedValue(malicious),
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(malicious);
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => openNow,
     });
 
@@ -345,12 +347,12 @@ describe("RestCoordinator HTTP boundary", () => {
     const target = {};
     const revocable = Proxy.revocable(target, {});
     revocable.revoke();
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch: vi.fn<RestFetch>().mockResolvedValue({
+    const fetch = vi.fn<RestFetch>().mockResolvedValue({
         ok: true,
         status: 200,
         json: async () => revocable.proxy,
-      }),
+      });
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => openNow,
     });
 
@@ -367,8 +369,7 @@ describe("RestCoordinator HTTP boundary", () => {
       (payload, instrumentValue, context) => customQuote(instrumentValue, context, 1),
       "/uapi/../oauth2/tokenP",
     );
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => openNow,
     });
 
@@ -382,10 +383,10 @@ describe("RestCoordinator HTTP boundary", () => {
   });
 
   it("discards a response when its credential generation changes in flight", async () => {
-    const credentials = mutableCredentials(authorization(3));
     let resolveFetch!: (value: unknown) => void;
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => { resolveFetch = resolve; }));
-    const coordinator = new RestCoordinator(credentials, { fetch, now: () => openNow });
+    const credentials = mutableCredentials(authorization(3), fetch);
+    const coordinator = new RestCoordinator(credentials, { now: () => openNow });
 
     const pending = request(coordinator);
     while (fetch.mock.calls.length === 0) await Promise.resolve();
@@ -406,8 +407,7 @@ describe("RestCoordinator HTTP boundary", () => {
       status: 200,
       json: () => new Promise((resolve) => { resolveJson = resolve; }),
     });
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => now,
     });
 
@@ -435,8 +435,7 @@ describe("RestCoordinator HTTP boundary", () => {
       status: 200,
       json: () => new Promise((resolve) => { resolveJson = resolve; }),
     });
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => now,
     });
 
@@ -460,8 +459,7 @@ describe("RestCoordinator HTTP boundary", () => {
 
   it("rejects stale and non-finite transition inputs through safe boundaries", async () => {
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const staleCoordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const staleCoordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => openSnapshot.nextTransitionAt,
     });
     await expect(request(staleCoordinator)).rejects.toMatchObject({
@@ -469,8 +467,7 @@ describe("RestCoordinator HTTP boundary", () => {
       scope: "rest",
     });
 
-    const invalidCoordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const invalidCoordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => openNow,
     });
     await expect(invalidCoordinator.requestQuote({
@@ -494,8 +491,7 @@ describe("RestCoordinator HTTP boundary", () => {
       status: 200,
       json: () => new Promise((resolve) => { resolveJson = resolve; }),
     });
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => closedNow,
     });
     const abort = new AbortController();
@@ -526,8 +522,7 @@ describe("RestCoordinator cache policy", () => {
       (_payload, instrumentValue, context) => customQuote(instrumentValue, context, 72_000),
     );
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => closedNow,
     });
 
@@ -553,8 +548,7 @@ describe("RestCoordinator cache policy", () => {
       return mutableQuote;
     });
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => closedNow,
     });
     const input = {
@@ -586,8 +580,8 @@ describe("RestCoordinator cache policy", () => {
       receivedAt: context.receivedAt + 1,
     }));
     for (const adapter of [accessorAdapter, mismatchAdapter]) {
-      const coordinator = new RestCoordinator(mutableCredentials(), {
-        fetch: vi.fn<RestFetch>().mockResolvedValue(successfulResponse()),
+      const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+      const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
         now: () => openNow,
       });
       const error = await coordinator.requestQuote({
@@ -611,8 +605,7 @@ describe("RestCoordinator cache policy", () => {
       });
     });
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => openNow,
     });
     const input = {
@@ -632,10 +625,10 @@ describe("RestCoordinator cache policy", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
   it("reuses closed-session success only for the same instrument, session and credential generation", async () => {
-    const credentials = mutableCredentials(authorization(2));
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const credentials = mutableCredentials(authorization(2), fetch);
     let now = closedNow;
-    const coordinator = new RestCoordinator(credentials, { fetch, now: () => now });
+    const coordinator = new RestCoordinator(credentials, { now: () => now });
 
     await request(coordinator, closedSnapshot);
     await request(coordinator, closedSnapshot);
@@ -655,8 +648,7 @@ describe("RestCoordinator cache policy", () => {
     const fetch = vi.fn<RestFetch>()
       .mockResolvedValueOnce(successfulResponse("71000"))
       .mockResolvedValueOnce(successfulResponse("72000"));
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => closedNow,
     });
 
@@ -672,8 +664,7 @@ describe("RestCoordinator cache policy", () => {
       .mockResolvedValueOnce({ ok: false, status: 503 })
       .mockResolvedValueOnce(successfulResponse("73000"))
       .mockResolvedValueOnce(successfulResponse("74000"));
-    const coordinator = new RestCoordinator(mutableCredentials(), {
-      fetch,
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
       now: () => now,
     });
 
@@ -691,12 +682,12 @@ describe("RestCoordinator cache policy", () => {
   });
 
   it("does not return a success cache crossed during credential initialization", async () => {
-    const credentials = mutableCredentials();
     const transitionAt = closedNow + 20_000;
     const shortSession = { ...closedSnapshot, nextTransitionAt: transitionAt };
     let now = closedNow;
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse("71000"));
-    const coordinator = new RestCoordinator(credentials, { fetch, now: () => now });
+    const credentials = mutableCredentials(authorization(), fetch);
+    const coordinator = new RestCoordinator(credentials, { now: () => now });
     await expect(request(coordinator, shortSession)).resolves.toMatchObject({ price: 71_000 });
 
     let releaseInitialize!: () => void;
@@ -715,12 +706,12 @@ describe("RestCoordinator cache policy", () => {
   });
 
   it("does not return a negative cache crossed during credential initialization", async () => {
-    const credentials = mutableCredentials();
     const transitionAt = closedNow + 20_000;
     const shortSession = { ...closedSnapshot, nextTransitionAt: transitionAt };
     let now = closedNow;
     const fetch = vi.fn<RestFetch>().mockResolvedValue({ ok: false, status: 503 });
-    const coordinator = new RestCoordinator(credentials, { fetch, now: () => now });
+    const credentials = mutableCredentials(authorization(), fetch);
+    const coordinator = new RestCoordinator(credentials, { now: () => now });
     await expect(request(coordinator, shortSession)).rejects.toMatchObject({ code: "NETWORK" });
 
     let releaseInitialize!: () => void;

@@ -69,7 +69,7 @@ export type PreparedRestFetch = (
 export interface PreparedRestAuthorization {
   readonly expectation: AccessTokenExpectation;
   isCurrent(): boolean;
-  execute(request: PreparedRestRequest, fetch: PreparedRestFetch): Promise<unknown>;
+  execute(request: PreparedRestRequest): Promise<unknown>;
 }
 
 export interface ApprovalKeyLease {
@@ -87,6 +87,7 @@ export interface AccessTokenExpectation {
 export interface CredentialSessionOptions {
   readonly now?: () => number;
   readonly fetch?: AuthFetch;
+  readonly restFetch?: PreparedRestFetch;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly setTimeout?: (
     callback: () => void,
@@ -117,6 +118,10 @@ const TIMEOUT_SENTINEL = Object.freeze({ timeout: true });
 const NETWORK_SENTINEL = Object.freeze({ network: true });
 
 function defaultFetch(url: string, init: AuthRequestInit): Promise<unknown> {
+  return fetch(url, init);
+}
+
+function defaultRestFetch(url: string, init: PreparedRestFetchInit): Promise<unknown> {
   return fetch(url, init);
 }
 
@@ -376,6 +381,7 @@ export class CredentialSession {
   private readonly repository: CredentialSettingsPort;
   private readonly now: () => number;
   private readonly fetch: AuthFetch;
+  private readonly restFetch: PreparedRestFetch;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly setTimeout: CredentialSessionOptions["setTimeout"];
   private readonly clearTimeout: CredentialSessionOptions["clearTimeout"];
@@ -387,6 +393,7 @@ export class CredentialSession {
     this.repository = repository;
     this.now = options.now ?? Date.now;
     this.fetch = options.fetch ?? defaultFetch;
+    this.restFetch = options.restFetch ?? defaultRestFetch;
     this.sleep = options.sleep ?? defaultSleep;
     this.setTimeout = options.setTimeout ?? defaultSetTimeout;
     this.clearTimeout = options.clearTimeout ?? defaultClearTimeout;
@@ -600,9 +607,8 @@ export class CredentialSession {
     };
     const execute = (
       request: PreparedRestRequest,
-      transport: PreparedRestFetch,
     ): Promise<unknown> => {
-      if (used || typeof transport !== "function") throw invalidAuthInputError();
+      if (used) throw invalidAuthInputError();
       if (
         typeof request !== "object" || request === null ||
         typeof request.url !== "string" ||
@@ -618,7 +624,7 @@ export class CredentialSession {
           "자격증명이 변경되어 이전 인증 결과를 폐기했습니다.",
         );
       }
-      return Promise.resolve(transport(request.url, {
+      return Promise.resolve(this.restFetch(request.url, {
         method: "GET",
         headers: Object.freeze({
           "Content-Type": "application/json; charset=utf-8",
