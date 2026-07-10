@@ -187,4 +187,28 @@ describe("MarketClock lifecycle", () => {
     canceledAfterStop();
     expect(callbacks).toHaveLength(4);
   });
+
+  it("serializes reentrant evaluation so every listener observes the same order", () => {
+    let now = at("2026-07-05T23:40:00.000Z");
+    const clock = new MarketClock("domestic", { now: () => now });
+    const observedBySecondListener: string[] = [];
+    let reentered = false;
+
+    clock.subscribe((snapshot) => {
+      if (snapshot.session === "REG" && !reentered) {
+        reentered = true;
+        now = at("2026-07-06T06:45:00.000Z");
+        clock.snapshot();
+      }
+    });
+    clock.subscribe((snapshot) => {
+      observedBySecondListener.push(snapshot.session);
+    });
+    observedBySecondListener.length = 0;
+
+    now = at("2026-07-06T01:00:00.000Z");
+    clock.snapshot();
+
+    expect(observedBySecondListener).toEqual(["REG", "AFT"]);
+  });
 });

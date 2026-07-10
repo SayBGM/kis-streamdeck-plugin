@@ -23,6 +23,10 @@ function overseasFields(): string[] {
   ];
 }
 
+function expectKisError(code: "INVALID_INSTRUMENT" | "PROTOCOL") {
+  return expect.objectContaining({ code });
+}
+
 describe("domestic market adapters", () => {
   it("normalizes a stock and builds its KIS REST/WS descriptors", () => {
     const instrument = domesticStockAdapter.toInstrument({
@@ -148,6 +152,13 @@ describe("overseas market adapter", () => {
     });
   });
 
+  it("accepts a class-share ticker", () => {
+    expect(overseasStockAdapter.toInstrument({
+      ticker: " brk.b ",
+      exchange: "NYS",
+    }).symbol).toBe("BRK.B");
+  });
+
   it("normalizes overseas WebSocket and REST payloads", () => {
     const instrument = overseasStockAdapter.toInstrument({
       ticker: "AAPL",
@@ -178,6 +189,71 @@ describe("overseas market adapter", () => {
 });
 
 describe("market adapter validation", () => {
+  it.each(["1e3", "0x10", "12px", "", " 12"])(
+    "rejects non-KIS decimal syntax in both WebSocket markets: %j",
+    (invalidPrice) => {
+      const domestic = domesticFields();
+      domestic[2] = invalidPrice;
+      const overseas = overseasFields();
+      overseas[11] = invalidPrice;
+
+      expect(() => domesticStockAdapter.parseWebSocket(
+        domestic,
+        domesticStockAdapter.toInstrument({ stockCode: "005930" }),
+        context,
+      )).toThrowError(expectKisError("PROTOCOL"));
+      expect(() => overseasStockAdapter.parseWebSocket(
+        overseas,
+        overseasStockAdapter.toInstrument({ ticker: "AAPL", exchange: "NAS" }),
+        context,
+      )).toThrowError(expectKisError("PROTOCOL"));
+    },
+  );
+
+  it.each(["0", "-1"])("requires a positive price in WS and REST: %s", (price) => {
+    const domestic = domesticFields();
+    domestic[2] = price;
+    const overseas = overseasFields();
+    overseas[11] = price;
+    const domesticInstrument = domesticStockAdapter.toInstrument({ stockCode: "005930" });
+    const overseasInstrument = overseasStockAdapter.toInstrument({ ticker: "AAPL", exchange: "NAS" });
+
+    expect(() => domesticStockAdapter.parseWebSocket(
+      domestic, domesticInstrument, context,
+    )).toThrowError(expectKisError("PROTOCOL"));
+    expect(() => overseasStockAdapter.parseWebSocket(
+      overseas, overseasInstrument, context,
+    )).toThrowError(expectKisError("PROTOCOL"));
+    expect(() => domesticStockAdapter.parseRest({
+      output: { stck_prpr: price, prdy_vrss_sign: "3", prdy_ctrt: "0" },
+    }, domesticInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
+    expect(() => overseasStockAdapter.parseRest({
+      output: { last: price, sign: "3", rate: "0" },
+    }, overseasInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
+  });
+
+  it.each(["0", "6", "rise"])("rejects unknown sign code %j in WS and REST", (signCode) => {
+    const domestic = domesticFields();
+    domestic[3] = signCode;
+    const overseas = overseasFields();
+    overseas[12] = signCode;
+    const domesticInstrument = domesticStockAdapter.toInstrument({ stockCode: "005930" });
+    const overseasInstrument = overseasStockAdapter.toInstrument({ ticker: "AAPL", exchange: "NAS" });
+
+    expect(() => domesticStockAdapter.parseWebSocket(
+      domestic, domesticInstrument, context,
+    )).toThrowError(expectKisError("PROTOCOL"));
+    expect(() => overseasStockAdapter.parseWebSocket(
+      overseas, overseasInstrument, context,
+    )).toThrowError(expectKisError("PROTOCOL"));
+    expect(() => domesticStockAdapter.parseRest({
+      output: { stck_prpr: "1", prdy_vrss_sign: signCode, prdy_ctrt: "0" },
+    }, domesticInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
+    expect(() => overseasStockAdapter.parseRest({
+      output: { last: "1", sign: signCode, rate: "0" },
+    }, overseasInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
+  });
+
   it.each([
     () => domesticStockAdapter.parseWebSocket([], domesticStockAdapter.toInstrument({ stockCode: "005930" }), context),
     () => overseasStockAdapter.parseWebSocket(["DNASAAPL"], overseasStockAdapter.toInstrument({ ticker: "AAPL", exchange: "NAS" }), context),
@@ -195,6 +271,82 @@ describe("market adapter validation", () => {
   it("rejects an empty symbol as an invalid instrument", () => {
     expect(() => domesticStockAdapter.toInstrument({ stockCode: "  " })).toThrowError(
       expect.objectContaining({ code: "INVALID_INSTRUMENT" }),
+    );
+  });
+
+  it.each([
+    { stockCode: "00593" },
+    { stockCode: "00593!" },
+    { stockCode: "삼성전자" },
+  ])("requires a six-character alphanumeric domestic code", (settings) => {
+    expect(() => domesticStockAdapter.toInstrument(settings)).toThrowError(
+      expectKisError("INVALID_INSTRUMENT"),
+    );
+  });
+
+  it.each([
+    "BRK B",
+    "BRK/B",
+    "AAPL\n",
+    ".AAPL",
+    "AAPL-",
+    "ABCDEFGHIJKLMNOP",
+  ])("rejects unsafe or excessive overseas ticker %j", (ticker) => {
+    expect(() => overseasStockAdapter.toInstrument({ ticker, exchange: "NAS" })).toThrowError(
+      expectKisError("INVALID_INSTRUMENT"),
+    );
+  });
+
+  it("normalizes hostile settings values to INVALID_INSTRUMENT", () => {
+    const getterSettings = Object.defineProperty({}, "stockCode", {
+      enumerable: true,
+      get: () => {
+        throw new Error("getter should not escape");
+      },
+    });
+    const trapSettings = new Proxy({}, {
+      getOwnPropertyDescriptor: () => {
+        throw new Error("proxy should not escape");
+      },
+    });
+    const revocable = Proxy.revocable({ stockCode: "005930" }, {});
+    revocable.revoke();
+
+    for (const settings of [
+      123,
+      Symbol("settings"),
+      { stockCode: 5930 },
+      { ticker: Symbol("AAPL") },
+      getterSettings,
+      trapSettings,
+      revocable.proxy,
+    ]) {
+      expect(() => domesticStockAdapter.toInstrument(settings as never)).toThrowError(
+        expectKisError("INVALID_INSTRUMENT"),
+      );
+    }
+  });
+
+  it("normalizes a revoked REST payload proxy to PROTOCOL", () => {
+    const revocable = Proxy.revocable({ output: {} }, {});
+    revocable.revoke();
+
+    expect(() => overseasStockAdapter.parseRest(
+      revocable.proxy,
+      overseasStockAdapter.toInstrument({ ticker: "AAPL", exchange: "NAS" }),
+      context,
+    )).toThrowError(expectKisError("PROTOCOL"));
+  });
+
+  it("rejects adapter and instrument mismatches", () => {
+    const etf = domesticEtfAdapter.toInstrument({ stockCode: "0210A0" });
+    const domestic = domesticStockAdapter.toInstrument({ stockCode: "005930" });
+
+    expect(() => domesticStockAdapter.restDescriptor(etf)).toThrowError(
+      expectKisError("INVALID_INSTRUMENT"),
+    );
+    expect(() => overseasStockAdapter.webSocketDescriptor(domestic, context.receivedAt)).toThrowError(
+      expectKisError("INVALID_INSTRUMENT"),
     );
   });
 });

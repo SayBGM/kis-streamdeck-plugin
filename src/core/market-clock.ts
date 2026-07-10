@@ -238,6 +238,8 @@ export class MarketClock {
   private resyncTimer: unknown;
   private transitionTimer: unknown;
   private timerGeneration = 0;
+  private evaluating = false;
+  private evaluationQueued = false;
   private running = false;
   private current: MarketSnapshot;
 
@@ -283,10 +285,24 @@ export class MarketClock {
   }
 
   private evaluate(): void {
-    const next = getMarketSnapshot(this.market, this.now());
-    if (sameSnapshot(this.current, next)) return;
-    this.current = next;
-    for (const listener of [...this.listeners]) this.invoke(listener, next);
+    if (this.evaluating) {
+      this.evaluationQueued = true;
+      return;
+    }
+
+    this.evaluating = true;
+    try {
+      do {
+        this.evaluationQueued = false;
+        const next = getMarketSnapshot(this.market, this.now());
+        if (!sameSnapshot(this.current, next)) {
+          this.current = next;
+          for (const listener of [...this.listeners]) this.invoke(listener, next);
+        }
+      } while (this.evaluationQueued);
+    } finally {
+      this.evaluating = false;
+    }
   }
 
   private invoke(listener: MarketClockListener, snapshot: MarketSnapshot): void {
