@@ -85,6 +85,10 @@ function responseSnapshot() {
   };
 }
 
+function snapshotAt(revision: number) {
+  return { ...responseSnapshot(), settingsRevision: revision };
+}
+
 describe("Property Inspector UI", () => {
   it("uses command messages and contains no direct global-settings SDK commands", () => {
     const helper = readUi("sdpi.js");
@@ -228,6 +232,117 @@ describe("Property Inspector UI", () => {
       detail: { requestId: oldRequest.requestId, ok: true, snapshot: responseSnapshot() },
     }));
     expect(secret.value).toBe("newer-secret");
+  });
+
+  it("advances only the revision on a token diagnostics tick so a dirty preference save succeeds", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const secret = document.getElementById("appSecret") as unknown as { value: string; dispatchEvent(event: unknown): boolean };
+    const mode = document.getElementById("dataMode") as unknown as { value: string; dispatchEvent(event: unknown): boolean };
+    secret.value = "dirty-secret";
+    secret.dispatchEvent(new window.Event("input"));
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: snapshotAt(5) },
+    }));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(secret.value).toBe("dirty-secret");
+    expect(mode.value).toBe("rest-only");
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 5,
+      preferences: { dataMode: "rest-only" },
+    });
+  });
+
+  it("recovers credential save and clear retries from conflict snapshots without losing dirty input", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const key = document.getElementById("appKey") as unknown as { value: string; dispatchEvent(event: unknown): boolean };
+    const secret = document.getElementById("appSecret") as unknown as { value: string; dispatchEvent(event: unknown): boolean };
+    key.value = "NEWKEY";
+    key.dispatchEvent(new window.Event("input"));
+    secret.value = "dirty-secret";
+    secret.dispatchEvent(new window.Event("input"));
+    document.getElementById("saveCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    const firstSave = commands.at(-1) as { requestId: string };
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: firstSave.requestId,
+        ok: false,
+        error: { safeMessage: "설정 충돌" },
+        snapshot: snapshotAt(5),
+      },
+    }));
+
+    expect(secret.value).toBe("dirty-secret");
+    document.getElementById("saveCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    const retrySave = commands.at(-1) as { requestId: string };
+    expect(commands.at(-1)).toMatchObject({ type: "credentials/save", settingsRevision: 5 });
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: retrySave.requestId, ok: true, snapshot: snapshotAt(6) },
+    }));
+
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    const firstClear = commands.at(-1) as { requestId: string };
+    expect(commands.at(-1)).toMatchObject({ type: "credentials/clear", settingsRevision: 6 });
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: firstClear.requestId,
+        ok: false,
+        error: { safeMessage: "설정 충돌" },
+        snapshot: snapshotAt(7),
+      },
+    }));
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({ type: "credentials/clear", settingsRevision: 7 });
+  });
+
+  it("recovers preference retries and ignores an older out-of-order conflict revision", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const mode = document.getElementById("dataMode") as unknown as { value: string; dispatchEvent(event: unknown): boolean };
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const first = commands.at(-1) as { requestId: string };
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: first.requestId,
+        ok: false,
+        error: { safeMessage: "설정 충돌" },
+        snapshot: snapshotAt(5),
+      },
+    }));
+    expect(mode.value).toBe("rest-only");
+
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const second = commands.at(-1) as { requestId: string };
+    expect(commands.at(-1)).toMatchObject({ type: "preferences/save", settingsRevision: 5 });
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: second.requestId, ok: true, snapshot: snapshotAt(6) },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: first.requestId,
+        ok: false,
+        error: { safeMessage: "늦은 충돌" },
+        snapshot: snapshotAt(5),
+      },
+    }));
+
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({ type: "preferences/save", settingsRevision: 6 });
+    expect(document.getElementById("advancedStatusMessage")?.textContent).not.toContain("늦은");
   });
 
   it("uses an external-only CSP and external configuration scripts", () => {

@@ -113,6 +113,7 @@ function createHarness(initial: GlobalSettings = {}) {
     get disk() { return structuredClone(disk); },
     getGlobalSettings,
     setGlobalSettings,
+    writeDisk(settings: GlobalSettings) { disk = structuredClone(settings); },
   };
 }
 
@@ -225,6 +226,36 @@ describe("PiController", () => {
       ok: false,
       error: { code: "SETTINGS", retryable: true },
     });
+    harness.controller.destroy();
+  });
+
+  it("returns a refreshed sanitized snapshot with a settings conflict", async () => {
+    const harness = createHarness();
+    await harness.settingsRepository.initialize();
+    const staleRevision = harness.settingsRepository.getSnapshot().settings.settingsRevision;
+    harness.writeDisk({
+      ...harness.disk,
+      settingsRevision: staleRevision + 1,
+    });
+
+    await harness.controller.handleCommand("ctx-1", "domestic", {
+      type: "preferences/save",
+      requestId: "prefs-conflict",
+      settingsRevision: staleRevision,
+      preferences: {
+        dataMode: "rest-only",
+        renderIntervalMs: 10_000,
+        backupPollIntervalMs: 60_000,
+      },
+    });
+
+    expect(lastResponse(harness)).toMatchObject({
+      requestId: "prefs-conflict",
+      ok: false,
+      error: { code: "SETTINGS" },
+      snapshot: { settingsRevision: staleRevision + 1 },
+    });
+    expect(JSON.stringify(lastResponse(harness))).not.toMatch(/appSecret|accessToken|approvalKey/i);
     harness.controller.destroy();
   });
 
@@ -411,6 +442,32 @@ describe("PiController", () => {
       await Promise.resolve();
       await Promise.resolve();
       expect(harness.sent).toHaveLength(beforeResolve);
+    } finally {
+      harness.controller.destroy();
+      vi.useRealTimers();
+    }
+  });
+
+  it("publishes the latest revision after an internal token settings write", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({ appKey: "KEY", appSecret: "SECRET" });
+    try {
+      await harness.controller.propertyInspectorDidAppear("ctx-1", "domestic");
+      harness.sent.length = 0;
+      const before = harness.settingsRepository.getSnapshot().settings.settingsRevision;
+      await harness.settingsRepository.update((draft) => {
+        draft.accessToken = "internal-token";
+        draft.accessTokenExpiry = Date.now() + 60_000;
+        draft.accessTokenFingerprint = draft.credentialFingerprint;
+        draft.accessTokenVersion += 1;
+      });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(lastResponse(harness)).toMatchObject({
+        type: "diagnostics/update",
+        snapshot: { settingsRevision: before + 1 },
+      });
     } finally {
       harness.controller.destroy();
       vi.useRealTimers();

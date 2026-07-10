@@ -247,6 +247,11 @@
     this.applyDiagnostics(snapshot.diagnostics);
   };
 
+  StockPropertyInspector.prototype.applyRevision = function (snapshot) {
+    if (!snapshot || snapshot.schemaVersion !== 2) return;
+    this.settingsRevision = Math.max(this.settingsRevision, snapshot.settingsRevision || 0);
+  };
+
   StockPropertyInspector.prototype.applyDiagnostics = function (diagnostics) {
     diagnostics = diagnostics || {};
     var websocket = diagnostics.websocket || {};
@@ -265,7 +270,10 @@
   StockPropertyInspector.prototype.handleMessage = function (message) {
     if (!message || typeof message !== "object") return;
     if (message.type === "diagnostics/update") {
-      if (message.snapshot) this.applyDiagnostics(message.snapshot.diagnostics);
+      if (message.snapshot) {
+        this.applyRevision(message.snapshot);
+        this.applyDiagnostics(message.snapshot.diagnostics);
+      }
       return;
     }
     if (message.type === "settings/update") {
@@ -285,13 +293,14 @@
       return;
     }
     delete this.pendingRequests[message.requestId];
+    if (message.snapshot) this.applyRevision(message.snapshot);
     if (this.latestRequestBySection[pending.section] !== message.requestId) return;
 
     if (message.snapshot) {
       if (pending.section === "credentials") {
         var credentialsUnchanged = pending.credentialEditVersion === this.credentialEditVersion;
         this.applySnapshot(message.snapshot, {
-          applyCredentials: credentialsUnchanged,
+          applyCredentials: credentialsUnchanged && message.ok === true,
           applyPreferences: false,
         });
         if (credentialsUnchanged && message.ok === true) this.credentialEditVersion = 0;
@@ -299,7 +308,7 @@
         var preferencesUnchanged = pending.preferencesEditVersion === this.preferencesEditVersion;
         this.applySnapshot(message.snapshot, {
           applyCredentials: false,
-          applyPreferences: preferencesUnchanged,
+          applyPreferences: preferencesUnchanged && message.ok === true,
         });
         if (preferencesUnchanged && message.ok === true) this.preferencesEditVersion = 0;
       } else if (pending.section === "settings") {
@@ -308,6 +317,7 @@
           applyPreferences: pending.preferencesEditVersion === this.preferencesEditVersion,
         });
       } else {
+        this.applyRevision(message.snapshot);
         this.applyDiagnostics(message.snapshot.diagnostics);
       }
     }

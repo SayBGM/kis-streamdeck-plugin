@@ -454,9 +454,10 @@ export class PiController {
       } catch (error) {
         const safe = normalizeError(error);
         this.record(safe);
+        const snapshot = await this.recoverSnapshot(safe, () => this.fenceCurrent(fence));
         await this.safeSend(
           contextId,
-          this.failure(requestId, safe),
+          this.failure(requestId, safe, snapshot),
           () => this.fenceCurrent(fence),
         );
       }
@@ -594,7 +595,11 @@ export class PiController {
     };
   }
 
-  private failure(requestId: string, error: KisError): PiResponse {
+  private failure(
+    requestId: string,
+    error: KisError,
+    snapshot?: SanitizedPiSnapshot,
+  ): PiResponse {
     return {
       requestId,
       ok: false,
@@ -604,7 +609,24 @@ export class PiController {
         retryable: error.retryable,
         safeMessage: error.safeMessage,
       },
+      ...(snapshot ? { snapshot } : {}),
     };
+  }
+
+  private async recoverSnapshot(
+    error: KisError,
+    current: () => boolean,
+  ): Promise<SanitizedPiSnapshot | undefined> {
+    if (error.code !== "SETTINGS" || !current()) return undefined;
+    try {
+      // A revision conflict can be thrown before the repository adopts the fresh
+      // disk state. A no-op transaction refreshes it without advancing revision.
+      await this.settingsRepository.update(() => undefined);
+      if (!current()) return undefined;
+      return await this.buildSnapshot();
+    } catch {
+      return undefined;
+    }
   }
 
   private ensureInterval(): void {

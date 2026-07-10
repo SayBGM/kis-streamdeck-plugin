@@ -113,10 +113,6 @@ export class PluginRuntime {
   }
 
   private async destroyOnce(): Promise<void> {
-    await Promise.allSettled([
-      this.services.domesticController.destroy(),
-      this.services.overseasController.destroy(),
-    ]);
     const cleanup = [
       () => this.services.piController.destroy(),
       () => this.services.subscriptionSupervisor.destroy(),
@@ -129,6 +125,10 @@ export class PluginRuntime {
     for (const operation of cleanup) {
       try { operation(); } catch { /* best-effort shutdown */ }
     }
+    await Promise.allSettled([
+      Promise.resolve().then(() => this.services.domesticController.destroy()),
+      Promise.resolve().then(() => this.services.overseasController.destroy()),
+    ]);
   }
 }
 

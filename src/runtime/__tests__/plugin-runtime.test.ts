@@ -332,4 +332,38 @@ describe("PluginRuntime", () => {
     expect(services.connectionSupervisor.destroy).toHaveBeenCalledOnce();
     expect(services.renderScheduler.destroy).toHaveBeenCalledOnce();
   });
+
+  it("performs shared synchronous cleanup before awaiting readiness-bound action teardown", async () => {
+    const services = fakeServices();
+    const gate = deferred<void>();
+    const order: string[] = [];
+    vi.mocked(services.domesticController.destroy).mockImplementation(async () => {
+      order.push("action:start");
+      await gate.promise;
+      order.push("action:end");
+    });
+    vi.mocked(services.piController.destroy).mockImplementation(() => { order.push("pi"); });
+    vi.mocked(services.subscriptionSupervisor.destroy).mockImplementation(() => { order.push("subscriptions"); });
+    vi.mocked(services.connectionSupervisor.destroy).mockImplementation(() => { order.push("connection"); });
+    vi.mocked(services.renderScheduler.destroy).mockImplementation(() => { order.push("render"); });
+    const runtime = new PluginRuntime(services);
+
+    const pending = runtime.destroy();
+    await Promise.resolve();
+
+    expect(order.slice(0, 4)).toEqual(["pi", "subscriptions", "connection", "render"]);
+    expect(services.clocks.domestic.stop).toHaveBeenCalledOnce();
+    expect(services.clocks.overseas.stop).toHaveBeenCalledOnce();
+    expect(order).toContain("action:start");
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    gate.resolve();
+    await pending;
+    expect(order.at(-1)).toBe("action:end");
+    await runtime.destroy();
+    expect(services.piController.destroy).toHaveBeenCalledOnce();
+  });
 });
