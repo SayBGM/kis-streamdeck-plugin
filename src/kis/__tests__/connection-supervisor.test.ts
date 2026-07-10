@@ -393,6 +393,76 @@ describe("ConnectionSupervisor", () => {
     expect(sockets).toHaveLength(4);
   });
 
+  it("does not reset reconnect backoff when the 30 second check coincides with an unanswered ping", async () => {
+    const first = await retainAndOpen();
+    first.emit("close");
+    advance(5_000);
+    await flush();
+    const second = sockets[1];
+    second.readyState = 1;
+    second.emit("open");
+
+    advance(14_999);
+    second.emit("message", "recent activity");
+    advance(1);
+    advance(14_999);
+    advance(1);
+    expect(second.pingCalls).toBe(1);
+
+    advance(5_000);
+    expect(supervisor.state).toBe("reconnect_wait");
+    advance(9_999);
+    await flush();
+    expect(sockets).toHaveLength(2);
+    advance(1);
+    await flush();
+    expect(sockets).toHaveLength(3);
+  });
+
+  it("resets reconnect backoff after activity confirms liveness before the 30 second check", async () => {
+    const first = await retainAndOpen();
+    first.emit("close");
+    advance(5_000);
+    await flush();
+    const second = sockets[1];
+    second.readyState = 1;
+    second.emit("open");
+
+    advance(14_000);
+    second.emit("message", "activity");
+    advance(14_000);
+    second.emit("message", "activity");
+    advance(2_000);
+    second.emit("close");
+
+    advance(5_000);
+    await flush();
+    expect(sockets).toHaveLength(3);
+  });
+
+  it("resets reconnect backoff when pong confirms liveness after the 30 second check", async () => {
+    const first = await retainAndOpen();
+    first.emit("close");
+    advance(5_000);
+    await flush();
+    const second = sockets[1];
+    second.readyState = 1;
+    second.emit("open");
+
+    advance(14_999);
+    second.emit("message", "recent activity");
+    advance(1);
+    advance(14_999);
+    advance(1);
+    expect(second.pingCalls).toBe(1);
+    second.emit("pong");
+    second.emit("close");
+
+    advance(5_000);
+    await flush();
+    expect(sockets).toHaveLength(3);
+  });
+
   it("echoes JSON and text PINGPONG frames byte-for-byte", async () => {
     const socket = await retainAndOpen();
     const json = '{"header":{"tr_id":"PINGPONG"},"body":{"x":1}}';

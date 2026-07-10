@@ -155,6 +155,8 @@ export class ConnectionSupervisor {
   private reconnectAttempts = 0;
   private reconnectGeneration = 0;
   private lastActivityAt = 0;
+  private openedAt = 0;
+  private hasConfirmedLiveness = false;
   private awaitingHeartbeat = false;
   private approval: ApprovalKeyLease | undefined;
   private approvalRequestEpoch = 0;
@@ -427,7 +429,9 @@ export class ConnectionSupervisor {
     this.clearConnectTimeout();
     this.connectionAttempt = undefined;
     attempt.resolve();
-    this.lastActivityAt = this.safeNow();
+    this.openedAt = this.safeNow();
+    this.lastActivityAt = this.openedAt;
+    this.hasConfirmedLiveness = false;
     this.awaitingHeartbeat = false;
     this.setState("open");
     if (!this.isCurrentSocket(socket, socketEpoch) || this.currentState !== "open") {
@@ -448,8 +452,10 @@ export class ConnectionSupervisor {
   private handleActivity(socket: SocketLike, socketEpoch: number): void {
     if (!this.isCurrentSocket(socket, socketEpoch)) return;
     this.lastActivityAt = this.safeNow();
+    this.hasConfirmedLiveness = true;
     this.awaitingHeartbeat = false;
     this.clearHeartbeatTimeout();
+    this.resetBackoffAfterConfirmedLiveness(socket, socketEpoch);
   }
 
   private handleSocketFailure(socket: SocketLike, socketEpoch: number, reason: string): void {
@@ -595,7 +601,7 @@ export class ConnectionSupervisor {
       this.stableLivenessTimer = this.setTimeoutFn(() => {
         this.stableLivenessTimer = undefined;
         if (!this.isCurrentSocket(socket, socketEpoch) || this.currentState !== "open") return;
-        this.reconnectAttempts = 0;
+        this.resetBackoffAfterConfirmedLiveness(socket, socketEpoch);
       }, STABLE_LIVENESS_MS);
     } catch {
       // The retry counter staying elevated is safer than treating an unknown timer state as healthy.
@@ -699,6 +705,22 @@ export class ConnectionSupervisor {
       // The callback validates the current socket before mutating state.
     }
     this.stableLivenessTimer = undefined;
+  }
+
+  private resetBackoffAfterConfirmedLiveness(
+    socket: SocketLike,
+    socketEpoch: number,
+  ): void {
+    if (
+      !this.isCurrentSocket(socket, socketEpoch) ||
+      this.currentState !== "open" ||
+      this.awaitingHeartbeat ||
+      !this.hasConfirmedLiveness ||
+      this.safeNow() - this.openedAt < STABLE_LIVENESS_MS
+    ) {
+      return;
+    }
+    this.reconnectAttempts = 0;
   }
 
   private clearReconnectTimer(): void {
