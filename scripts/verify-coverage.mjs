@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,12 +28,76 @@ const exactGroups = [
   },
 ];
 
-function normalizedRelative(projectRoot, filePath) {
-  return path.relative(projectRoot, filePath).replaceAll("\\", "/");
-}
-
 function percent(covered, total) {
   return total === 0 ? 100 : (covered / total) * 100;
+}
+
+async function canonicalCoverageRecords(coverage, projectRoot) {
+  const canonicalProjectRoot = await realpath(projectRoot);
+  const sourceRoot = await realpath(path.join(canonicalProjectRoot, "src"));
+  const sourceRootInfo = await stat(sourceRoot);
+  if (!sourceRootInfo.isDirectory()) {
+    throw new Error(`projectRoot/src가 디렉터리가 아닙니다: ${sourceRoot}`);
+  }
+
+  const canonicalSources = new Set();
+  const portableSources = new Set();
+  const records = [];
+  for (const [reportKey, data] of Object.entries(coverage)) {
+    const inputPath = path.isAbsolute(reportKey)
+      ? path.resolve(reportKey)
+      : path.resolve(canonicalProjectRoot, reportKey);
+    let canonicalSource;
+    let sourceInfo;
+    try {
+      canonicalSource = await realpath(inputPath);
+      sourceInfo = await stat(canonicalSource);
+    } catch {
+      throw new Error(`coverage source가 존재하는 regular .ts 파일이 아닙니다: ${reportKey}`);
+    }
+    if (!sourceInfo.isFile() || path.extname(canonicalSource) !== ".ts") {
+      throw new Error(`coverage source가 regular TypeScript .ts 파일이 아닙니다: ${reportKey}`);
+    }
+
+    const sourceRelative = path.relative(sourceRoot, canonicalSource);
+    if (
+      sourceRelative === "" ||
+      sourceRelative === ".." ||
+      sourceRelative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(sourceRelative)
+    ) {
+      throw new Error(`coverage source가 projectRoot/src 밖을 가리킵니다: ${reportKey}`);
+    }
+
+    if (typeof data !== "object" || data === null || typeof data.path !== "string") {
+      throw new Error(`coverage record path가 올바르지 않습니다: ${reportKey}`);
+    }
+    const dataPath = path.isAbsolute(data.path)
+      ? path.resolve(data.path)
+      : path.resolve(canonicalProjectRoot, data.path);
+    let canonicalDataPath;
+    try {
+      canonicalDataPath = await realpath(dataPath);
+    } catch {
+      throw new Error(`coverage record path가 존재하지 않습니다: ${data.path}`);
+    }
+    if (canonicalDataPath !== canonicalSource) {
+      throw new Error(`coverage key와 record path가 다른 source를 가리킵니다: ${reportKey}`);
+    }
+
+    const relative = sourceRelative.replaceAll("\\", "/");
+    const portable = relative
+      .split("/")
+      .map((component) => component.normalize("NFC").toLocaleLowerCase("en-US"))
+      .join("/");
+    if (canonicalSources.has(canonicalSource) || portableSources.has(portable)) {
+      throw new Error(`중복 또는 Unicode/대소문자 충돌 coverage source입니다: ${reportKey}`);
+    }
+    canonicalSources.add(canonicalSource);
+    portableSources.add(portable);
+    records.push({ relative: `src/${relative}`, data });
+  }
+  return records;
 }
 
 function lineCounts(fileCoverage) {
@@ -68,10 +132,7 @@ export async function verifyCoverage({
   reportPath = path.join(projectRoot, "coverage", "coverage-final.json"),
 } = {}) {
   const coverage = JSON.parse(await readFile(reportPath, "utf8"));
-  const records = Object.entries(coverage).map(([filePath, data]) => ({
-    relative: normalizedRelative(projectRoot, filePath),
-    data,
-  }));
+  const records = await canonicalCoverageRecords(coverage, projectRoot);
   if (records.length === 0) {
     throw new Error("coverage-final.json에 측정된 TypeScript 파일이 없습니다.");
   }

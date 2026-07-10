@@ -9,9 +9,9 @@ const tempRoots: string[] = [];
 const execFileAsync = promisify(execFile);
 const scriptPath = path.resolve(process.cwd(), "scripts/verify-coverage.mjs");
 
-function coveredFile(branchHits: number[]): object {
+function coveredFile(branchHits: number[], filePath = "fixture.ts"): object {
   return {
-    path: "fixture.ts",
+    path: filePath,
     statementMap: { 0: { start: { line: 1, column: 0 }, end: { line: 1, column: 1 } } },
     s: { 0: 1 },
     fnMap: { 0: {} },
@@ -31,15 +31,25 @@ async function coverageFixture(
   tempRoots.push(root);
   const src = path.join(root, "src");
   const report = path.join(root, "coverage", "coverage-final.json");
+  const baselinePaths = [
+    path.join(src, "core/errors.ts"),
+    path.join(src, "settings/schema.ts"),
+    path.join(src, "actions/stock-action-controller.ts"),
+    path.join(src, "renderer/render-scheduler.ts"),
+    path.join(src, "kis/credential-session.ts"),
+    path.join(src, "kis/rest-coordinator.ts"),
+    path.join(src, "kis/connection-supervisor.ts"),
+    path.join(src, "kis/subscription-supervisor.ts"),
+  ];
+  const baseline = Object.fromEntries(
+    baselinePaths.map((filePath) => [filePath, coveredFile([2, 2, 2, 2, 2], filePath)]),
+  );
+  for (const filePath of baselinePaths) {
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, "export {};\n", "utf8");
+  }
   const files: Record<string, object> = {
-    [path.join(src, "core/errors.ts")]: coveredFile([2, 2, 2, 2, 2]),
-    [path.join(src, "settings/schema.ts")]: coveredFile([2, 2, 2, 2, 2]),
-    [path.join(src, "actions/stock-action-controller.ts")]: coveredFile([2, 2, 2, 2, 2]),
-    [path.join(src, "renderer/render-scheduler.ts")]: coveredFile([2, 2, 2, 2, 2]),
-    [path.join(src, "kis/credential-session.ts")]: coveredFile([2, 2, 2, 2, 2]),
-    [path.join(src, "kis/rest-coordinator.ts")]: coveredFile([2, 2, 2, 2, 2]),
-    [path.join(src, "kis/connection-supervisor.ts")]: coveredFile([2, 2, 2, 2, 2]),
-    [path.join(src, "kis/subscription-supervisor.ts")]: coveredFile([2, 2, 2, 2, 2]),
+    ...baseline,
     ...overrides,
   };
   await mkdir(path.dirname(report), { recursive: true });
@@ -76,7 +86,8 @@ describe("verify-coverage", () => {
       "connection-supervisor.ts",
       "subscription-supervisor.ts",
     ]) {
-      coverage[path.join(root, "src/kis", source)] = coveredFile([2, 0, 0, 0, 0]);
+      const filePath = path.join(root, "src/kis", source);
+      coverage[filePath] = coveredFile([2, 0, 0, 0, 0], filePath);
     }
     await writeFile(report, JSON.stringify(coverage), "utf8");
 
@@ -98,5 +109,86 @@ describe("verify-coverage", () => {
 
     expect(error).toMatchObject({ code: 1 });
     expect(error.stderr).toContain("subscription-supervisor.ts");
+  });
+
+  it("rejects a nonexistent fake core record instead of letting it inflate coverage", async () => {
+    const { root, report } = await coverageFixture();
+    const coverage = JSON.parse(await readFile(report, "utf8"));
+    const fakePath = path.join(root, "src/core/fake-high-coverage.ts");
+    coverage[fakePath] = coveredFile([2, 2, 2, 2, 2], fakePath);
+    await writeFile(report, JSON.stringify(coverage), "utf8");
+
+    const error = await execFileAsync(process.execPath, [scriptPath, report, root])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/fake-high-coverage\.ts.*존재|찾지 못|regular/i);
+  });
+
+  it("rejects an existing coverage source outside projectRoot/src", async () => {
+    const { root, report } = await coverageFixture();
+    const outsidePath = path.join(root, "outside.ts");
+    await writeFile(outsidePath, "export {};\n", "utf8");
+    const coverage = JSON.parse(await readFile(report, "utf8"));
+    coverage[outsidePath] = coveredFile([2, 2], outsidePath);
+    await writeFile(report, JSON.stringify(coverage), "utf8");
+
+    const error = await execFileAsync(process.execPath, [scriptPath, report, root])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/projectRoot\/src|src 밖|outside\.ts/i);
+  });
+
+  it("rejects a non-TypeScript coverage source", async () => {
+    const { root, report } = await coverageFixture();
+    const javascriptPath = path.join(root, "src/core/not-typescript.js");
+    await writeFile(javascriptPath, "export {};\n", "utf8");
+    const coverage = JSON.parse(await readFile(report, "utf8"));
+    coverage[javascriptPath] = coveredFile([2, 2], javascriptPath);
+    await writeFile(report, JSON.stringify(coverage), "utf8");
+
+    const error = await execFileAsync(process.execPath, [scriptPath, report, root])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/\.ts|TypeScript/i);
+  });
+
+  it("rejects two report keys that canonicalize to the same source", async () => {
+    const { root, report } = await coverageFixture();
+    const coverage = JSON.parse(await readFile(report, "utf8"));
+    const canonicalPath = path.join(root, "src/core/errors.ts");
+    const aliasPath = `${root}/src/core/../core/errors.ts`;
+    coverage[aliasPath] = coveredFile([2, 2], aliasPath);
+    await writeFile(report, JSON.stringify(coverage), "utf8");
+
+    const error = await execFileAsync(process.execPath, [scriptPath, report, root])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(canonicalPath).not.toBe(aliasPath);
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/중복|duplicate|canonical/i);
+  });
+
+  it.each([
+    ["CaseCollision.ts", "casecollision.ts"],
+    ["caf\u00e9.ts", "cafe\u0301.ts"],
+  ])("rejects case or Unicode canonical source collisions: %s / %s", async (first, second) => {
+    const { root, report } = await coverageFixture();
+    const firstPath = path.join(root, "src/core", first);
+    const secondPath = path.join(root, "src/core", second);
+    await writeFile(firstPath, "export {};\n", "utf8");
+    await writeFile(secondPath, "export {};\n", "utf8");
+    const coverage = JSON.parse(await readFile(report, "utf8"));
+    coverage[firstPath] = coveredFile([2, 2], firstPath);
+    coverage[secondPath] = coveredFile([2, 2], secondPath);
+    await writeFile(report, JSON.stringify(coverage), "utf8");
+
+    const error = await execFileAsync(process.execPath, [scriptPath, report, root])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/중복|Unicode|대소문자|collision/i);
   });
 });

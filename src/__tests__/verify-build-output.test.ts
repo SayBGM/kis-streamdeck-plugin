@@ -80,7 +80,9 @@ afterEach(async () => {
   ));
 });
 
-describe("verify-build-output", () => {
+// Each case launches a real Node subprocess. Under full-suite parallel load on
+// Node 24, process startup can exceed Vitest's 5s default despite taking <1s alone.
+describe("verify-build-output", { timeout: 15_000 }, () => {
   it("accepts a non-empty syntax-valid bundle and source map", async () => {
     const root = await fixture();
 

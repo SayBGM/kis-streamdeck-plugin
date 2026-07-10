@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { verifyPluginPackage } from "./verify-plugin-package.mjs";
+import { packageManagerCommand } from "./package-manager-command.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDir, "..");
@@ -73,7 +74,11 @@ await cp(
   path.join(stageDir, "package-lock.json"),
 );
 
-await run("npm", ["ci", "--omit=dev", "--prefix", stageDir], projectRoot);
+await run(
+  packageManagerCommand(os.platform()),
+  ["ci", "--omit=dev", "--prefix", stageDir],
+  projectRoot,
+);
 
 if (os.platform() === "win32") {
   await run(

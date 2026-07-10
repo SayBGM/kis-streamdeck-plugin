@@ -69,9 +69,22 @@ function validEntries(): Record<string, string> {
     SDKVersion: 2,
     Nodejs: { Version: "24" },
     Software: { MinimumVersion: "7.1" },
+    CodePath: "bin/plugin.js",
+    Icon: "imgs/plugin-icon",
+    CategoryIcon: "imgs/category-icon",
     Actions: [
-      { UUID: "com.kis.streamdeck.domestic-stock" },
-      { UUID: "com.kis.streamdeck.overseas-stock" },
+      {
+        UUID: "com.kis.streamdeck.domestic-stock",
+        Icon: "imgs/domestic-action",
+        PropertyInspectorPath: "ui/domestic-stock-pi.html",
+        States: [{ Image: "imgs/domestic-action" }],
+      },
+      {
+        UUID: "com.kis.streamdeck.overseas-stock",
+        Icon: "imgs/overseas-action",
+        PropertyInspectorPath: "ui/overseas-stock-pi.html",
+        States: [{ Image: "imgs/overseas-action" }],
+      },
     ],
   };
   const packageJson = {
@@ -92,7 +105,11 @@ function validEntries(): Record<string, string> {
     ].join("\n"),
     [`${root}/bin/plugin.js.map`]: "{}",
     [`${root}/ui/domestic-stock-pi.html`]: "<!doctype html>",
+    [`${root}/ui/overseas-stock-pi.html`]: "<!doctype html>",
     [`${root}/imgs/plugin-icon.png`]: "png",
+    [`${root}/imgs/category-icon.png`]: "png",
+    [`${root}/imgs/domestic-action.png`]: "png",
+    [`${root}/imgs/overseas-action.png`]: "png",
   };
   for (const [moduleName, version] of [
     ["@elgato/streamdeck", "2.1.0"],
@@ -160,6 +177,49 @@ describe("verify-plugin-package", () => {
     expect(error.stderr).toMatch(/경로|path traversal/i);
   });
 
+  it.each(["CON", "prn.txt", "Aux.json", "nul", "COM1.log", "lPt9.js"])(
+    "rejects the Windows reserved device component %s",
+    async (reservedName) => {
+      const entries = validEntries();
+      entries[`com.kis.streamdeck.sdPlugin/ui/${reservedName}`] = "reserved";
+      const archivePath = await archive(entries);
+
+      const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+        .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+      expect(error).toMatchObject({ code: 1 });
+      expect(error.stderr).toMatch(/Windows|예약|reserved/i);
+    },
+  );
+
+  it.each(["trailing.", "trailing ", "quote.txt:secret"])(
+    "rejects the Windows-ambiguous component %s",
+    async (unsafeName) => {
+      const entries = validEntries();
+      entries[`com.kis.streamdeck.sdPlugin/ui/${unsafeName}`] = "unsafe";
+      const archivePath = await archive(entries);
+
+      const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+        .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+      expect(error).toMatchObject({ code: 1 });
+      expect(error.stderr).toMatch(/Windows|경로|path/i);
+    },
+  );
+
+  it("rejects NFC/NFD names that normalize to the same extraction path", async () => {
+    const entries = validEntries();
+    entries["com.kis.streamdeck.sdPlugin/ui/caf\u00e9.txt"] = "nfc";
+    entries["com.kis.streamdeck.sdPlugin/ui/cafe\u0301.txt"] = "nfd";
+    const archivePath = await archive(entries);
+
+    const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/Unicode|중복|collision/i);
+  });
+
   it("rejects an archive with the wrong exact SDK dependency version", async () => {
     const entries = validEntries();
     const packagePath = "com.kis.streamdeck.sdPlugin/package.json";
@@ -186,5 +246,82 @@ describe("verify-plugin-package", () => {
 
     expect(error).toMatchObject({ code: 1 });
     expect(error.stderr).toMatch(/크기|size/i);
+  });
+
+  it("rejects directory entries that hide payload bytes", async () => {
+    const entries = validEntries();
+    entries["com.kis.streamdeck.sdPlugin/hidden-directory/"] = "payload";
+    const archivePath = await archive(entries);
+
+    const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/directory|디렉터리|size|크기/i);
+  });
+
+  it("rejects a broken Property Inspector reference", async () => {
+    const entries = validEntries();
+    delete entries["com.kis.streamdeck.sdPlugin/ui/domestic-stock-pi.html"];
+    const archivePath = await archive(entries);
+
+    const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/PropertyInspectorPath|domestic-stock-pi\.html/i);
+  });
+
+  it("rejects a Property Inspector path that escapes the plugin root", async () => {
+    const entries = validEntries();
+    const manifestPath = "com.kis.streamdeck.sdPlugin/manifest.json";
+    const manifest = JSON.parse(entries[manifestPath]);
+    manifest.Actions[0].PropertyInspectorPath = "../outside.html";
+    entries[manifestPath] = JSON.stringify(manifest);
+    const archivePath = await archive(entries);
+
+    const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/PropertyInspectorPath|경로|path/i);
+  });
+
+  it("accepts an extensionless manifest icon backed by an SVG", async () => {
+    const entries = validEntries();
+    delete entries["com.kis.streamdeck.sdPlugin/imgs/plugin-icon.png"];
+    entries["com.kis.streamdeck.sdPlugin/imgs/plugin-icon.svg"] = "<svg/>";
+    const archivePath = await archive(entries);
+
+    const result = await execFileAsync(process.execPath, [scriptPath, archivePath]);
+
+    expect(result.stdout).toContain("패키지 smoke 검증 완료");
+  });
+
+  it("rejects a missing extensionless manifest icon image", async () => {
+    const entries = validEntries();
+    delete entries["com.kis.streamdeck.sdPlugin/imgs/category-icon.png"];
+    const archivePath = await archive(entries);
+
+    const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/CategoryIcon|category-icon/i);
+  });
+
+  it("rejects a CodePath other than the verified bundle", async () => {
+    const entries = validEntries();
+    const manifestPath = "com.kis.streamdeck.sdPlugin/manifest.json";
+    const manifest = JSON.parse(entries[manifestPath]);
+    manifest.CodePath = "bin/other.js";
+    entries[manifestPath] = JSON.stringify(manifest);
+    const archivePath = await archive(entries);
+
+    const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/CodePath|bin\/plugin\.js/i);
   });
 });

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -67,5 +68,25 @@ describe("delivery configuration", () => {
     expect(script).not.toContain(
       'cp(path.join(projectRoot, "bin"), path.join(stageDir, "bin")',
     );
+  });
+
+  it("selects npm.cmd on Windows and npm on POSIX", async () => {
+    const commandScript = path.join(root, "scripts/package-manager-command.mjs");
+
+    const windows = execFileSync(process.execPath, [commandScript, "win32"], {
+      encoding: "utf8",
+    });
+    const posix = execFileSync(process.execPath, [commandScript, "linux"], {
+      encoding: "utf8",
+    });
+
+    expect(windows.trim()).toBe("npm.cmd");
+    expect(posix.trim()).toBe("npm");
+  });
+
+  it("documents the POSIX zip CLI packaging prerequisite", async () => {
+    const readme = await readFile(path.join(root, "README.md"), "utf8");
+
+    expect(readme).toMatch(/zip CLI|zip 명령|`zip`/i);
   });
 });

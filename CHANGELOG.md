@@ -21,7 +21,7 @@
 ### Security
 - 취약한 이전 `ws` 잠금 버전을 제거하고 `npm audit --omit=dev`를 검증 게이트에 추가
 - fingerprint가 없는 legacy access token 폐기, 자격증명 세대 및 token-version CAS 적용
-- archive path traversal, 심볼릭 링크, 중복 경로와 비정상 크기 차단
+- archive path traversal, 심볼릭 링크, Windows 예약 경로, Unicode·대소문자 충돌, 깨진 manifest asset 참조와 비정상 크기 차단
 
 ## [1.3.4] - 2026-03-15
 

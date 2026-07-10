@@ -21,6 +21,7 @@ const REQUIRED_ACTION_UUIDS = [
   "com.kis.streamdeck.domestic-stock",
   "com.kis.streamdeck.overseas-stock",
 ];
+const WINDOWS_RESERVED_COMPONENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 
 function findEndOfCentralDirectory(archive) {
   const signature = 0x06054b50;
@@ -42,14 +43,24 @@ function normalizeEntryName(rawName) {
     throw new Error(`패키지 절대 경로를 허용하지 않습니다: ${rawName}`);
   }
   const isDirectory = name.endsWith("/");
-  const components = name.split("/");
-  if (isDirectory) components.pop();
+  const rawComponents = name.split("/");
+  if (isDirectory) rawComponents.pop();
   if (
-    components.length === 0 ||
-    components.some((component) => component === "" || component === "." || component === "..")
+    rawComponents.length === 0 ||
+    rawComponents.some((component) => component === "" || component === "." || component === "..")
   ) {
     throw new Error(`패키지 path traversal 경로를 허용하지 않습니다: ${rawName}`);
   }
+  const components = rawComponents.map((component) => {
+    const normalized = component.normalize("NFC");
+    if (/[:\u0000-\u001f]/u.test(normalized) || /[. ]$/u.test(normalized)) {
+      throw new Error(`Windows에서 모호한 패키지 경로를 허용하지 않습니다: ${rawName}`);
+    }
+    if (WINDOWS_RESERVED_COMPONENT.test(normalized)) {
+      throw new Error(`Windows 예약 장치 이름을 패키지 경로로 허용하지 않습니다: ${rawName}`);
+    }
+    return normalized;
+  });
   return { name: components.join("/") + (isDirectory ? "/" : ""), isDirectory };
 }
 
@@ -105,13 +116,19 @@ function parseCentralDirectory(archive) {
     }
     const rawName = archive.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
     const normalized = normalizeEntryName(rawName);
+    if (
+      normalized.isDirectory &&
+      (checksum !== 0 || compressedSize !== 0 || uncompressedSize !== 0)
+    ) {
+      throw new Error(`ZIP 디렉터리 엔트리의 CRC와 크기는 0이어야 합니다: ${rawName}`);
+    }
     const unixMode = externalAttributes >>> 16;
     if ((unixMode & 0o170000) === 0o120000) {
       throw new Error(`심볼릭 링크 ZIP 엔트리는 허용하지 않습니다: ${normalized.name}`);
     }
     const folded = normalized.name.toLocaleLowerCase("en-US");
     if (names.has(normalized.name) || foldedNames.has(folded)) {
-      throw new Error(`중복 ZIP 경로를 허용하지 않습니다: ${normalized.name}`);
+      throw new Error(`중복 또는 Unicode/대소문자 충돌 ZIP 경로를 허용하지 않습니다: ${rawName}`);
     }
     names.add(normalized.name);
     foldedNames.add(folded);
@@ -149,12 +166,21 @@ function extractEntry(archive, entry, centralOffset, maxInstalledBytes) {
   }
   const flags = archive.readUInt16LE(offset + 6);
   const compression = archive.readUInt16LE(offset + 8);
+  const localChecksum = archive.readUInt32LE(offset + 14);
+  const localCompressedSize = archive.readUInt32LE(offset + 18);
+  const localUncompressedSize = archive.readUInt32LE(offset + 22);
   const nameLength = archive.readUInt16LE(offset + 26);
   const extraLength = archive.readUInt16LE(offset + 28);
   const dataStart = offset + 30 + nameLength + extraLength;
   const dataEnd = dataStart + entry.compressedSize;
   if (flags !== entry.flags || compression !== entry.compression || dataEnd > centralOffset) {
     throw new Error(`ZIP local/central 메타데이터가 일치하지 않습니다: ${entry.name}`);
+  }
+  if (
+    entry.isDirectory &&
+    (localChecksum !== 0 || localCompressedSize !== 0 || localUncompressedSize !== 0)
+  ) {
+    throw new Error(`ZIP 디렉터리 local header의 CRC와 크기는 0이어야 합니다: ${entry.name}`);
   }
   const localName = archive.subarray(offset + 30, offset + 30 + nameLength).toString("utf8");
   if (normalizeEntryName(localName).name !== entry.name) {
@@ -201,6 +227,77 @@ function requireExact(value, expected, label) {
   }
 }
 
+function manifestReference(value, label) {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\\")) {
+    throw new Error(`${label} 경로가 올바르지 않습니다.`);
+  }
+  const normalized = normalizeEntryName(value);
+  if (normalized.isDirectory) throw new Error(`${label}은 파일을 가리켜야 합니다.`);
+  return normalized.name;
+}
+
+function requireArchiveFile(fileNames, rootName, reference, label) {
+  const relative = manifestReference(reference, label);
+  const archiveName = `${rootName}/${relative}`;
+  if (!fileNames.has(archiveName)) {
+    throw new Error(`${label} 참조 파일이 archive에 없습니다: ${relative}`);
+  }
+  return relative;
+}
+
+function requireManifestImage(fileNames, rootName, reference, label) {
+  const relative = manifestReference(reference, label);
+  const extension = path.posix.extname(relative).toLocaleLowerCase("en-US");
+  if (extension !== "" && extension !== ".png" && extension !== ".svg") {
+    throw new Error(`${label} 이미지는 .png/.svg 또는 확장자 없는 base 경로여야 합니다: ${relative}`);
+  }
+  const candidates = extension === "" ? [`${relative}.png`, `${relative}.svg`] : [relative];
+  const imagePath = candidates.find((candidate) => fileNames.has(`${rootName}/${candidate}`));
+  if (!imagePath) {
+    throw new Error(`${label} 참조 이미지가 archive에 없습니다: ${candidates.join(" 또는 ")}`);
+  }
+  return imagePath;
+}
+
+function verifyManifestAssets(manifest, entries, rootName) {
+  requireExact(manifest.CodePath, "bin/plugin.js", "manifest CodePath");
+  const fileNames = new Set(
+    entries.filter((entry) => !entry.isDirectory).map((entry) => entry.name),
+  );
+  for (const directory of ["bin", "ui", "imgs", "node_modules"]) {
+    if (![...fileNames].some((name) => name.startsWith(`${rootName}/${directory}/`))) {
+      throw new Error(`archive 필수 디렉터리가 비어 있습니다: ${directory}`);
+    }
+  }
+  requireArchiveFile(fileNames, rootName, manifest.CodePath, "CodePath");
+  requireManifestImage(fileNames, rootName, manifest.Icon, "Icon");
+  requireManifestImage(fileNames, rootName, manifest.CategoryIcon, "CategoryIcon");
+  for (const action of manifest.Actions) {
+    const actionLabel = `Action ${String(action?.UUID ?? "unknown")}`;
+    requireArchiveFile(
+      fileNames,
+      rootName,
+      action?.PropertyInspectorPath,
+      `${actionLabel} PropertyInspectorPath`,
+    );
+    if (path.posix.extname(action.PropertyInspectorPath).toLocaleLowerCase("en-US") !== ".html") {
+      throw new Error(`${actionLabel} PropertyInspectorPath는 .html 파일이어야 합니다.`);
+    }
+    requireManifestImage(fileNames, rootName, action?.Icon, `${actionLabel} Icon`);
+    if (!Array.isArray(action?.States) || action.States.length === 0) {
+      throw new Error(`${actionLabel} States가 비어 있습니다.`);
+    }
+    action.States.forEach((state, index) => {
+      requireManifestImage(
+        fileNames,
+        rootName,
+        state?.Image,
+        `${actionLabel} States[${index}].Image`,
+      );
+    });
+  }
+}
+
 export async function verifyPluginPackage({
   archivePath,
   maxArchiveBytes = DEFAULT_MAX_ARCHIVE_BYTES,
@@ -239,6 +336,7 @@ export async function verifyPluginPackage({
         throw new Error(`추출 경로가 임시 루트를 벗어났습니다: ${entry.name}`);
       }
       if (entry.isDirectory) {
+        extractEntry(archive, entry, centralOffset, maxInstalledBytes);
         await mkdir(target, { recursive: true });
         continue;
       }
@@ -280,6 +378,7 @@ export async function verifyPluginPackage({
     if (JSON.stringify(actionUuids) !== JSON.stringify([...REQUIRED_ACTION_UUIDS].sort())) {
       throw new Error(`manifest action UUID가 기존 계약과 다릅니다: ${actionUuids.join(", ")}`);
     }
+    verifyManifestAssets(manifest, entries, rootName);
     requireExact(
       packageJson.dependencies?.["@elgato/streamdeck"],
       "2.1.0",
