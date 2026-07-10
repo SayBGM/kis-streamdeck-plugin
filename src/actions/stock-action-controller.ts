@@ -493,6 +493,7 @@ export class StockActionController<Settings> {
       session.policyGeneration += 1;
       this.clearPolicyWork(session, true);
       if (!hasCredentials(snapshot)) {
+        session.closedRequestKey = undefined;
         this.detachClock(session);
         session.connection = "BROKEN";
         session.error = Object.freeze({
@@ -537,10 +538,12 @@ export class StockActionController<Settings> {
     session.stale = false;
     session.error = undefined;
     let descriptor: KisWebSocketDescriptor;
+    let reusedSubscription = false;
     try {
       descriptor = session.adapter.webSocketDescriptor(session.instrument, this.safeNow());
       const existingBinding = session.subscriptionBinding;
       if (session.subscription && existingBinding && session.wsDescriptor) {
+        reusedSubscription = true;
         existingBinding.policyGeneration = generation;
         if (
           !sameDescriptor(session.wsDescriptor, descriptor) &&
@@ -571,8 +574,17 @@ export class StockActionController<Settings> {
       this.startFallback(session, generation, true);
       return;
     }
-    this.submitView(session, "control");
-    this.armGrace(session, generation);
+    if (reusedSubscription) {
+      const physicalSnapshot = session.subscription?.snapshot;
+      if (physicalSnapshot) {
+        this.handleSubscriptionState(session, generation, physicalSnapshot);
+      } else {
+        this.submitView(session, "control");
+      }
+    } else {
+      this.submitView(session, "control");
+    }
+    if (!session.fallbackActive) this.armGrace(session, generation);
   }
 
   private startRestOnlyRealtime(session: ActionSession<Settings>, generation: number): void {
@@ -608,6 +620,7 @@ export class StockActionController<Settings> {
       (session.hasValidWebSocketData &&
         (snapshot.state === "desired" || snapshot.state === "pending"))
     ) {
+      this.submitView(session, "control");
       this.startFallback(session, generation, true);
       return;
     }

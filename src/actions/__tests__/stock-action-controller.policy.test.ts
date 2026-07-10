@@ -120,8 +120,8 @@ class FakeSettingsRepository {
     this.ready.resolve(this.current);
   }
 
-  emit(overrides: Record<string, unknown>): void {
-    this.current = this.makeSnapshot(overrides);
+  emit(overrides: Record<string, unknown>, baseKnown = true): void {
+    this.current = this.makeSnapshot(overrides, baseKnown);
     void this.listener?.(this.current);
   }
 }
@@ -132,16 +132,36 @@ type Observer = {
 };
 
 class FakeSubscriptions {
-  subscriptions: Array<{ descriptor: { trId: string; trKey: string }; observer: Observer; released: boolean }> = [];
+  subscriptions: Array<{
+    descriptor: { trId: string; trKey: string };
+    observer: Observer;
+    released: boolean;
+    state: "desired" | "pending" | "live" | "stale" | "parked" | "rejected";
+  }> = [];
   retargets: Array<{ oldDescriptor: unknown; nextDescriptor: unknown }> = [];
 
   subscribe(descriptor: { trId: string; trKey: string }, observer: Observer) {
-    const entry = { descriptor, observer, released: false };
+    const entry: FakeSubscriptions["subscriptions"][number] = {
+      descriptor,
+      observer,
+      released: false,
+      state: "desired",
+    };
     this.subscriptions.push(entry);
     observer.onState?.({ state: "desired" });
     return {
-      descriptor,
-      snapshot: undefined,
+      get descriptor() {
+        return descriptor;
+      },
+      get snapshot() {
+        return {
+          descriptor,
+          state: entry.state,
+          generation: 1,
+          refCount: 1,
+          subscribed: entry.state === "live" || entry.state === "stale",
+        };
+      },
       release: () => {
         entry.released = true;
       },
@@ -153,7 +173,10 @@ class FakeSubscriptions {
   }
 
   state(state: "desired" | "pending" | "live" | "stale" | "parked" | "rejected"): void {
-    void this.active()?.observer.onState?.({ state });
+    const active = this.active();
+    if (!active) return;
+    active.state = state;
+    void active.observer.onState?.({ state });
   }
 
   data(price: number): void {
@@ -885,6 +908,53 @@ describe("StockActionController settings, market and rendering boundaries", () =
     expect(original.released).toBe(false);
   });
 
+  it.each(["stale", "parked", "rejected"] as const)(
+    "동일 descriptor 재사용 시 기존 %s snapshot을 새 세대에 적용해 즉시 fallback한다",
+    async (state) => {
+      const test = setup();
+      test.clock.current = snapshot("PRE", 1_000);
+      test.settings.resolve();
+      await test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage: vi.fn() },
+      });
+      test.subscriptions.state(state);
+      test.rest.requests[0]!.resolve(quote("rest", 69_000));
+      await vi.advanceTimersByTimeAsync(0);
+      const before = test.rest.requests.length;
+
+      test.clock.emit(snapshot("REG", 2_000));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(test.subscriptions.subscriptions).toHaveLength(1);
+      expect(test.rest.requests).toHaveLength(before + 1);
+      expect(test.rest.requests.at(-1)?.priority).toBe("fallback");
+    },
+  );
+
+  it.each(["desired", "pending"] as const)(
+    "동일 descriptor 재사용 시 기존 %s snapshot은 새 5초 grace를 지킨다",
+    async (state) => {
+      const test = setup();
+      test.clock.current = snapshot("PRE", 1_000);
+      test.settings.resolve();
+      await test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage: vi.fn() },
+      });
+      test.subscriptions.state(state);
+
+      test.clock.emit(snapshot("REG", 2_000));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(test.rest.requests).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(test.rest.requests.map((request) => request.priority)).toEqual(["fallback"]);
+    },
+  );
+
   it("REG→AFT에서 descriptor가 바뀌면 새 ref 없이 retargetAll을 사용한다", async () => {
     let key = "DAY";
     const adapter: MarketAdapter<TestSettings> = {
@@ -1000,6 +1070,32 @@ describe("StockActionController settings, market and rendering boundaries", () =
       "initial",
       "initial",
     ]);
+  });
+
+  it("closed 요청 중 baseKnown=false가 되면 key를 폐기하고 동일 credential 복구에서 한 번 재요청한다", async () => {
+    const test = setup();
+    test.clock.current = snapshot("CLOSED", 5_000);
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const oldRequest = test.rest.requests[0]!;
+
+    test.settings.emit({}, false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(oldRequest.signal?.aborted).toBe(true);
+    expect(test.images.at(-1)?.error?.code).toBe("SETTINGS");
+
+    test.settings.emit({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.rest.requests).toHaveLength(2);
+    test.rest.requests[1]!.resolve(quote("rest", 70_000));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(test.images.at(-1)?.connection).toBe("BACKUP");
+    expect(test.images.at(-1)?.error).toBeUndefined();
   });
 
   it("60초 정책 tick에서 해외 day/night descriptor를 break-before-make retarget한다", async () => {
