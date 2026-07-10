@@ -579,4 +579,51 @@ describe("SubscriptionSupervisor", () => {
     advance(100);
     expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[0] });
   });
+
+  it("keeps a retargeted parked source parked without sending a 42nd subscribe", async () => {
+    const { descriptors } = await settleInitialLiveHandles(42);
+    const next = { trId: "H0UNCNT0", trKey: "900041" } as const;
+    const sentBefore = connection.sent.length;
+
+    await supervisor.retargetAll(descriptors[41], next);
+
+    expect(supervisor.getSnapshot(next)?.state).toBe("parked");
+    expect(connection.sent).toHaveLength(sentBefore);
+  });
+
+  it("promotes the oldest parked key after a live source merges into an existing live target", async () => {
+    const { descriptors } = await settleInitialLiveHandles(43);
+    const retargeted = supervisor.retargetAll(descriptors[0], descriptors[1]);
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[0] });
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+    await retargeted;
+    advance(100);
+
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41] });
+  });
+
+  it("promotes a parked merge target after the live source is removed", async () => {
+    const { descriptors } = await settleInitialLiveHandles(43);
+    const retargeted = supervisor.retargetAll(descriptors[0], descriptors[41]);
+    advance(100);
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+    await retargeted;
+    advance(100);
+
+    expect(supervisor.getSnapshot(descriptors[41])?.state).toBe("pending");
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41] });
+  });
+
+  it("keeps a retargeted rotation incoming key parked until a capacity slot exists", async () => {
+    const { descriptors } = await settleInitialLiveHandles(42);
+    const next = { trId: "H0UNCNT0", trKey: "900042" } as const;
+    beginRotationLease();
+    const sentBefore = connection.sent.length;
+
+    await supervisor.retargetAll(descriptors[41], next);
+
+    expect(supervisor.getSnapshot(next)?.state).toBe("parked");
+    expect(connection.sent).toHaveLength(sentBefore);
+  });
 });

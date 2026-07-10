@@ -631,9 +631,26 @@ export class SubscriptionSupervisor {
         .filter((entry) => entry.refs.size > 0 && entry.state === "desired" && !entry.rotationIncoming)
         .sort((a, b) => b.createdAt - a.createdAt || b.order - a.order)[0];
       if (!newestDesired) return;
-      this.setEntryState(newestDesired, "parked");
+      this.parkEntry(newestDesired);
       active -= 1;
     }
+  }
+
+  private rebalanceSubscriptions(): void {
+    if (this.destroyed) return;
+    this.enforceSubscriptionCap();
+    this.promoteParked();
+  }
+
+  private parkEntry(entry: Entry): void {
+    if (entry.queuedAction === "subscribe" && this.currentJob?.entry !== entry) {
+      entry.queuedAction = undefined;
+      for (let index = this.controlQueue.length - 1; index >= 0; index -= 1) {
+        const job = this.controlQueue[index];
+        if (job.entry === entry && job.action === "subscribe") this.controlQueue.splice(index, 1);
+      }
+    }
+    this.setEntryState(entry, "parked");
   }
 
   private countActiveSubscriptions(): number {
@@ -840,6 +857,7 @@ export class SubscriptionSupervisor {
       try { this.connection.release(); } catch { /* release is best effort */ }
     }
     this.enqueueSubscribe(next);
+    this.rebalanceSubscriptions();
     retarget.resolve();
     this.pump();
   }
@@ -890,7 +908,7 @@ export class SubscriptionSupervisor {
     for (const ref of entry.refs) ref.entry = undefined;
     entry.refs.clear();
     try { this.connection.release(); } catch { /* a transport release cannot leak a ref */ }
-    this.promoteParked();
+    this.rebalanceSubscriptions();
   }
 
   private normalizeObserver(input: SubscriptionObserver): SubscriptionObserver {
