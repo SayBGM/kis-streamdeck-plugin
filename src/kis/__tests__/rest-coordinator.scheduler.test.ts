@@ -120,6 +120,46 @@ describe("RestCoordinator scheduler", () => {
     await expect(Promise.all(requests)).resolves.toHaveLength(11);
   });
 
+  it("rates the actual HTTP start even when authorization finishes much later", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const authorizationResolvers: Array<(value: RestAuthorizationLease) => void> = [];
+    const port = credentials();
+    port.getRestAuthorization = vi.fn(() => {
+      if (authorizationResolvers.length >= 4) return Promise.resolve(lease);
+      return new Promise<RestAuthorizationLease>((resolve) => {
+        authorizationResolvers.push(resolve);
+      });
+    });
+    const starts: number[] = [];
+    const fetch = vi.fn<RestFetch>(async () => {
+      starts.push(Date.now());
+      return successfulResponse();
+    });
+    const coordinator = new RestCoordinator(port, { fetch, now: () => Date.now() });
+    const requests = Array.from({ length: 14 }, (_, index) => coordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument: instrument(index + 1),
+      marketSnapshot,
+      priority: "initial",
+    }));
+    await flush();
+    expect(authorizationResolvers).toHaveLength(4);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    for (const resolve of authorizationResolvers) resolve(lease);
+    await flush(120);
+    expect(starts).toHaveLength(10);
+    expect(starts).toEqual(Array(10).fill(2_000));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(starts).toHaveLength(10);
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(starts).toHaveLength(14);
+    expect(starts.slice(10)).toEqual(Array(4).fill(3_000));
+    await expect(Promise.all(requests)).resolves.toHaveLength(14);
+  });
+
   it("orders queued work manual, initial, fallback and preserves FIFO within a priority", async () => {
     const resolvers: Array<(value: unknown) => void> = [];
     const fetch = vi.fn<RestFetch>(() => new Promise((resolve) => {

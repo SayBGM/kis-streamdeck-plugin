@@ -96,6 +96,13 @@ interface Flight {
   abandoned: boolean;
 }
 
+interface RateWaiter {
+  readonly resolve: () => void;
+  readonly reject: (error: KisError) => void;
+  readonly signal: AbortSignal;
+  readonly abortListener: () => void;
+}
+
 type CacheEntry =
   | { readonly kind: "success"; readonly quote: QuoteSample }
   | { readonly kind: "failure"; readonly error: KisError; readonly expiresAt: number };
@@ -271,6 +278,7 @@ export class RestCoordinator {
   private readonly flights = new Map<string, Flight>();
   private readonly cache = new Map<string, CacheEntry>();
   private readonly startTimes: number[] = [];
+  private readonly rateWaiters: RateWaiter[] = [];
   private activeCount = 0;
   private nextSequence = 0;
   private nextWaiterId = 0;
@@ -412,21 +420,15 @@ export class RestCoordinator {
   }
 
   private pump(): void {
-    this.pruneStartTimes();
     this.queue.sort((left, right) =>
       left.priorityRank - right.priorityRank || left.sequence - right.sequence,
     );
 
     while (this.activeCount < MAX_CONCURRENT_REQUESTS && this.queue.length > 0) {
-      if (this.startTimes.length >= MAX_STARTS_PER_SECOND) {
-        this.scheduleRatePump();
-        return;
-      }
       const flight = this.queue.shift()!;
       if (flight.state !== "queued" || flight.waiters.size === 0) continue;
       flight.state = "running";
       this.activeCount += 1;
-      this.startTimes.push(this.now());
       void this.execute(flight).then(
         (quote) => this.settleFlight(flight, quote),
         (error: unknown) => this.failFlight(flight, normalizeError(error)),
@@ -445,16 +447,72 @@ export class RestCoordinator {
   }
 
   private scheduleRatePump(): void {
-    if (this.rateTimer !== undefined || this.startTimes.length === 0) return;
+    if (
+      this.rateTimer !== undefined ||
+      this.startTimes.length === 0 ||
+      this.rateWaiters.length === 0
+    ) return;
     const delay = Math.max(0, this.startTimes[0] + RATE_WINDOW_MS - this.now());
     this.rateTimer = this.setTimeout(() => {
+      this.rateTimer = undefined;
+      this.pumpRatePermits();
+    }, delay);
+  }
+
+  private acquireRatePermit(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.reject(cancelledError());
+    return new Promise((resolve, reject) => {
+      let waiter!: RateWaiter;
+      const abortListener = () => this.cancelRateWaiter(waiter);
+      waiter = { resolve, reject, signal, abortListener };
+      this.rateWaiters.push(waiter);
+      try {
+        signal.addEventListener("abort", abortListener, { once: true });
+      } catch {
+        this.cancelRateWaiter(waiter);
+        return;
+      }
+      this.pumpRatePermits();
+    });
+  }
+
+  private pumpRatePermits(): void {
+    this.pruneStartTimes();
+    while (
+      this.rateWaiters.length > 0 &&
+      this.startTimes.length < MAX_STARTS_PER_SECOND
+    ) {
+      const waiter = this.rateWaiters.shift()!;
+      this.removeRateAbortListener(waiter);
+      if (waiter.signal.aborted) {
+        waiter.reject(cancelledError());
+        continue;
+      }
+      this.startTimes.push(this.now());
+      waiter.resolve();
+    }
+    if (this.rateWaiters.length > 0) this.scheduleRatePump();
+  }
+
+  private cancelRateWaiter(waiter: RateWaiter): void {
+    const index = this.rateWaiters.indexOf(waiter);
+    if (index < 0) return;
+    this.rateWaiters.splice(index, 1);
+    this.removeRateAbortListener(waiter);
+    waiter.reject(cancelledError());
+    if (this.rateWaiters.length === 0 && this.rateTimer !== undefined) {
       const handle = this.rateTimer;
       this.rateTimer = undefined;
-      if (handle !== undefined) {
-        try { this.clearTimeout(handle); } catch { /* noop */ }
-      }
-      this.pump();
-    }, delay);
+      try { this.clearTimeout(handle); } catch { /* noop */ }
+    }
+  }
+
+  private removeRateAbortListener(waiter: RateWaiter): void {
+    try {
+      waiter.signal.removeEventListener("abort", waiter.abortListener);
+    } catch {
+      // Listener cleanup must not replace the transport result.
+    }
   }
 
   private async execute(flight: Flight): Promise<QuoteSample> {
@@ -472,6 +530,8 @@ export class RestCoordinator {
       throw normalizeError(error);
     }
     const target = descriptorUrl(descriptor);
+    await this.acquireRatePermit(flight.controller.signal);
+    if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
     let rawResponse: unknown;
     try {
       rawResponse = await this.fetch(target.url, {
