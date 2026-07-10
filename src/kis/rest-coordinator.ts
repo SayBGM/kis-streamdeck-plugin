@@ -1,4 +1,4 @@
-import { KisError } from "../core/errors.js";
+import { KisError, type KisErrorCode } from "../core/errors.js";
 import type { MarketSnapshot } from "../core/market-clock.js";
 import type {
   CanonicalInstrument,
@@ -17,6 +17,11 @@ const MAX_STARTS_PER_SECOND = 10;
 const RATE_WINDOW_MS = 1_000;
 const NEGATIVE_CACHE_MS = 30_000;
 const MAX_CACHE_ENTRIES = 512;
+const ALLOWED_REST_ENDPOINTS: Readonly<Record<string, string>> = Object.freeze({
+  "/uapi/domestic-stock/v1/quotations/inquire-price": "FHKST01010100",
+  "/uapi/etfetn/v1/quotations/inquire-price": "FHPST02400000",
+  "/uapi/overseas-price/v1/quotations/price": "HHDFS00000300",
+});
 
 export type RestRequestPriority = "manual" | "initial" | "fallback";
 
@@ -70,6 +75,7 @@ interface ValidRequest {
   readonly signal?: AbortSignal;
   readonly adapterId: string;
   readonly instrumentKey: string;
+  readonly instrumentSymbol: string;
 }
 
 interface Waiter {
@@ -133,7 +139,7 @@ function defaultRateNow(): number {
 }
 
 function restError(
-  code: "AUTH_REJECTED" | "NETWORK" | "TIMEOUT" | "PROTOCOL" | "INVALID_INSTRUMENT",
+  code: KisErrorCode,
   retryable: boolean,
   safeMessage: string,
   httpStatus?: number,
@@ -212,8 +218,104 @@ function raceWithAbort<T>(operation: PromiseLike<T>, signal: AbortSignal): Promi
 }
 
 function normalizeError(value: unknown): KisError {
-  if (value instanceof KisError) return value;
+  if (value instanceof KisError) {
+    let code: unknown;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(value, "code");
+      code = descriptor && "value" in descriptor ? descriptor.value : undefined;
+    } catch {
+      code = undefined;
+    }
+    switch (code) {
+      case "NO_CREDENTIALS":
+        return restError(code, false, "KIS API 자격증명이 비어 있습니다.");
+      case "AUTH_REJECTED":
+        return restError(code, true, "KIS 인증 상태가 유효하지 않습니다.");
+      case "AUTH_RATE_LIMITED":
+        return restError(code, true, "KIS 인증 요청 제한에 도달했습니다.");
+      case "NETWORK":
+        return restError(code, true, "KIS 시세 서버에 연결하지 못했습니다.");
+      case "TIMEOUT":
+        return restError(code, true, "KIS 시세 요청 시간이 만료되었습니다.");
+      case "INVALID_INSTRUMENT":
+        return restError(code, false, "종목 설정 또는 시세 요청이 올바르지 않습니다.");
+      case "PROTOCOL":
+        return restError(code, false, "KIS 시세 응답 형식이 올바르지 않습니다.");
+      case "SUBSCRIPTION_REJECTED":
+        return restError(code, false, "KIS 요청이 거부되었습니다.");
+      case "SETTINGS":
+        return restError(code, true, "KIS 설정을 안전하게 처리하지 못했습니다.");
+    }
+  }
   return restError("NETWORK", true, "KIS 시세 요청을 처리하지 못했습니다.");
+}
+
+function requestCacheKey(
+  adapterId: string,
+  instrumentKey: string,
+  sessionEpoch: number,
+  credentialGeneration: number,
+): string {
+  return JSON.stringify([
+    adapterId,
+    instrumentKey,
+    sessionEpoch,
+    credentialGeneration,
+  ]);
+}
+
+function validateQuoteSample(
+  value: unknown,
+  expectedSymbol: string,
+  receivedAt: number,
+  sessionEpoch: number,
+): QuoteSample {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw protocolError();
+    }
+    const prototype = Object.getPrototypeOf(value) as object | null;
+    if (prototype !== Object.prototype && prototype !== null) throw protocolError();
+    if (Object.getOwnPropertySymbols(value).length > 0) throw protocolError();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = [
+      "symbol",
+      "price",
+      "changeRate",
+      "sign",
+      "source",
+      "receivedAt",
+      "sessionEpoch",
+    ] as const;
+    if (Object.keys(descriptors).length !== keys.length) throw protocolError();
+    const values = Object.create(null) as Record<(typeof keys)[number], unknown>;
+    for (const key of keys) {
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || !("value" in descriptor)) throw protocolError();
+      values[key] = descriptor.value;
+    }
+    if (
+      values.symbol !== expectedSymbol ||
+      typeof values.price !== "number" || !Number.isFinite(values.price) || values.price <= 0 ||
+      typeof values.changeRate !== "number" || !Number.isFinite(values.changeRate) ||
+      (values.sign !== "rise" && values.sign !== "fall" && values.sign !== "flat") ||
+      values.source !== "rest" ||
+      values.receivedAt !== receivedAt ||
+      values.sessionEpoch !== sessionEpoch
+    ) throw protocolError();
+    return Object.freeze({
+      symbol: values.symbol,
+      price: values.price,
+      changeRate: values.changeRate,
+      sign: values.sign,
+      source: "rest",
+      receivedAt,
+      sessionEpoch,
+    });
+  } catch (error) {
+    if (error instanceof KisError) throw normalizeError(error);
+    throw protocolError();
+  }
 }
 
 function ownData(value: unknown, key: string): unknown {
@@ -240,6 +342,7 @@ function validateRequest(input: RestQuoteRequest): ValidRequest {
     const adapterId = ownData(adapter, "id");
     const adapterMarket = ownData(adapter, "market");
     const instrumentKey = ownData(instrument, "key");
+    const instrumentSymbol = ownData(instrument, "symbol");
     const instrumentMarket = ownData(instrument, "market");
     const snapshotMarket = ownData(marketSnapshot, "market");
     const session = ownData(marketSnapshot, "session");
@@ -250,6 +353,7 @@ function validateRequest(input: RestQuoteRequest): ValidRequest {
       typeof adapterId !== "string" || adapterId.length === 0 ||
       (adapterMarket !== "domestic" && adapterMarket !== "overseas") ||
       typeof instrumentKey !== "string" || instrumentKey.length === 0 ||
+      typeof instrumentSymbol !== "string" || instrumentSymbol.length === 0 ||
       instrumentMarket !== adapterMarket || snapshotMarket !== adapterMarket ||
       (session !== "PRE" && session !== "REG" && session !== "AFT" && session !== "CLOSED") ||
       typeof sessionEpoch !== "number" || !Number.isFinite(sessionEpoch) ||
@@ -275,6 +379,7 @@ function validateRequest(input: RestQuoteRequest): ValidRequest {
       ...(signal ? { signal } : {}),
       adapterId,
       instrumentKey,
+      instrumentSymbol,
     };
   } catch (error) {
     if (error instanceof KisError) throw error;
@@ -312,6 +417,7 @@ function descriptorUrl(descriptor: KisRestDescriptor): { url: string; trId: stri
       method !== "GET" ||
       typeof path !== "string" || !path.startsWith("/uapi/") || path.includes("?") ||
       typeof trId !== "string" || !/^[A-Z0-9]+$/.test(trId) ||
+      ALLOWED_REST_ENDPOINTS[path] !== trId ||
       typeof query !== "object" || query === null || Array.isArray(query) ||
       Object.getOwnPropertySymbols(query).length > 0
     ) throw protocolError();
@@ -385,7 +491,12 @@ export class RestCoordinator {
       throw sessionTransitionError();
     }
 
-    const cacheKey = `${request.adapterId}|${request.instrumentKey}|${request.marketSnapshot.sessionEpoch}|${identity.credentialGeneration}`;
+    const cacheKey = requestCacheKey(
+      request.adapterId,
+      request.instrumentKey,
+      request.marketSnapshot.sessionEpoch,
+      identity.credentialGeneration,
+    );
     if (request.priority !== "manual") {
       const cached = this.readCache(cacheKey);
       if (cached?.kind === "success") return cached.quote;
@@ -426,6 +537,8 @@ export class RestCoordinator {
       this.cache.delete(key);
       return undefined;
     }
+    this.cache.delete(key);
+    this.cache.set(key, entry);
     return entry;
   }
 
@@ -711,17 +824,22 @@ export class RestCoordinator {
         flight.controller.signal,
       );
       const receivedAt = this.now();
-      let quote: QuoteSample;
+      let parsedQuote: QuoteSample;
       try {
-        quote = flight.request.adapter.parseRest(
+        parsedQuote = flight.request.adapter.parseRest(
           payload,
           flight.request.instrument,
           { receivedAt, sessionEpoch: flight.request.marketSnapshot.sessionEpoch },
         );
       } catch (error) {
-        if (error instanceof KisError) throw error;
-        throw protocolError();
+        throw normalizeError(error);
       }
+      const quote = validateQuoteSample(
+        parsedQuote,
+        flight.request.instrumentSymbol,
+        receivedAt,
+        flight.request.marketSnapshot.sessionEpoch,
+      );
 
       let currentIdentity: CredentialIdentity;
       try {
@@ -842,7 +960,13 @@ export class RestCoordinator {
   private failFlight(flight: Flight, error: KisError): void {
     flight.state = "settled";
     this.deleteFlightIdentity(flight);
-    if (!flight.abandoned && flight.cacheAllowed) {
+    if (
+      !flight.abandoned &&
+      flight.cacheAllowed &&
+      (error.code === "NETWORK" ||
+        error.code === "PROTOCOL" ||
+        error.code === "INVALID_INSTRUMENT")
+    ) {
       this.writeCache(flight.cacheKey, {
         kind: "failure",
         error,

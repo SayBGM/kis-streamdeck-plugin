@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { KisError } from "../../core/errors.js";
 import { getMarketSnapshot, type MarketSnapshot } from "../../core/market-clock.js";
-import { domesticStockAdapter } from "../../markets/market-adapter.js";
+import {
+  domesticStockAdapter,
+  type CanonicalInstrument,
+  type QuoteSample,
+} from "../../markets/market-adapter.js";
 import type {
   AccessTokenExpectation,
   CredentialIdentity,
@@ -10,6 +15,7 @@ import {
   RestCoordinator,
   type RestCredentialPort,
   type RestFetch,
+  type RestQuoteAdapter,
 } from "../rest-coordinator.js";
 
 function authorization(generation = 3, tokenVersion = 5): RestAuthorizationLease {
@@ -72,6 +78,50 @@ function successfulResponse(price = "71200"): unknown {
         prdy_ctrt: "1.25",
       },
     }),
+  };
+}
+
+function customInstrument(key: string, symbol = "CUSTOM"): CanonicalInstrument {
+  return Object.freeze({
+    key,
+    market: "domestic",
+    instrumentType: "stock",
+    symbol,
+    displayName: symbol,
+  });
+}
+
+function customAdapter(
+  id: string,
+  parseRest: RestQuoteAdapter["parseRest"],
+  path = "/uapi/domestic-stock/v1/quotations/inquire-price",
+): RestQuoteAdapter {
+  return Object.freeze({
+    id,
+    market: "domestic" as const,
+    restDescriptor: () => ({
+      method: "GET" as const,
+      path,
+      trId: "FHKST01010100",
+      query: { FID_COND_MRKT_DIV_CODE: "UN", FID_INPUT_ISCD: "005930" },
+    }),
+    parseRest,
+  });
+}
+
+function customQuote(
+  instrument: CanonicalInstrument,
+  context: { receivedAt: number; sessionEpoch: number },
+  price: number,
+): QuoteSample {
+  return {
+    symbol: instrument.symbol,
+    price,
+    changeRate: 0,
+    sign: "flat",
+    source: "rest",
+    receivedAt: context.receivedAt,
+    sessionEpoch: context.sessionEpoch,
   };
 }
 
@@ -149,6 +199,26 @@ describe("RestCoordinator HTTP boundary", () => {
     expect(JSON.stringify(error)).not.toContain("app-secret-8");
   });
 
+  it("does not negative-cache 401 and immediately retries with the replacement token", async () => {
+    const credentials = mutableCredentials(authorization(3, 5));
+    credentials.invalidateAccessToken.mockImplementation(async () => {
+      credentials.current = Object.freeze({
+        ...authorization(3, 6),
+        token: "replacement-token",
+      });
+      return true;
+    });
+    const fetch = vi.fn<RestFetch>()
+      .mockResolvedValueOnce({ ok: false, status: 401 })
+      .mockResolvedValueOnce(successfulResponse("72000"));
+    const coordinator = new RestCoordinator(credentials, { fetch, now: () => openNow });
+
+    await expect(request(coordinator)).rejects.toMatchObject({ code: "AUTH_REJECTED" });
+    await expect(request(coordinator)).resolves.toMatchObject({ price: 72_000 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[1][1].headers.authorization).toBe("Bearer replacement-token");
+  });
+
   it.each([
     ["primitive response", null],
     ["contradictory status", { ok: true, status: 401, json: async () => ({}) }],
@@ -188,6 +258,46 @@ describe("RestCoordinator HTTP boundary", () => {
     expect(["NETWORK", "PROTOCOL"]).toContain(error.code);
     expect(JSON.stringify(error)).not.toContain("access-token-3");
     expect(JSON.stringify(error)).not.toContain("app-secret-3");
+  });
+
+  it("turns a revoked payload proxy into a safe protocol error", async () => {
+    const target = {};
+    const revocable = Proxy.revocable(target, {});
+    revocable.revoke();
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch: vi.fn<RestFetch>().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => revocable.proxy,
+      }),
+      now: () => openNow,
+    });
+
+    await expect(request(coordinator)).rejects.toMatchObject({
+      code: "PROTOCOL",
+      scope: "rest",
+    });
+  });
+
+  it("rejects non-allowlisted canonical REST endpoint paths before fetch", async () => {
+    const fetch = vi.fn<RestFetch>();
+    const adapter = customAdapter(
+      "malicious-path",
+      (payload, instrumentValue, context) => customQuote(instrumentValue, context, 1),
+      "/uapi/../oauth2/tokenP",
+    );
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => openNow,
+    });
+
+    await expect(coordinator.requestQuote({
+      adapter,
+      instrument: customInstrument("path-key"),
+      marketSnapshot: openSnapshot,
+      priority: "initial",
+    })).rejects.toMatchObject({ code: "PROTOCOL", scope: "rest" });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("discards a response when its credential generation changes in flight", async () => {
@@ -325,6 +435,121 @@ describe("RestCoordinator HTTP boundary", () => {
 });
 
 describe("RestCoordinator cache policy", () => {
+  it("uses collision-proof structured keys for flights and caches", async () => {
+    const firstAdapter = customAdapter(
+      "a|b",
+      (_payload, instrumentValue, context) => customQuote(instrumentValue, context, 71_000),
+    );
+    const secondAdapter = customAdapter(
+      "a",
+      (_payload, instrumentValue, context) => customQuote(instrumentValue, context, 72_000),
+    );
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => closedNow,
+    });
+
+    await expect(coordinator.requestQuote({
+      adapter: firstAdapter,
+      instrument: customInstrument("c", "FIRST"),
+      marketSnapshot: closedSnapshot,
+      priority: "initial",
+    })).resolves.toMatchObject({ price: 71_000, symbol: "FIRST" });
+    await expect(coordinator.requestQuote({
+      adapter: secondAdapter,
+      instrument: customInstrument("b|c", "SECOND"),
+      marketSnapshot: closedSnapshot,
+      priority: "initial",
+    })).resolves.toMatchObject({ price: 72_000, symbol: "SECOND" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("clones and freezes adapter quotes before sharing a closed-session cache", async () => {
+    let mutableQuote: QuoteSample | undefined;
+    const adapter = customAdapter("mutable-quote", (_payload, instrumentValue, context) => {
+      mutableQuote = customQuote(instrumentValue, context, 71_000);
+      return mutableQuote;
+    });
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => closedNow,
+    });
+    const input = {
+      adapter,
+      instrument: customInstrument("mutable-key", "SAFE"),
+      marketSnapshot: closedSnapshot,
+      priority: "initial" as const,
+    };
+
+    const first = await coordinator.requestQuote(input);
+    expect(Object.isFrozen(first)).toBe(true);
+    (mutableQuote as { price: number }).price = 1;
+    const cached = await coordinator.requestQuote(input);
+    expect(cached).toMatchObject({ symbol: "SAFE", price: 71_000 });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("rejects accessor or context-mismatched adapter quotes at the coordinator boundary", async () => {
+    const accessorAdapter = customAdapter("accessor-quote", (_payload, instrumentValue, context) => {
+      const quote = customQuote(instrumentValue, context, 71_000);
+      Object.defineProperty(quote, "price", {
+        enumerable: true,
+        get: () => { throw new Error("app-secret leaked from quote getter"); },
+      });
+      return quote;
+    });
+    const mismatchAdapter = customAdapter("mismatch-quote", (_payload, instrumentValue, context) => ({
+      ...customQuote(instrumentValue, context, 71_000),
+      receivedAt: context.receivedAt + 1,
+    }));
+    for (const adapter of [accessorAdapter, mismatchAdapter]) {
+      const coordinator = new RestCoordinator(mutableCredentials(), {
+        fetch: vi.fn<RestFetch>().mockResolvedValue(successfulResponse()),
+        now: () => openNow,
+      });
+      const error = await coordinator.requestQuote({
+        adapter,
+        instrument: customInstrument(adapter.id, "SAFE"),
+        marketSnapshot: openSnapshot,
+        priority: "initial",
+      }).catch((value: unknown) => value);
+      expect(error).toMatchObject({ code: "PROTOCOL", scope: "rest" });
+      expect(JSON.stringify(error)).not.toContain("app-secret");
+    }
+  });
+
+  it("sanitizes and freezes adapter KisErrors before negative-cache sharing", async () => {
+    const adapter = customAdapter("unsafe-error", () => {
+      throw new KisError({
+        code: "PROTOCOL",
+        scope: "action",
+        retryable: false,
+        safeMessage: "app-secret and raw response leaked",
+      });
+    });
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(mutableCredentials(), {
+      fetch,
+      now: () => openNow,
+    });
+    const input = {
+      adapter,
+      instrument: customInstrument("unsafe-error", "SAFE"),
+      marketSnapshot: openSnapshot,
+      priority: "initial" as const,
+    };
+
+    const first = await coordinator.requestQuote(input).catch((value: unknown) => value) as KisError;
+    expect(first).toMatchObject({ code: "PROTOCOL", scope: "rest" });
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(JSON.stringify(first)).not.toContain("app-secret");
+    expect(() => Object.defineProperty(first, "code", { value: "NETWORK" })).toThrow();
+    const second = await coordinator.requestQuote(input).catch((value: unknown) => value);
+    expect(second).toMatchObject({ code: "PROTOCOL", scope: "rest" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it("reuses closed-session success only for the same instrument, session and credential generation", async () => {
     const credentials = mutableCredentials(authorization(2));
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
