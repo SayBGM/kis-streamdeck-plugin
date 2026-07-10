@@ -56,6 +56,25 @@ async function waitForCalls(mock: { mock: { calls: unknown[][] } }, count: numbe
 }
 
 describe("CredentialSession HTTP issuance", () => {
+  it("records a shared final auth failure exactly once without raw response data", async () => {
+    const { repository } = makeRepository(configured());
+    const diagnostics = { record: vi.fn(), increment: vi.fn() };
+    const fetch = vi.fn<AuthFetch>().mockResolvedValue(response(false, 403, {
+      error_description: "raw-secret-response",
+    }));
+    const session = new CredentialSession(repository, { fetch, diagnostics });
+
+    const first = session.getAccessToken();
+    const second = session.getAccessToken();
+    await Promise.allSettled([first, second]);
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(diagnostics.record).toHaveBeenCalledOnce();
+    expect(diagnostics.increment).toHaveBeenCalledOnce();
+    expect(diagnostics.increment).toHaveBeenCalledWith("authFailures");
+    expect(JSON.stringify(diagnostics.record.mock.calls)).not.toContain("raw-secret-response");
+  });
+
   it("fails without making an HTTP request when credentials are missing", async () => {
     const { repository } = makeRepository(migrateGlobalSettings({}));
     const fetch = vi.fn<AuthFetch>();
@@ -186,7 +205,8 @@ describe("CredentialSession HTTP issuance", () => {
       .mockResolvedValueOnce(response(false, 403, { error_code: "EGW00133" }))
       .mockResolvedValueOnce(response(false, 403, { error_code: "EGW00133" }));
     const sleep = vi.fn(async (_milliseconds: number) => {});
-    const session = new CredentialSession(repository, { fetch, sleep });
+    const diagnostics = { record: vi.fn(), increment: vi.fn() };
+    const session = new CredentialSession(repository, { fetch, sleep, diagnostics });
 
     await expect(session.getAccessToken()).rejects.toMatchObject({
       code: "AUTH_RATE_LIMITED",
@@ -196,6 +216,8 @@ describe("CredentialSession HTTP issuance", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledOnce();
     expect(sleep).toHaveBeenCalledWith(60_000);
+    expect(diagnostics.record).toHaveBeenCalledOnce();
+    expect(diagnostics.increment).toHaveBeenCalledOnce();
   });
 
   it("returns a second-attempt token after one EGW00133 delay", async () => {
@@ -204,11 +226,19 @@ describe("CredentialSession HTTP issuance", () => {
       .mockResolvedValueOnce(response(false, 403, { error_code: "EGW00133" }))
       .mockResolvedValueOnce(response(true, 200, { access_token: "retried-token", expires_in: 60 }));
     const sleep = vi.fn(async (_milliseconds: number) => {});
-    const session = new CredentialSession(repository, { fetch, sleep, now: () => 1_000 });
+    const diagnostics = { record: vi.fn(), increment: vi.fn() };
+    const session = new CredentialSession(repository, {
+      fetch,
+      sleep,
+      now: () => 1_000,
+      diagnostics,
+    });
 
     await expect(session.getAccessToken()).resolves.toMatchObject({ token: "retried-token" });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledWith(60_000);
+    expect(diagnostics.record).not.toHaveBeenCalled();
+    expect(diagnostics.increment).not.toHaveBeenCalled();
   });
 
   it("singleflights approval keys per generation without persisting them", async () => {

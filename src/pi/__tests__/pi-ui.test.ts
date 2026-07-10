@@ -93,13 +93,13 @@ describe("Property Inspector UI", () => {
     expect(helper).not.toMatch(/getGlobalSettings|setGlobalSettings/);
     expect(shared).not.toMatch(/getGlobalSettings|setGlobalSettings/);
     expect(helper).toContain('event: "sendToPlugin"');
-    expect(shared).toContain('command("settings/request")');
-    expect(shared).toContain('command("credentials/save"');
-    expect(shared).toContain('command("preferences/save"');
-    expect(shared).toContain('command("diagnostics/request")');
-    expect(shared).toContain('command("auth/retry")');
-    expect(shared).toContain('command("ws/reconnect")');
-    expect(shared).toContain('command("quote/refresh")');
+    expect(shared).toContain('sendCommand("settings/request"');
+    expect(shared).toContain('sendCommand("credentials/save"');
+    expect(shared).toContain('sendCommand("preferences/save"');
+    expect(shared).toContain('sendCommand("diagnostics/request"');
+    expect(shared).toContain('sendCommand("auth/retry"');
+    expect(shared).toContain('sendCommand("ws/reconnect"');
+    expect(shared).toContain('sendCommand("quote/refresh"');
   });
 
   it("renders sections in the required order with folded advanced settings", () => {
@@ -173,6 +173,61 @@ describe("Property Inspector UI", () => {
         backupPollIntervalMs: 60_000,
       },
     });
+  });
+
+  it("correlates out-of-order acknowledgements to the correct section", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: responseSnapshot() },
+    }));
+    (document.getElementById("appKey") as unknown as { value: string }).value = "NEWKEY";
+    document.getElementById("saveCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    const credentialRequest = commands.at(-1) as { requestId: string };
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const preferenceRequest = commands.at(-1) as { requestId: string };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: preferenceRequest.requestId, ok: true, snapshot: responseSnapshot() },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: credentialRequest.requestId,
+        ok: false,
+        error: { safeMessage: "최신 설정과 충돌했습니다." },
+      },
+    }));
+
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toContain("적용");
+    expect(document.getElementById("credentialStatusMessage")?.textContent).toContain("충돌");
+  });
+
+  it("preserves dirty secret and preference inputs during diagnostics pushes and stale acks", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: responseSnapshot() },
+    }));
+    const secret = document.getElementById("appSecret") as unknown as { value: string; dispatchEvent(event: unknown): boolean };
+    const mode = document.getElementById("dataMode") as unknown as { value: string; dispatchEvent(event: unknown): boolean };
+    secret.value = "typing-secret";
+    secret.dispatchEvent(new window.Event("input"));
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: responseSnapshot() },
+    }));
+    expect(secret.value).toBe("typing-secret");
+    expect(mode.value).toBe("rest-only");
+
+    (document.getElementById("appKey") as unknown as { value: string }).value = "KEY";
+    document.getElementById("saveCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    const oldRequest = commands.at(-1) as { requestId: string };
+    secret.value = "newer-secret";
+    secret.dispatchEvent(new window.Event("input"));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: oldRequest.requestId, ok: true, snapshot: responseSnapshot() },
+    }));
+    expect(secret.value).toBe("newer-secret");
   });
 
   it("uses an external-only CSP and external configuration scripts", () => {

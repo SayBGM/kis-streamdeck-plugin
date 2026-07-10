@@ -200,6 +200,51 @@ async function flush(rounds = 20): Promise<void> {
 }
 
 describe("RestCoordinator HTTP boundary", () => {
+  it("records one shared REST transport failure for all waiters", async () => {
+    const diagnostics = { record: vi.fn(), increment: vi.fn() };
+    const fetch = vi.fn<RestFetch>().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ raw: "raw-secret-response" }),
+    });
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
+      now: () => openNow,
+      diagnostics,
+    });
+
+    await Promise.allSettled([request(coordinator), request(coordinator)]);
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(diagnostics.record).toHaveBeenCalledOnce();
+    expect(diagnostics.increment).toHaveBeenCalledOnce();
+    expect(diagnostics.increment).toHaveBeenCalledWith("restFailures");
+    expect(JSON.stringify(diagnostics.record.mock.calls)).not.toContain("raw-secret-response");
+  });
+
+  it("does not count cancellation or invalid instruments as REST infrastructure failures", async () => {
+    const diagnostics = { record: vi.fn(), increment: vi.fn() };
+    const invalidFetch = vi.fn<RestFetch>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ rt_cd: "1", msg1: "raw-secret-response" }),
+    });
+    const coordinator = new RestCoordinator(
+      mutableCredentials(authorization(), invalidFetch),
+      { now: () => openNow, diagnostics },
+    );
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(request(coordinator, openSnapshot, "initial", controller.signal)).rejects.toMatchObject({
+      code: "NETWORK",
+    });
+    await expect(request(coordinator)).rejects.toMatchObject({ code: "INVALID_INSTRUMENT" });
+
+    expect(diagnostics.record).toHaveBeenCalledOnce();
+    expect(diagnostics.increment).not.toHaveBeenCalled();
+    expect(JSON.stringify(diagnostics.record.mock.calls)).not.toContain("raw-secret-response");
+  });
+
   it("builds the descriptor URL and exact KIS authorization headers", async () => {
     const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
     const credentials = mutableCredentials(authorization(), fetch);
@@ -258,6 +303,7 @@ describe("RestCoordinator HTTP boundary", () => {
       .mockResolvedValueOnce({ ok: false, status: 401 })
       .mockResolvedValueOnce(successfulResponse("72000"));
     const credentials = mutableCredentials(authorization(3, 5), fetch);
+    const diagnostics = { record: vi.fn(), increment: vi.fn() };
     credentials.invalidateAccessToken.mockImplementation(async () => {
       credentials.current = Object.freeze({
         ...authorization(3, 6),
@@ -265,12 +311,17 @@ describe("RestCoordinator HTTP boundary", () => {
       });
       return true;
     });
-    const coordinator = new RestCoordinator(credentials, { now: () => openNow });
+    const coordinator = new RestCoordinator(credentials, {
+      now: () => openNow,
+      diagnostics,
+    });
 
     await expect(request(coordinator)).rejects.toMatchObject({ code: "AUTH_REJECTED" });
     await expect(request(coordinator)).resolves.toMatchObject({ price: 72_000 });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[1][1].headers.authorization).toBe("Bearer replacement-token");
+    expect(diagnostics.record).toHaveBeenCalledOnce();
+    expect(diagnostics.increment).toHaveBeenCalledOnce();
   });
 
   it("refreshes an authorization invalidated while its flight waits for the transport gate", async () => {

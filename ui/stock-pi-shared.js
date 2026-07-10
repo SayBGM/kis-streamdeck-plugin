@@ -22,16 +22,6 @@
     return prefix + "-" + Date.now() + "-" + requestSequence;
   }
 
-  function command(type, fields) {
-    var payload = { type: type, requestId: nextRequestId(type.replace("/", "-")) };
-    var key;
-    fields = fields || {};
-    for (key in fields) {
-      if (Object.prototype.hasOwnProperty.call(fields, key)) payload[key] = fields[key];
-    }
-    sendToPlugin(payload);
-  }
-
   function hasValue(value) {
     return value !== undefined && value !== null && value !== "";
   }
@@ -144,7 +134,30 @@
     this.config = config;
     this.settingsRevision = 0;
     this.actionSaveTimer = null;
+    this.pendingRequests = Object.create(null);
+    this.latestRequestBySection = Object.create(null);
+    this.credentialEditVersion = 0;
+    this.preferencesEditVersion = 0;
   }
+
+  StockPropertyInspector.prototype.sendCommand = function (type, fields, section) {
+    var requestId = nextRequestId(type.replace("/", "-"));
+    var payload = { type: type, requestId: requestId };
+    var key;
+    fields = fields || {};
+    for (key in fields) {
+      if (Object.prototype.hasOwnProperty.call(fields, key)) payload[key] = fields[key];
+    }
+    this.pendingRequests[requestId] = {
+      type: type,
+      section: section,
+      credentialEditVersion: this.credentialEditVersion,
+      preferencesEditVersion: this.preferencesEditVersion,
+    };
+    this.latestRequestBySection[section] = requestId;
+    sendToPlugin(payload);
+    return requestId;
+  };
 
   StockPropertyInspector.prototype.setStatus = function (id, message, kind) {
     var target = byId(id);
@@ -213,17 +226,24 @@
     }, ACTION_SAVE_DEBOUNCE_MS);
   };
 
-  StockPropertyInspector.prototype.applySnapshot = function (snapshot) {
+  StockPropertyInspector.prototype.applySnapshot = function (snapshot, options) {
     if (!snapshot || snapshot.schemaVersion !== 2) return;
-    this.settingsRevision = snapshot.settingsRevision;
+    options = options || {};
+    if ((snapshot.settingsRevision || 0) < this.settingsRevision) {
+      this.applyDiagnostics(snapshot.diagnostics);
+      return;
+    }
+    this.settingsRevision = Math.max(this.settingsRevision, snapshot.settingsRevision || 0);
     byId("maskedAppKey").textContent = snapshot.maskedAppKey || "설정 안 됨";
     byId("credentialSummary").textContent = snapshot.credentialsConfigured
       ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
       : "자격증명을 입력해야 시세를 조회할 수 있습니다.";
-    byId("appSecret").value = "";
-    byId("dataMode").value = snapshot.preferences.dataMode;
-    byId("renderIntervalMs").value = String(snapshot.preferences.renderIntervalMs);
-    byId("backupPollIntervalMs").value = String(snapshot.preferences.backupPollIntervalMs);
+    if (options.applyCredentials) byId("appSecret").value = "";
+    if (options.applyPreferences) {
+      byId("dataMode").value = snapshot.preferences.dataMode;
+      byId("renderIntervalMs").value = String(snapshot.preferences.renderIntervalMs);
+      byId("backupPollIntervalMs").value = String(snapshot.preferences.backupPollIntervalMs);
+    }
     this.applyDiagnostics(snapshot.diagnostics);
   };
 
@@ -244,20 +264,83 @@
 
   StockPropertyInspector.prototype.handleMessage = function (message) {
     if (!message || typeof message !== "object") return;
-    if (message.snapshot) this.applySnapshot(message.snapshot);
-    if (message.type === "diagnostics/update" || message.type === "settings/update") return;
-    if (message.ok === false && message.error) {
-      this.setStatus("advancedStatusMessage", message.error.safeMessage || "요청을 처리하지 못했습니다.", "error");
-    } else if (message.ok === true) {
-      this.setStatus("advancedStatusMessage", "요청이 적용되었습니다.", "success");
-      byId("appSecret").value = "";
+    if (message.type === "diagnostics/update") {
+      if (message.snapshot) this.applyDiagnostics(message.snapshot.diagnostics);
+      return;
+    }
+    if (message.type === "settings/update") {
+      if (message.snapshot) this.applySnapshot(message.snapshot, {
+        applyCredentials: this.credentialEditVersion === 0,
+        applyPreferences: this.preferencesEditVersion === 0,
+      });
+      return;
+    }
+
+    var pending = this.pendingRequests[message.requestId];
+    if (!pending) {
+      if (message.snapshot) this.applySnapshot(message.snapshot, {
+        applyCredentials: this.credentialEditVersion === 0,
+        applyPreferences: this.preferencesEditVersion === 0,
+      });
+      return;
+    }
+    delete this.pendingRequests[message.requestId];
+    if (this.latestRequestBySection[pending.section] !== message.requestId) return;
+
+    if (message.snapshot) {
+      if (pending.section === "credentials") {
+        var credentialsUnchanged = pending.credentialEditVersion === this.credentialEditVersion;
+        this.applySnapshot(message.snapshot, {
+          applyCredentials: credentialsUnchanged,
+          applyPreferences: false,
+        });
+        if (credentialsUnchanged && message.ok === true) this.credentialEditVersion = 0;
+      } else if (pending.section === "advanced" && pending.type === "preferences/save") {
+        var preferencesUnchanged = pending.preferencesEditVersion === this.preferencesEditVersion;
+        this.applySnapshot(message.snapshot, {
+          applyCredentials: false,
+          applyPreferences: preferencesUnchanged,
+        });
+        if (preferencesUnchanged && message.ok === true) this.preferencesEditVersion = 0;
+      } else if (pending.section === "settings") {
+        this.applySnapshot(message.snapshot, {
+          applyCredentials: pending.credentialEditVersion === this.credentialEditVersion,
+          applyPreferences: pending.preferencesEditVersion === this.preferencesEditVersion,
+        });
+      } else {
+        this.applyDiagnostics(message.snapshot.diagnostics);
+      }
+    }
+
+    var safeMessage = message.error && message.error.safeMessage
+      ? message.error.safeMessage
+      : "요청을 처리하지 못했습니다.";
+    if (pending.section === "credentials") {
+      var credentialSuccessMessage = pending.type === "credentials/clear"
+        ? "자격증명이 지워졌습니다."
+        : "자격증명이 저장되었습니다.";
+      this.setStatus(
+        "credentialStatusMessage",
+        message.ok === true ? credentialSuccessMessage : safeMessage,
+        message.ok === true ? "success" : "error"
+      );
+    } else if (pending.section === "advanced") {
+      this.setStatus(
+        "advancedStatusMessage",
+        message.ok === true ? "요청이 적용되었습니다." : safeMessage,
+        message.ok === true ? "success" : "error"
+      );
+    } else if (pending.section === "diagnostics" && message.ok === false) {
+      byId("diagnosticsOutput").textContent = safeMessage;
+    } else if (pending.section === "settings" && message.ok === false) {
+      byId("connectionSummary").textContent = safeMessage;
     }
   };
 
   StockPropertyInspector.prototype.bindEvents = function () {
     var inspector = this;
     document.addEventListener("piDidConnect", function () {
-      command("settings/request");
+      inspector.sendCommand("settings/request", null, "settings");
     });
     document.addEventListener("piDidReceiveSettings", function (event) {
       inspector.applyActionSettings(event.detail || {});
@@ -284,26 +367,51 @@
       }
       var fields = { appKey: appKey, settingsRevision: inspector.settingsRevision };
       if (appSecret) fields.appSecret = appSecret;
-      command("credentials/save", fields);
+      inspector.sendCommand("credentials/save", fields, "credentials");
       inspector.setStatus("credentialStatusMessage", "자격증명을 저장하는 중입니다.", "info");
     });
     byId("clearCredentialsButton").addEventListener("click", function () {
-      command("credentials/clear", { settingsRevision: inspector.settingsRevision });
+      inspector.sendCommand(
+        "credentials/clear",
+        { settingsRevision: inspector.settingsRevision },
+        "credentials"
+      );
+      inspector.setStatus("credentialStatusMessage", "자격증명을 지우는 중입니다.", "info");
     });
     byId("savePreferencesButton").addEventListener("click", function () {
-      command("preferences/save", {
+      inspector.sendCommand("preferences/save", {
         settingsRevision: inspector.settingsRevision,
         preferences: {
           dataMode: byId("dataMode").value,
           renderIntervalMs: Number(byId("renderIntervalMs").value),
           backupPollIntervalMs: Number(byId("backupPollIntervalMs").value),
         },
+      }, "advanced");
+    });
+    byId("retryAuthButton").addEventListener("click", function () {
+      inspector.sendCommand("auth/retry", null, "advanced");
+    });
+    byId("reconnectWsButton").addEventListener("click", function () {
+      inspector.sendCommand("ws/reconnect", null, "advanced");
+    });
+    byId("refreshQuoteButton").addEventListener("click", function () {
+      inspector.sendCommand("quote/refresh", null, "advanced");
+    });
+    byId("refreshDiagnosticsButton").addEventListener("click", function () {
+      inspector.sendCommand("diagnostics/request", null, "diagnostics");
+    });
+
+    byId("appKey").addEventListener("input", function () {
+      inspector.credentialEditVersion += 1;
+    });
+    byId("appSecret").addEventListener("input", function () {
+      inspector.credentialEditVersion += 1;
+    });
+    ["dataMode", "renderIntervalMs", "backupPollIntervalMs"].forEach(function (id) {
+      byId(id).addEventListener("change", function () {
+        inspector.preferencesEditVersion += 1;
       });
     });
-    byId("retryAuthButton").addEventListener("click", function () { command("auth/retry"); });
-    byId("reconnectWsButton").addEventListener("click", function () { command("ws/reconnect"); });
-    byId("refreshQuoteButton").addEventListener("click", function () { command("quote/refresh"); });
-    byId("refreshDiagnosticsButton").addEventListener("click", function () { command("diagnostics/request"); });
   };
 
   function bootstrap(config) {

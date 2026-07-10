@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { diagnosticsStore, type DiagnosticsStore } from "../core/diagnostics-store.js";
 import { KisError } from "../core/errors.js";
 import type { SettingsSnapshot } from "../settings/settings-repository.js";
 import type { GlobalSettingsV2 } from "../settings/schema.js";
@@ -94,6 +95,7 @@ export interface CredentialSessionOptions {
     milliseconds: number,
   ) => AuthTimeoutHandle;
   readonly clearTimeout?: (handle: AuthTimeoutHandle) => void;
+  readonly diagnostics?: Pick<DiagnosticsStore, "record" | "increment">;
 }
 
 interface NormalizedCredentials {
@@ -394,6 +396,8 @@ export class CredentialSession {
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly setTimeout: CredentialSessionOptions["setTimeout"];
   private readonly clearTimeout: CredentialSessionOptions["clearTimeout"];
+  private readonly diagnostics: Pick<DiagnosticsStore, "record" | "increment">;
+  private readonly recordedAuthErrors = new WeakSet<object>();
   private readonly accessTokenFlights = new Map<string, Promise<AccessTokenLease>>();
   private readonly approvalKeyFlights = new Map<string, Promise<ApprovalKeyLease>>();
   private reconciliation?: Promise<void>;
@@ -406,6 +410,7 @@ export class CredentialSession {
     this.sleep = options.sleep ?? defaultSleep;
     this.setTimeout = options.setTimeout ?? defaultSetTimeout;
     this.clearTimeout = options.clearTimeout ?? defaultClearTimeout;
+    this.diagnostics = options.diagnostics ?? diagnosticsStore;
   }
 
   async initialize(): Promise<CredentialIdentity> {
@@ -597,21 +602,26 @@ export class CredentialSession {
   }
 
   async getAccessToken(): Promise<AccessTokenLease> {
-    const persisted = await this.getPersistedAccessToken();
-    if (persisted) return persisted;
+    try {
+      const persisted = await this.getPersistedAccessToken();
+      if (persisted) return persisted;
 
-    const credentials = await this.currentCredentials();
-    const key = credentialFlightKey(credentials);
-    const existing = this.accessTokenFlights.get(key);
-    if (existing) return existing;
+      const credentials = await this.currentCredentials();
+      const key = credentialFlightKey(credentials);
+      const existing = this.accessTokenFlights.get(key);
+      if (existing) return await existing;
 
-    const flight = this.issueAndPersistAccessToken(credentials);
-    this.accessTokenFlights.set(key, flight);
-    void flight.then(
-      () => this.deleteFlight(this.accessTokenFlights, key, flight),
-      () => this.deleteFlight(this.accessTokenFlights, key, flight),
-    );
-    return flight;
+      const flight = this.issueAndPersistAccessToken(credentials);
+      this.accessTokenFlights.set(key, flight);
+      void flight.then(
+        () => this.deleteFlight(this.accessTokenFlights, key, flight),
+        () => this.deleteFlight(this.accessTokenFlights, key, flight),
+      );
+      return await flight;
+    } catch (error) {
+      this.recordAuthFailure(error);
+      throw error;
+    }
   }
 
   async prepareRestAuthorization(): Promise<PreparedRestAuthorization> {
@@ -700,18 +710,31 @@ export class CredentialSession {
   }
 
   async getApprovalKey(): Promise<ApprovalKeyLease> {
-    const credentials = await this.currentCredentials();
-    const key = credentialFlightKey(credentials);
-    const existing = this.approvalKeyFlights.get(key);
-    if (existing) return existing;
+    try {
+      const credentials = await this.currentCredentials();
+      const key = credentialFlightKey(credentials);
+      const existing = this.approvalKeyFlights.get(key);
+      if (existing) return await existing;
 
-    const flight = this.issueApprovalKey(credentials);
-    this.approvalKeyFlights.set(key, flight);
-    void flight.then(
-      () => this.deleteFlight(this.approvalKeyFlights, key, flight),
-      () => this.deleteFlight(this.approvalKeyFlights, key, flight),
-    );
-    return flight;
+      const flight = this.issueApprovalKey(credentials);
+      this.approvalKeyFlights.set(key, flight);
+      void flight.then(
+        () => this.deleteFlight(this.approvalKeyFlights, key, flight),
+        () => this.deleteFlight(this.approvalKeyFlights, key, flight),
+      );
+      return await flight;
+    } catch (error) {
+      this.recordAuthFailure(error);
+      throw error;
+    }
+  }
+
+  private recordAuthFailure(error: unknown): void {
+    if (!(error instanceof KisError) || error.scope !== "auth") return;
+    if (this.recordedAuthErrors.has(error)) return;
+    this.recordedAuthErrors.add(error);
+    try { this.diagnostics.record(error); } catch { /* diagnostics are observational */ }
+    try { this.diagnostics.increment("authFailures"); } catch { /* diagnostics are observational */ }
   }
 
   private deleteFlight<T>(

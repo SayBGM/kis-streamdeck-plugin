@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GlobalSettings } from "../../types/index.js";
+import { domesticStockAdapter } from "../../markets/market-adapter.js";
 import {
   createPluginRuntime,
   PluginRuntime,
@@ -206,6 +207,101 @@ describe("PluginRuntime", () => {
     expect(current.settingsRevision).toBe(writesAfterReconcile);
     await runtime.refreshGlobalSettings();
     expect(current.settingsRevision).toBe(writesAfterReconcile);
+    await runtime.destroy();
+  });
+
+  it("wires shared auth diagnostics into sanitized PI snapshots", async () => {
+    let current: GlobalSettings = { appKey: "key", appSecret: "secret" };
+    const messages: unknown[] = [];
+    const runtime = createPluginRuntime({
+      settingsPersistence: {
+        getGlobalSettings: vi.fn(async () => current),
+        setGlobalSettings: vi.fn(async (settings) => { current = settings; }),
+      },
+      credentialSessionOptions: {
+        fetch: vi.fn(async () => ({
+          ok: false,
+          status: 403,
+          json: async () => ({ error_description: "raw-secret-response" }),
+        })),
+      },
+      piSender: {
+        send: vi.fn(async (_contextId, message) => { messages.push(message); }),
+      },
+    });
+    await runtime.initialize();
+
+    await runtime.services.credentialSession.getAccessToken().catch(() => undefined);
+    await runtime.piController.handleCommand("ctx-1", "domestic", {
+      type: "settings/request",
+      requestId: "settings-1",
+    });
+
+    expect(messages.at(-1)).toMatchObject({
+      ok: true,
+      snapshot: {
+        diagnostics: {
+          recentErrors: {
+            counters: { authFailures: 1 },
+            events: [expect.objectContaining({ code: "AUTH_REJECTED", scope: "auth" })],
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(messages)).not.toContain("raw-secret-response");
+    await runtime.destroy();
+  });
+
+  it("wires shared REST diagnostics into sanitized PI snapshots", async () => {
+    let current: GlobalSettings = { appKey: "key", appSecret: "secret" };
+    const messages: unknown[] = [];
+    const runtime = createPluginRuntime({
+      settingsPersistence: {
+        getGlobalSettings: vi.fn(async () => current),
+        setGlobalSettings: vi.fn(async (settings) => { current = settings; }),
+      },
+      credentialSessionOptions: {
+        fetch: vi.fn(async () => ({
+          ok: true,
+          status: 200,
+          json: async () => ({ access_token: "issued-token", expires_in: 3600 }),
+        })),
+        restFetch: vi.fn(async () => ({
+          ok: false,
+          status: 500,
+          json: async () => ({ raw: "raw-secret-response" }),
+        })),
+      },
+      piSender: {
+        send: vi.fn(async (_contextId, message) => { messages.push(message); }),
+      },
+    });
+    await runtime.initialize();
+    const instrument = domesticStockAdapter.toInstrument({ stockCode: "005930" });
+
+    await runtime.services.restCoordinator.requestQuote({
+      adapter: domesticStockAdapter,
+      instrument,
+      marketSnapshot: runtime.services.clocks.domestic.snapshot(),
+      priority: "manual",
+    }).catch(() => undefined);
+    await runtime.piController.handleCommand("ctx-1", "domestic", {
+      type: "settings/request",
+      requestId: "settings-1",
+    });
+
+    expect(messages.at(-1)).toMatchObject({
+      snapshot: {
+        diagnostics: {
+          restBackup: { failures: 1 },
+          recentErrors: {
+            counters: { restFailures: 1 },
+            events: [expect.objectContaining({ code: "NETWORK", scope: "rest" })],
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(messages)).not.toContain("raw-secret-response");
     await runtime.destroy();
   });
 

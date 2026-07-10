@@ -1,3 +1,4 @@
+import { diagnosticsStore, type DiagnosticsStore } from "../core/diagnostics-store.js";
 import { KisError, type KisErrorCode } from "../core/errors.js";
 import type { MarketSnapshot } from "../core/market-clock.js";
 import type {
@@ -45,6 +46,7 @@ export interface RestCoordinatorOptions {
   readonly rateNow?: () => number;
   readonly setTimeout?: (callback: () => void, milliseconds: number) => RestTimerHandle;
   readonly clearTimeout?: (handle: RestTimerHandle) => void;
+  readonly diagnostics?: Pick<DiagnosticsStore, "record" | "increment">;
 }
 
 export interface RestCoordinatorDiagnostics {
@@ -157,8 +159,15 @@ function restError(
   }));
 }
 
+const EXPECTED_CONTROL_ERRORS = new WeakSet<object>();
+
+function expectedControlError(error: KisError): KisError {
+  EXPECTED_CONTROL_ERRORS.add(error);
+  return error;
+}
+
 function cancelledError(): KisError {
-  return restError("NETWORK", true, "시세 요청이 취소되었습니다.");
+  return expectedControlError(restError("NETWORK", true, "시세 요청이 취소되었습니다."));
 }
 
 function protocolError(): KisError {
@@ -166,19 +175,19 @@ function protocolError(): KisError {
 }
 
 function changedCredentialError(): KisError {
-  return restError(
+  return expectedControlError(restError(
     "AUTH_REJECTED",
     true,
     "자격증명이 변경되어 이전 시세 결과를 폐기했습니다.",
-  );
+  ));
 }
 
 function sessionTransitionError(): KisError {
-  return restError(
+  return expectedControlError(restError(
     "TIMEOUT",
     true,
     "시장 세션이 전환되어 이전 시세 결과를 폐기했습니다.",
-  );
+  ));
 }
 
 function transportGateError(): KisError {
@@ -222,6 +231,11 @@ function raceWithAbort<T>(operation: PromiseLike<T>, signal: AbortSignal): Promi
 }
 
 function normalizeError(value: unknown): KisError {
+  const expected = typeof value === "object" && value !== null &&
+    EXPECTED_CONTROL_ERRORS.has(value);
+  const normalized = (error: KisError): KisError => expected
+    ? expectedControlError(error)
+    : error;
   if (value instanceof KisError) {
     let code: unknown;
     try {
@@ -232,26 +246,26 @@ function normalizeError(value: unknown): KisError {
     }
     switch (code) {
       case "NO_CREDENTIALS":
-        return restError(code, false, "KIS API 자격증명이 비어 있습니다.");
+        return normalized(restError(code, false, "KIS API 자격증명이 비어 있습니다."));
       case "AUTH_REJECTED":
-        return restError(code, true, "KIS 인증 상태가 유효하지 않습니다.");
+        return normalized(restError(code, true, "KIS 인증 상태가 유효하지 않습니다."));
       case "AUTH_RATE_LIMITED":
-        return restError(code, true, "KIS 인증 요청 제한에 도달했습니다.");
+        return normalized(restError(code, true, "KIS 인증 요청 제한에 도달했습니다."));
       case "NETWORK":
-        return restError(code, true, "KIS 시세 서버에 연결하지 못했습니다.");
+        return normalized(restError(code, true, "KIS 시세 서버에 연결하지 못했습니다."));
       case "TIMEOUT":
-        return restError(code, true, "KIS 시세 요청 시간이 만료되었습니다.");
+        return normalized(restError(code, true, "KIS 시세 요청 시간이 만료되었습니다."));
       case "INVALID_INSTRUMENT":
-        return restError(code, false, "종목 설정 또는 시세 요청이 올바르지 않습니다.");
+        return normalized(restError(code, false, "종목 설정 또는 시세 요청이 올바르지 않습니다."));
       case "PROTOCOL":
-        return restError(code, false, "KIS 시세 응답 형식이 올바르지 않습니다.");
+        return normalized(restError(code, false, "KIS 시세 응답 형식이 올바르지 않습니다."));
       case "SUBSCRIPTION_REJECTED":
-        return restError(code, false, "KIS 요청이 거부되었습니다.");
+        return normalized(restError(code, false, "KIS 요청이 거부되었습니다."));
       case "SETTINGS":
-        return restError(code, true, "KIS 설정을 안전하게 처리하지 못했습니다.");
+        return normalized(restError(code, true, "KIS 설정을 안전하게 처리하지 못했습니다."));
     }
   }
-  return restError("NETWORK", true, "KIS 시세 요청을 처리하지 못했습니다.");
+  return normalized(restError("NETWORK", true, "KIS 시세 요청을 처리하지 못했습니다."));
 }
 
 function requestCacheKey(
@@ -447,6 +461,8 @@ export class RestCoordinator {
   private readonly rateNow: () => number;
   private readonly setTimeout: NonNullable<RestCoordinatorOptions["setTimeout"]>;
   private readonly clearTimeout: NonNullable<RestCoordinatorOptions["clearTimeout"]>;
+  private readonly diagnostics: Pick<DiagnosticsStore, "record" | "increment">;
+  private readonly recordedFailures = new WeakSet<object>();
   private readonly queue: Flight[] = [];
   private readonly flights = new Map<string, Flight>();
   private readonly cache = new Map<string, CacheEntry>();
@@ -466,10 +482,25 @@ export class RestCoordinator {
     this.rateNow = options.rateNow ?? defaultRateNow;
     this.setTimeout = options.setTimeout ?? defaultSetTimeout;
     this.clearTimeout = options.clearTimeout ?? defaultClearTimeout;
+    this.diagnostics = options.diagnostics ?? diagnosticsStore;
   }
 
   requestQuote(input: RestQuoteRequest): Promise<QuoteSample> {
-    return this.prepareRequest(input);
+    return this.prepareRequest(input).catch((error: unknown) => {
+      const safe = error instanceof KisError && error.scope === "rest"
+        ? error
+        : normalizeError(error);
+      this.recordFailure(safe);
+      throw safe;
+    });
+  }
+
+  private recordFailure(error: KisError): void {
+    if (EXPECTED_CONTROL_ERRORS.has(error) || this.recordedFailures.has(error)) return;
+    this.recordedFailures.add(error);
+    try { this.diagnostics.record(error); } catch { /* diagnostics are observational */ }
+    if (error.code === "INVALID_INSTRUMENT") return;
+    try { this.diagnostics.increment("restFailures"); } catch { /* diagnostics are observational */ }
   }
 
   getDiagnostics(): RestCoordinatorDiagnostics {

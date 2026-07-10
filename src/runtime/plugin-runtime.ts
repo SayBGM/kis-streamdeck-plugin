@@ -137,7 +137,7 @@ export function createPluginRuntime(options: CreatePluginRuntimeOptions): Plugin
   const settingsRepository = new SettingsRepository(options.settingsPersistence);
   const credentialSession = new CredentialSession(
     settingsRepository,
-    options.credentialSessionOptions,
+    { ...options.credentialSessionOptions, diagnostics },
   );
   const connectionSupervisor = new ConnectionSupervisor({
     credentials: credentialSession,
@@ -147,7 +147,7 @@ export function createPluginRuntime(options: CreatePluginRuntimeOptions): Plugin
     connection: connectionSupervisor,
     diagnostics,
   });
-  const restCoordinator = new RestCoordinator(credentialSession);
+  const restCoordinator = new RestCoordinator(credentialSession, { diagnostics });
   const renderScheduler = new RenderScheduler();
   const clocks = Object.freeze({
     domestic: new MarketClock("domestic"),

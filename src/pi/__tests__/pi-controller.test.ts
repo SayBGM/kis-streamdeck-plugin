@@ -11,6 +11,12 @@ import {
   type PiOutboundMessage,
 } from "../pi-controller.js";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function createHarness(initial: GlobalSettings = {}) {
   let disk = structuredClone(initial);
   const getGlobalSettings = vi.fn(async () => structuredClone(disk));
@@ -271,6 +277,140 @@ describe("PiController", () => {
       const afterDisappear = harness.sent.length;
       await vi.advanceTimersByTimeAsync(4_000);
       expect(harness.sent).toHaveLength(afterDisappear);
+    } finally {
+      harness.controller.destroy();
+      vi.useRealTimers();
+    }
+  });
+
+  it("fences a started credential command after its PI context disappears", async () => {
+    const harness = createHarness({ appKey: "KEY", appSecret: "SECRET" });
+    await harness.controller.propertyInspectorDidAppear("ctx-1", "domestic");
+    harness.sent.length = 0;
+    const gate = deferred<{ configured: true; credentialGeneration: number; credentialFingerprint: string }>();
+    const save = vi.spyOn(harness.credentialSession, "saveCredentials")
+      .mockImplementationOnce(() => gate.promise);
+    const reconcile = vi.spyOn(harness.credentialSession, "reconcile");
+    const revision = harness.settingsRepository.getSnapshot().settings.settingsRevision;
+
+    const pending = harness.controller.handleCommand("ctx-1", "domestic", {
+      type: "credentials/save",
+      requestId: "save-pending",
+      appKey: "NEW",
+      appSecret: "NEW-SECRET",
+      settingsRevision: revision,
+    });
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    await harness.controller.propertyInspectorDidDisappear("ctx-1");
+    gate.resolve({
+      configured: true,
+      credentialGeneration: 2,
+      credentialFingerprint: "fingerprint",
+    });
+    await pending;
+
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(harness.sent).toHaveLength(0);
+    harness.controller.destroy();
+  });
+
+  it("treats an out-of-order disappear as a tombstone for later commands", async () => {
+    const harness = createHarness();
+
+    await harness.controller.propertyInspectorDidDisappear("ctx-ghost");
+    await harness.controller.handleCommand("ctx-ghost", "domestic", {
+      type: "ws/reconnect",
+      requestId: "ws-after-disappear",
+    });
+
+    expect(harness.connection.forceReconnect).not.toHaveBeenCalled();
+    expect(harness.sent).toHaveLength(0);
+    harness.controller.destroy();
+  });
+
+  it("prevents queued command side effects after controller destruction", async () => {
+    const harness = createHarness({ appKey: "KEY", appSecret: "SECRET" });
+    await harness.controller.propertyInspectorDidAppear("ctx-1", "domestic");
+    harness.sent.length = 0;
+    const gate = deferred<unknown>();
+    const token = vi.spyOn(harness.credentialSession, "getAccessToken")
+      .mockImplementationOnce(() => gate.promise as never);
+    const save = vi.spyOn(harness.credentialSession, "saveCredentials");
+    const revision = harness.settingsRepository.getSnapshot().settings.settingsRevision;
+    const auth = harness.controller.handleCommand("ctx-1", "domestic", {
+      type: "auth/retry",
+      requestId: "auth-pending",
+    });
+    await vi.waitFor(() => expect(token).toHaveBeenCalledOnce());
+    const update = vi.spyOn(harness.settingsRepository, "update");
+    const queuedSave = harness.controller.handleCommand("ctx-1", "domestic", {
+      type: "credentials/save",
+      requestId: "save-queued",
+      appKey: "NEW",
+      appSecret: "NEW-SECRET",
+      settingsRevision: revision,
+    });
+    const queuedPreferences = harness.controller.handleCommand("ctx-1", "domestic", {
+      type: "preferences/save",
+      requestId: "preferences-queued",
+      settingsRevision: revision,
+      preferences: {
+        dataMode: "rest-only",
+        renderIntervalMs: 10_000,
+        backupPollIntervalMs: 60_000,
+      },
+    });
+    const queuedReconnect = harness.controller.handleCommand("ctx-1", "domestic", {
+      type: "ws/reconnect",
+      requestId: "ws-queued",
+    });
+    const queuedRefresh = harness.controller.handleCommand("ctx-1", "domestic", {
+      type: "quote/refresh",
+      requestId: "quote-queued",
+    });
+    harness.controller.destroy();
+    gate.resolve({});
+    await Promise.all([
+      auth,
+      queuedSave,
+      queuedPreferences,
+      queuedReconnect,
+      queuedRefresh,
+    ]);
+
+    expect(harness.connection.refreshApprovalKey).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(harness.connection.forceReconnect).not.toHaveBeenCalled();
+    expect(harness.manualRefresh).not.toHaveBeenCalled();
+    expect(harness.sent).toHaveLength(0);
+  });
+
+  it("singleflights interval ticks and fences a pending tick on disappear", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    try {
+      await harness.controller.propertyInspectorDidAppear("ctx-1", "domestic");
+      harness.sent.length = 0;
+      const firstGate = deferred<never>();
+      const readiness = vi.spyOn(harness.settingsRepository, "whenReady")
+        .mockImplementationOnce(() => firstGate.promise);
+
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(readiness).toHaveBeenCalledTimes(1);
+      firstGate.resolve(undefined as never);
+      await vi.waitFor(() => expect(harness.sent).toHaveLength(1));
+      expect(lastResponse(harness)).toMatchObject({ type: "diagnostics/update" });
+
+      const secondGate = deferred<never>();
+      readiness.mockImplementationOnce(() => secondGate.promise);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await harness.controller.propertyInspectorDidDisappear("ctx-1");
+      const beforeResolve = harness.sent.length;
+      secondGate.resolve(undefined as never);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(harness.sent).toHaveLength(beforeResolve);
     } finally {
       harness.controller.destroy();
       vi.useRealTimers();

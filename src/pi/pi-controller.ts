@@ -107,6 +107,13 @@ interface VisibleContext {
   generation: number;
 }
 
+interface OperationFence {
+  readonly controllerGeneration: number;
+  readonly contextId: string;
+  readonly contextGeneration?: number;
+  readonly tracked: boolean;
+}
+
 function defaultSetInterval(callback: () => void, milliseconds: number): TimerHandle {
   return setInterval(callback, milliseconds);
 }
@@ -354,8 +361,11 @@ export class PiController {
   private readonly setIntervalFn: NonNullable<PiControllerOptions["setInterval"]>;
   private readonly clearIntervalFn: NonNullable<PiControllerOptions["clearInterval"]>;
   private readonly contexts = new Map<string, VisibleContext>();
+  private readonly contextGenerations = new Map<string, number>();
   private interval: TimerHandle | undefined;
+  private diagnosticsPush: Promise<void> | undefined;
   private nextGeneration = 0;
+  private controllerGeneration = 1;
   private commandTail: Promise<void> = Promise.resolve();
   private destroyed = false;
 
@@ -387,6 +397,7 @@ export class PiController {
         generation: ++this.nextGeneration,
       };
       this.contexts.set(contextId, context);
+      this.contextGenerations.set(contextId, context.generation);
     }
     this.ensureInterval();
     const generation = context.generation;
@@ -402,9 +413,16 @@ export class PiController {
 
   async propertyInspectorDidDisappear(contextId: string): Promise<void> {
     const context = this.contexts.get(contextId);
-    if (!context) return;
+    if (!context) {
+      this.contextGenerations.set(contextId, ++this.nextGeneration);
+      if (this.contexts.size === 0) this.clearDiagnosticsInterval();
+      return;
+    }
     context.appearances -= 1;
-    if (context.appearances <= 0) this.contexts.delete(contextId);
+    if (context.appearances <= 0) {
+      this.contexts.delete(contextId);
+      this.contextGenerations.set(contextId, ++this.nextGeneration);
+    }
     if (this.contexts.size === 0) this.clearDiagnosticsInterval();
   }
 
@@ -412,19 +430,35 @@ export class PiController {
     if (this.destroyed) return Promise.resolve();
     const parsed = parsePiCommand(rawCommand);
     const requestId = parsed?.requestId ?? "invalid";
+    const fence = this.captureFence(contextId);
     const operation = this.commandTail.then(async () => {
+      if (!this.fenceCurrent(fence)) return;
       if (!parsed) {
-        await this.safeSend(contextId, this.failure(requestId, protocolError()));
+        await this.safeSend(
+          contextId,
+          this.failure(requestId, protocolError()),
+          () => this.fenceCurrent(fence),
+        );
         return;
       }
       try {
-        await this.execute(contextId, market, parsed);
+        await this.execute(contextId, market, parsed, () => this.fenceCurrent(fence));
+        if (!this.fenceCurrent(fence)) return;
         const snapshot = await this.buildSnapshot();
-        await this.safeSend(contextId, { requestId, ok: true, snapshot });
+        if (!this.fenceCurrent(fence)) return;
+        await this.safeSend(
+          contextId,
+          { requestId, ok: true, snapshot },
+          () => this.fenceCurrent(fence),
+        );
       } catch (error) {
         const safe = normalizeError(error);
         this.record(safe);
-        await this.safeSend(contextId, this.failure(requestId, safe));
+        await this.safeSend(
+          contextId,
+          this.failure(requestId, safe),
+          () => this.fenceCurrent(fence),
+        );
       }
     });
     this.commandTail = operation.catch(() => undefined);
@@ -434,37 +468,52 @@ export class PiController {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.controllerGeneration += 1;
     this.contexts.clear();
     this.clearDiagnosticsInterval();
   }
 
-  private async execute(contextId: string, market: Market, command: PiCommand): Promise<void> {
+  private async execute(
+    contextId: string,
+    market: Market,
+    command: PiCommand,
+    current: () => boolean,
+  ): Promise<void> {
+    if (!current()) return;
     if (command.type === "settings/request" || command.type === "diagnostics/request") {
       await this.readySnapshot();
       return;
     }
     if (command.type === "credentials/save") {
-      const current = await this.readySnapshot();
-      assertRevision(current.settings, command.settingsRevision);
+      const settingsSnapshot = await this.readySnapshot();
+      if (!current()) return;
+      assertRevision(settingsSnapshot.settings, command.settingsRevision);
       const secret = command.appSecret === undefined
-        ? current.settings.appSecret
+        ? settingsSnapshot.settings.appSecret
         : command.appSecret;
+      if (!current()) return;
+      // Once persistence starts it cannot be cancelled; every follow-up is fenced.
       await this.credentials.saveCredentials(
         command.appKey,
         secret,
         command.settingsRevision,
       );
+      if (!current()) return;
       await this.credentials.reconcile();
       return;
     }
     if (command.type === "credentials/clear") {
-      const current = await this.readySnapshot();
-      assertRevision(current.settings, command.settingsRevision);
+      const settingsSnapshot = await this.readySnapshot();
+      if (!current()) return;
+      assertRevision(settingsSnapshot.settings, command.settingsRevision);
+      if (!current()) return;
       await this.credentials.clearCredentials(command.settingsRevision);
+      if (!current()) return;
       await this.credentials.reconcile();
       return;
     }
     if (command.type === "preferences/save") {
+      if (!current()) return;
       await this.settingsRepository.update((draft) => {
         assertRevision(draft, command.settingsRevision);
         draft.preferences = {
@@ -475,16 +524,19 @@ export class PiController {
       return;
     }
     if (command.type === "auth/retry") {
+      if (!current()) return;
       await this.credentials.reconcile();
+      if (!current()) return;
       await this.credentials.getAccessToken();
+      if (!current()) return;
       if (!await this.connection.refreshApprovalKey()) throw authRetryError();
       return;
     }
     if (command.type === "ws/reconnect") {
-      this.connection.forceReconnect("property-inspector");
+      if (current()) this.connection.forceReconnect("property-inspector");
       return;
     }
-    await this.manualRefresh(market, contextId);
+    if (current()) await this.manualRefresh(market, contextId);
   }
 
   private async readySnapshot(): Promise<SettingsSnapshot> {
@@ -559,7 +611,7 @@ export class PiController {
     if (this.interval !== undefined || this.contexts.size === 0 || this.destroyed) return;
     try {
       this.interval = this.setIntervalFn(() => {
-        void this.pushDiagnostics();
+        this.startDiagnosticsPush();
       }, DIAGNOSTICS_INTERVAL_MS);
     } catch {
       this.interval = undefined;
@@ -573,8 +625,26 @@ export class PiController {
     try { this.clearIntervalFn(interval); } catch { /* best effort */ }
   }
 
-  private async pushDiagnostics(): Promise<void> {
-    if (this.destroyed || this.contexts.size === 0) return;
+  private startDiagnosticsPush(): void {
+    if (this.diagnosticsPush || this.destroyed || this.contexts.size === 0) return;
+    const generation = this.controllerGeneration;
+    const operation = this.pushDiagnostics(generation).finally(() => {
+      if (this.diagnosticsPush === operation) this.diagnosticsPush = undefined;
+    });
+    this.diagnosticsPush = operation;
+    void operation.catch(() => undefined);
+  }
+
+  private async pushDiagnostics(generation: number): Promise<void> {
+    if (
+      this.destroyed ||
+      generation !== this.controllerGeneration ||
+      this.contexts.size === 0
+    ) return;
+    const visible = [...this.contexts.values()].map((context) => ({
+      contextId: context.contextId,
+      generation: context.generation,
+    }));
     let snapshot: SanitizedPiSnapshot;
     try {
       snapshot = await this.buildSnapshot();
@@ -582,9 +652,15 @@ export class PiController {
       this.record(normalizeError(error));
       return;
     }
-    for (const context of [...this.contexts.values()]) {
+    if (this.destroyed || generation !== this.controllerGeneration) return;
+    for (const context of visible) {
       if (!this.isCurrent(context.contextId, context.generation)) continue;
-      await this.safeSend(context.contextId, { type: "diagnostics/update", snapshot });
+      await this.safeSend(
+        context.contextId,
+        { type: "diagnostics/update", snapshot },
+        () => generation === this.controllerGeneration &&
+          this.isCurrent(context.contextId, context.generation),
+      );
     }
   }
 
@@ -593,7 +669,34 @@ export class PiController {
     return current?.generation === generation && current.appearances > 0;
   }
 
-  private async safeSend(contextId: string, message: PiOutboundMessage): Promise<void> {
+  private captureFence(contextId: string): OperationFence {
+    const context = this.contexts.get(contextId);
+    return Object.freeze({
+      controllerGeneration: this.controllerGeneration,
+      contextId,
+      ...(context ? { contextGeneration: context.generation } : {}),
+      tracked: this.contextGenerations.has(contextId),
+    });
+  }
+
+  private fenceCurrent(fence: OperationFence): boolean {
+    if (
+      this.destroyed ||
+      fence.controllerGeneration !== this.controllerGeneration
+    ) return false;
+    if (!fence.tracked) {
+      return !this.contextGenerations.has(fence.contextId);
+    }
+    if (fence.contextGeneration === undefined) return false;
+    return this.isCurrent(fence.contextId, fence.contextGeneration);
+  }
+
+  private async safeSend(
+    contextId: string,
+    message: PiOutboundMessage,
+    current: () => boolean = () => !this.destroyed,
+  ): Promise<void> {
+    if (!current()) return;
     try { await this.sender.send(contextId, message); } catch { /* PI may have disappeared */ }
   }
 
