@@ -8,6 +8,12 @@ const getGlobalSettings = vi.fn();
 const setGlobalSettings = vi.fn();
 const connect = vi.fn();
 const setLevel = vi.fn();
+const settingsApi = {
+  useExperimentalMessageIdentifiers: false,
+  onDidReceiveGlobalSettings,
+  getGlobalSettings,
+  setGlobalSettings,
+};
 
 const clearAccessTokenCache = vi.fn();
 const hydrateAccessTokenFromGlobalSettings = vi.fn();
@@ -18,11 +24,7 @@ const updateSettings = vi.fn();
 vi.mock("@elgato/streamdeck", () => ({
   default: {
     logger: { setLevel },
-    settings: {
-      onDidReceiveGlobalSettings,
-      getGlobalSettings,
-      setGlobalSettings,
-    },
+    settings: settingsApi,
     actions: {
       registerAction,
     },
@@ -88,6 +90,7 @@ describe("plugin global settings handling", () => {
     onAccessTokenUpdated.mockReset();
     clearCredentials.mockReset();
     updateSettings.mockReset();
+    settingsApi.useExperimentalMessageIdentifiers = false;
 
     connect.mockResolvedValue(undefined);
     getGlobalSettings.mockResolvedValue({});
@@ -116,5 +119,18 @@ describe("plugin global settings handling", () => {
     expect(clearAccessTokenCache).toHaveBeenCalledTimes(1);
     expect(clearCredentials).toHaveBeenCalledTimes(1);
     expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("enables experimental message identifiers before connecting", async () => {
+    let experimentalAtConnect = false;
+    connect.mockImplementation(async () => {
+      experimentalAtConnect = settingsApi.useExperimentalMessageIdentifiers;
+    });
+
+    await import("../plugin.js");
+    await Promise.resolve();
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(experimentalAtConnect).toBe(true);
   });
 });

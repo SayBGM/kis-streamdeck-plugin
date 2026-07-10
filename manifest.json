@@ -8,14 +8,14 @@
   "UUID": "com.kis.streamdeck",
   "SDKVersion": 2,
   "Software": {
-    "MinimumVersion": "6.4"
+    "MinimumVersion": "7.1"
   },
   "OS": [
     { "Platform": "mac", "MinimumVersion": "10.15" },
     { "Platform": "windows", "MinimumVersion": "10" }
   ],
   "Nodejs": {
-    "Version": "20",
+    "Version": "24",
     "Debug": "enabled"
   },
   "Category": "KIS 주식 시세",

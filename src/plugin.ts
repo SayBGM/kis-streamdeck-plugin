@@ -13,6 +13,7 @@ import {
 
 // 로깅 설정
 streamDeck.logger.setLevel("debug");
+streamDeck.settings.useExperimentalMessageIdentifiers = true;
 
 function hasCredentials(
   settings: GlobalSettings
