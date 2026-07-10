@@ -1,10 +1,27 @@
 import { describe, expect, it } from "vitest";
+import { KisError } from "../../core/errors.js";
 import {
   actionSettingsEqual,
   migrateDomesticStockSettings,
   migrateGlobalSettings,
   migrateOverseasStockSettings,
 } from "../schema.js";
+
+function expectSettingsFailure(run: () => unknown): void {
+  let caught: unknown;
+  try {
+    run();
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(KisError);
+  expect(caught).toMatchObject({
+    code: "SETTINGS",
+    scope: "settings",
+    retryable: false,
+  });
+}
 
 describe("migrateGlobalSettings", () => {
   it("creates v2 defaults without mutating input and preserves external fields", () => {
@@ -119,6 +136,24 @@ describe("migrateGlobalSettings", () => {
     });
   });
 
+  it.each([
+    ["missing credential fingerprint", undefined, "token-fingerprint"],
+    ["mismatched fingerprints", "credential-fingerprint", "token-fingerprint"],
+  ])("removes tokens with %s", (_label, credentialFingerprint, accessTokenFingerprint) => {
+    const migrated = migrateGlobalSettings({
+      credentialFingerprint,
+      accessToken: "token",
+      accessTokenExpiry: 123,
+      accessTokenFingerprint,
+      accessTokenVersion: 7,
+    });
+
+    expect(migrated).not.toHaveProperty("accessToken");
+    expect(migrated).not.toHaveProperty("accessTokenExpiry");
+    expect(migrated).not.toHaveProperty("accessTokenFingerprint");
+    expect(migrated.accessTokenVersion).toBe(0);
+  });
+
   it("is idempotent for normalized v2 settings", () => {
     const extension = { nested: ["keep"] };
     const once = migrateGlobalSettings({
@@ -137,6 +172,7 @@ describe("migrateGlobalSettings", () => {
 
     expect(once.preferences.extension).toEqual({ nested: ["keep"] });
     expect(once.preferences.extension).not.toBe(extension);
+    expect(once.accessTokenVersion).toBe(0);
     expect(migrateGlobalSettings(once)).toEqual(once);
   });
 
@@ -169,6 +205,65 @@ describe("migrateGlobalSettings", () => {
       backupPollIntervalMs: 1234,
       extension: { enabled: true },
     });
+  });
+
+  it("does not execute accessors while rejecting unsafe input", () => {
+    let getterReads = 0;
+    const input = {};
+    Object.defineProperty(input, "appKey", {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return "secret";
+      },
+    });
+
+    expectSettingsFailure(() => migrateGlobalSettings(input));
+
+    expect(getterReads).toBe(0);
+  });
+
+  it("rejects objects with custom prototypes", () => {
+    const input = Object.assign(
+      Object.create({ inheritedSecret: "secret" }),
+      { external: "value" },
+    );
+
+    expectSettingsFailure(() => migrateGlobalSettings(input));
+  });
+
+  it("rejects symbol and non-enumerable properties", () => {
+    const withSymbol = { external: "value", [Symbol("secret")]: "secret" };
+    const withNonEnumerable = { external: "value" };
+    Object.defineProperty(withNonEnumerable, "secret", {
+      enumerable: false,
+      value: "secret",
+    });
+
+    expectSettingsFailure(() => migrateGlobalSettings(withSymbol));
+    expectSettingsFailure(() => migrateGlobalSettings(withNonEnumerable));
+  });
+
+  it("preserves __proto__ as an own key on null-prototype clones", () => {
+    const input = JSON.parse(
+      '{"__proto__":{"safe":"value"},"external":[{"nested":true}]}',
+    ) as Record<string, unknown>;
+
+    const migrated = migrateGlobalSettings(input);
+
+    expect(Object.getPrototypeOf(migrated)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(migrated, "__proto__")).toBe(true);
+    expect(migrated.__proto__).toEqual({ safe: "value" });
+    expect(Object.getPrototypeOf(migrated.__proto__ as object)).toBeNull();
+    expect(migrated.external).toEqual([{ nested: true }]);
+    expect(migrated.external).not.toBe(input.external);
+  });
+
+  it("fails safely for cyclic input", () => {
+    const cyclic: Record<string, unknown> = { external: "value" };
+    cyclic.self = cyclic;
+
+    expectSettingsFailure(() => migrateGlobalSettings(cyclic));
   });
 });
 
@@ -212,5 +307,15 @@ describe("action settings migrations", () => {
       { schemaVersion: 2, ticker: "AAPL" },
       { schemaVersion: 2, ticker: "MSFT" },
     )).toBe(false);
+  });
+
+  it("returns false without overflowing for cyclic settings", () => {
+    const left: Record<string, unknown> = { ticker: "AAPL" };
+    const right: Record<string, unknown> = { ticker: "AAPL" };
+    left.self = left;
+    right.self = right;
+
+    expect(actionSettingsEqual(left, right)).toBe(false);
+    expect(actionSettingsEqual(left, left)).toBe(false);
   });
 });

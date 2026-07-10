@@ -4,6 +4,7 @@ import type {
   JsonValue,
   OverseasExchange,
 } from "../types/index.js";
+import { KisError } from "../core/errors.js";
 
 export type DataMode = "automatic" | "rest-only";
 export type RenderIntervalMs = 2_000 | 5_000 | 10_000;
@@ -53,17 +54,87 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function cloneJsonValue(value: unknown): JsonValue {
-  if (Array.isArray(value)) {
-    return value.map(cloneJsonValue);
+function settingsInputError(): KisError {
+  return new KisError({
+    code: "SETTINGS",
+    scope: "settings",
+    retryable: false,
+    safeMessage: "설정 데이터 형식이 올바르지 않습니다.",
+  });
+}
+
+function plainDataEntries(value: Readonly<Record<string, unknown>>): Array<readonly [string, unknown]> {
+  let prototype: object | null;
+  let symbols: symbol[];
+  let descriptors: Record<string, PropertyDescriptor>;
+  try {
+    prototype = Object.getPrototypeOf(value) as object | null;
+    symbols = Object.getOwnPropertySymbols(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw settingsInputError();
   }
-  if (isRecord(value)) {
-    const clone: JsonObject = {};
-    for (const [key, nested] of Object.entries(value)) {
-      clone[key] = cloneJsonValue(nested);
+
+  if (
+    (prototype !== Object.prototype && prototype !== null) ||
+    symbols.length > 0
+  ) {
+    throw settingsInputError();
+  }
+
+  const entries: Array<readonly [string, unknown]> = [];
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!descriptor.enumerable || !("value" in descriptor)) {
+      throw settingsInputError();
     }
-    return clone;
+    entries.push([key, descriptor.value]);
   }
+  return entries;
+}
+
+function cloneArray(value: readonly unknown[], ancestors: WeakSet<object>): JsonValue[] {
+  let prototype: object | null;
+  let symbols: symbol[];
+  let descriptors: Record<string, PropertyDescriptor>;
+  try {
+    prototype = Object.getPrototypeOf(value) as object | null;
+    symbols = Object.getOwnPropertySymbols(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw settingsInputError();
+  }
+
+  if (prototype !== Array.prototype || symbols.length > 0) {
+    throw settingsInputError();
+  }
+
+  const lengthDescriptor = descriptors.length;
+  if (
+    !lengthDescriptor ||
+    !("value" in lengthDescriptor) ||
+    typeof lengthDescriptor.value !== "number" ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0
+  ) {
+    throw settingsInputError();
+  }
+  const clone = new Array<JsonValue>(lengthDescriptor.value);
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (key === "length") continue;
+    if (
+      !descriptor.enumerable ||
+      !("value" in descriptor) ||
+      !/^(?:0|[1-9]\d*)$/.test(key) ||
+      Number(key) >= lengthDescriptor.value
+    ) {
+      throw settingsInputError();
+    }
+    clone[Number(key)] = cloneJsonValue(descriptor.value, ancestors);
+  }
+  return clone;
+}
+
+function cloneJsonValue(value: unknown, ancestors = new WeakSet<object>()): JsonValue {
   if (
     value === undefined ||
     value === null ||
@@ -73,17 +144,36 @@ function cloneJsonValue(value: unknown): JsonValue {
   ) {
     return value;
   }
-  return undefined;
+
+  if (typeof value !== "object" || value === null) {
+    throw settingsInputError();
+  }
+  if (ancestors.has(value)) {
+    throw settingsInputError();
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return cloneArray(value, ancestors);
+    }
+    if (!isRecord(value)) {
+      throw settingsInputError();
+    }
+
+    const clone = Object.create(null) as JsonObject;
+    for (const [key, nested] of plainDataEntries(value)) {
+      clone[key] = cloneJsonValue(nested, ancestors);
+    }
+    return clone;
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 function cloneRecord(input: unknown): JsonObject {
-  if (!isRecord(input)) return {};
-
-  const clone: JsonObject = {};
-  for (const [key, value] of Object.entries(input)) {
-    clone[key] = cloneJsonValue(value);
-  }
-  return clone;
+  if (!isRecord(input)) return Object.create(null) as JsonObject;
+  return cloneJsonValue(input) as JsonObject;
 }
 
 function readString(record: Readonly<Record<string, unknown>>, key: string): string | undefined {
@@ -175,13 +265,17 @@ export function migrateGlobalSettings(input: unknown): GlobalSettingsV2 {
   ) {
     delete migrated.credentialFingerprint;
   }
-  if (
-    typeof source.accessTokenFingerprint !== "string" ||
-    source.accessTokenFingerprint.trim().length === 0
-  ) {
+  const hasMatchingTokenFingerprint =
+    typeof source.credentialFingerprint === "string" &&
+    source.credentialFingerprint.trim().length > 0 &&
+    typeof source.accessTokenFingerprint === "string" &&
+    source.accessTokenFingerprint.trim().length > 0 &&
+    source.accessTokenFingerprint === source.credentialFingerprint;
+  if (!hasMatchingTokenFingerprint) {
     delete migrated.accessTokenFingerprint;
     delete migrated.accessToken;
     delete migrated.accessTokenExpiry;
+    migrated.accessTokenVersion = 0;
   } else {
     if (typeof source.accessToken !== "string") delete migrated.accessToken;
     if (typeof source.accessTokenExpiry !== "number" || !Number.isFinite(source.accessTokenExpiry)) {
@@ -226,7 +320,7 @@ export function migrateOverseasStockSettings(input: unknown): OverseasStockSetti
   return migrated as OverseasStockSettingsV2;
 }
 
-function jsonEqual(left: unknown, right: unknown): boolean {
+function jsonEqual(left: JsonValue, right: JsonValue): boolean {
   if (Object.is(left, right)) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
     return Array.isArray(left) &&
@@ -245,7 +339,11 @@ function jsonEqual(left: unknown, right: unknown): boolean {
 }
 
 export function actionSettingsEqual(left: unknown, right: unknown): boolean {
-  return jsonEqual(left, right);
+  try {
+    return jsonEqual(cloneJsonValue(left), cloneJsonValue(right));
+  } catch {
+    return false;
+  }
 }
 
 export const globalSettingsEqual = actionSettingsEqual;
