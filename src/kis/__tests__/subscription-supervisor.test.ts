@@ -126,7 +126,7 @@ describe("SubscriptionSupervisor", () => {
     expect(b.snapshot?.refCount).toBe(2);
   });
 
-  it("routes overseas data by exact realtime key and ticker suffix, but never routes PINGPONG or control JSON", async () => {
+  it("prefers an active overseas exact realtime key over ticker fallback", async () => {
     const exact = vi.fn();
     const suffix = vi.fn();
     supervisor.subscribe({ trId: "HDFSCNT0", trKey: "DNASPLTR" }, { onData: exact });
@@ -138,7 +138,69 @@ describe("SubscriptionSupervisor", () => {
     connection.emitRaw(overseasData("DNASPLTR", "PLTR"));
 
     expect(exact).toHaveBeenCalledTimes(1);
-    expect(suffix).toHaveBeenCalledTimes(1);
+    expect(suffix).not.toHaveBeenCalled();
+  });
+
+  it("uses strict four-character-prefix overseas fallback only for one active physical key", async () => {
+    const exactSymbol = vi.fn();
+    const suffixOnly = vi.fn();
+    const ambiguous = vi.fn();
+    supervisor.subscribe({ trId: "HDFSCNT0", trKey: "DNASPLTR" }, { onData: exactSymbol });
+    supervisor.subscribe({ trId: "HDFSCNT0", trKey: "RBAQPLTR" }, { onData: ambiguous });
+    await flush();
+    connection.emitRaw(control("HDFSCNT0", "DNASPLTR"));
+    advance(100);
+    connection.emitRaw(control("HDFSCNT0", "RBAQPLTR"));
+
+    connection.emitRaw(overseasData("UNKNOWN", "PLTR"));
+    expect(exactSymbol).not.toHaveBeenCalled();
+    expect(ambiguous).not.toHaveBeenCalled();
+
+    const single = new SubscriptionSupervisor({
+      connection,
+      now: () => now,
+      setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    });
+    single.subscribe({ trId: "HDFSCNT0", trKey: "DNASA" }, { onData: suffixOnly });
+    advance(100);
+    connection.emitRaw(control("HDFSCNT0", "DNASA"));
+    connection.emitRaw(overseasData("UNKNOWN", "A"));
+    expect(suffixOnly).toHaveBeenCalledTimes(1);
+    single.destroy();
+
+    const noSuffixConnection = new FakeConnection();
+    const noSuffix = new SubscriptionSupervisor({
+      connection: noSuffixConnection,
+      now: () => now,
+      setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
+      clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    });
+    const denied = vi.fn();
+    noSuffix.subscribe({ trId: "HDFSCNT0", trKey: "DNASAA" }, { onData: denied });
+    await flush();
+    noSuffixConnection.emitRaw(control("HDFSCNT0", "DNASAA"));
+    noSuffixConnection.emitRaw(overseasData("UNKNOWN", "A"));
+    expect(denied).not.toHaveBeenCalled();
+    noSuffix.destroy();
+  });
+
+  it("does not acknowledge a keyless control reply and reconnects at the control timeout", async () => {
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    const handle = supervisor.subscribe(descriptor);
+    await flush();
+    connection.emitRaw(JSON.stringify({
+      header: { tr_id: descriptor.trId },
+      body: { msg_cd: "OPSP0000" },
+    }));
+
+    expect(handle.snapshot?.state).toBe("pending");
+    advance(5_000);
+    expect(connection.reconnects).toBe(1);
   });
 
   it("serializes control frames, waits 100ms between sends, and requeues a false transport send", async () => {
@@ -356,6 +418,29 @@ describe("SubscriptionSupervisor", () => {
     return descriptors;
   }
 
+  async function settleInitialLiveHandles(count: number): Promise<{
+    descriptors: Array<{ trId: string; trKey: string }>;
+    handles: ReturnType<SubscriptionSupervisor["subscribe"]>[];
+  }> {
+    const descriptors = Array.from({ length: count }, (_, index) => ({
+      trId: "H0UNCNT0",
+      trKey: String(index).padStart(6, "0"),
+    }));
+    const handles = descriptors.map((descriptor) => supervisor.subscribe(descriptor));
+    await flush();
+    for (let index = 0; index < 41; index += 1) {
+      const command = connection.sent.at(-1)!;
+      connection.emitRaw(control(command.trId, command.trKey));
+      if (index < 40) advance(100);
+    }
+    return { descriptors, handles };
+  }
+
+  function beginRotationLease(): void {
+    vi.advanceTimersByTime(60_000);
+    advance(100);
+  }
+
   async function completeLease(descriptors: Array<{ trId: string; trKey: string }>, replacements: number): Promise<void> {
     vi.advanceTimersByTime(60_000);
     advance(100);
@@ -439,5 +524,59 @@ describe("SubscriptionSupervisor", () => {
     advance(100);
 
     expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41] });
+  });
+
+  it("cancels a current rotation pair when its outgoing final reference is released", async () => {
+    const { descriptors, handles } = await settleInitialLiveHandles(42);
+    beginRotationLease();
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[0] });
+
+    handles[0].release();
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+
+    expect(handles[0].snapshot).toBeUndefined();
+    expect(connection.releases).toBe(1);
+  });
+
+  it("cancels a queued outgoing rotation pair before its unsubscribe is sent", async () => {
+    const { descriptors, handles } = await settleInitialLiveHandles(50);
+    beginRotationLease();
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[0] });
+
+    handles[1].release();
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[1] });
+    connection.emitRaw(control(descriptors[1].trId, descriptors[1].trKey, "OPSP0002"));
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[0] });
+  });
+
+  it("retargets a current outgoing key without leaving rotation blocked", async () => {
+    const { descriptors } = await settleInitialLiveHandles(42);
+    const next = { trId: "H0UNCNT0", trKey: "900000" } as const;
+    beginRotationLease();
+    const retargeted = supervisor.retargetAll(descriptors[0], next);
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+    await retargeted;
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...next });
+    connection.emitRaw(control(next.trId, next.trKey));
+
+    (supervisor as unknown as { startRotationLease(): void }).startRotationLease();
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[1] });
+  });
+
+  it("removes a current incoming key and lets the outgoing key resume normally", async () => {
+    const { descriptors, handles } = await settleInitialLiveHandles(42);
+    beginRotationLease();
+    handles[41].release();
+    expect(handles[41].snapshot).toBeUndefined();
+    expect(connection.releases).toBe(1);
+
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[0] });
   });
 });

@@ -266,6 +266,7 @@ export class SubscriptionSupervisor {
         : Promise.reject(subscriptionError("진행 중인 구독 키 전환이 있습니다."));
     }
 
+    this.cancelRotationFor(entry);
     const retarget = this.createRetarget(nextDescriptor);
     entry.retarget = retarget;
     if (entry.refs.size === 0) {
@@ -332,6 +333,7 @@ export class SubscriptionSupervisor {
       this.publishState(entry);
       return;
     }
+    this.cancelRotationFor(entry);
     entry.removing = true;
     if (entry.state === "live" || entry.state === "stale" || entry.state === "pending") {
       if (entry.state !== "pending") this.enqueueUnsubscribe(entry);
@@ -500,9 +502,7 @@ export class SubscriptionSupervisor {
     const exactKey = fields[0]?.trim();
     if (!trId || !exactKey) return;
     if (this.retiredDataKeys.has(descriptorKey({ trId, trKey: exactKey }))) return;
-    for (const entry of [...this.entries.values()]) {
-      if (!this.matchesData(entry, trId, exactKey, fields[1]?.trim())) continue;
-      if (entry.refs.size === 0 || entry.generation < 1) continue;
+    for (const entry of this.findDataTargets(trId, exactKey, fields[1]?.trim())) {
       entry.lastDataAt = this.safeNow();
       if (entry.state === "pending" || entry.state === "stale") this.setEntryState(entry, "live");
       const event: SubscriptionDataEvent = Object.freeze({
@@ -533,7 +533,9 @@ export class SubscriptionSupervisor {
     const trKey = this.readControlKey(output) ?? this.readControlKey(input);
     const job = this.currentJob;
     if (!job || typeof trId !== "string" || trId !== job.entry.descriptor.trId) return;
-    if (trKey !== undefined && trKey !== job.entry.descriptor.trKey) return;
+    // KIS control frame에는 socket-wide correlation id가 없습니다. key 없는 응답은
+    // 이전 요청의 늦은 응답인지 판별할 수 없으므로 절대 현재 job으로 귀속하지 않습니다.
+    if (trKey !== job.entry.descriptor.trKey) return;
     if (typeof msgCd !== "string") return;
 
     this.clearControlTimeout();
@@ -585,13 +587,29 @@ export class SubscriptionSupervisor {
     return typeof trKey === "string" ? trKey : undefined;
   }
 
-  private matchesData(entry: Entry, trId: string, exactKey: string, ticker: string | undefined): boolean {
-    if (entry.descriptor.trId !== trId) return false;
-    if (entry.descriptor.trKey === exactKey) return true;
-    return trId === TR_ID_OVERSEAS &&
-      typeof ticker === "string" &&
-      ticker.length > 0 &&
-      entry.descriptor.trKey.toUpperCase().endsWith(ticker.toUpperCase());
+  private findDataTargets(trId: string, exactKey: string, ticker: string | undefined): Entry[] {
+    const active = [...this.entries.values()].filter((entry) => this.isDataRoutable(entry, trId));
+    const exact = active.filter((entry) => entry.descriptor.trKey === exactKey);
+    if (exact.length > 0) return exact;
+    if (trId !== TR_ID_OVERSEAS || typeof ticker !== "string" || ticker.trim().length === 0) return [];
+
+    const symbol = ticker.trim().toUpperCase();
+    const fallback = active.filter((entry) => this.overseasSymbol(entry.descriptor.trKey) === symbol);
+    // ticker-only frame은 동일 티커의 주·야간/거래소 key가 공존할 수 있습니다.
+    // 정확히 하나일 때만 보조 라우팅하며, 둘 이상이면 잘못된 화면 갱신보다 무시합니다.
+    return fallback.length === 1 ? fallback : [];
+  }
+
+  private isDataRoutable(entry: Entry, trId: string): boolean {
+    return entry.descriptor.trId === trId &&
+      entry.refs.size > 0 &&
+      (entry.state === "pending" || entry.state === "live" || entry.state === "stale");
+  }
+
+  private overseasSymbol(trKey: string): string | undefined {
+    if (trKey.length <= 4 || !/^[A-Z]{4}$/i.test(trKey.slice(0, 4))) return undefined;
+    const symbol = trKey.slice(4).trim();
+    return symbol.length > 0 ? symbol.toUpperCase() : undefined;
   }
 
   private markStaleEntries(): void {
@@ -723,6 +741,21 @@ export class SubscriptionSupervisor {
     this.rotationQueue.length = 0;
   }
 
+  /**
+   * 회전 pair의 한쪽 수명이 끝나면 이 lease 전체를 취소합니다. 현재 control job은
+   * server ack까지 그대로 두되, callback이 일반 unsubscribe/retarget 경로로 처리되게
+   * 회전 표식과 대기 pair만 제거합니다.
+   */
+  private cancelRotationFor(entry: Entry): void {
+    if (
+      !entry.rotationOutgoing &&
+      !entry.rotationIncoming &&
+      this.rotationCurrent?.outgoing !== entry &&
+      this.rotationCurrent?.incoming !== entry
+    ) return;
+    this.resetRotation();
+  }
+
   private retireDataKey(descriptor: SubscriptionDescriptor): void {
     const key = descriptorKey(descriptor);
     this.retiredDataKeys.delete(key);
@@ -850,6 +883,7 @@ export class SubscriptionSupervisor {
 
   private deleteEntry(entry: Entry): void {
     if (this.entries.get(entry.key) !== entry) return;
+    this.cancelRotationFor(entry);
     this.entries.delete(entry.key);
     entry.generation += 1;
     entry.queuedAction = undefined;
