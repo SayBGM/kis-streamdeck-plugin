@@ -56,7 +56,7 @@ function quote(source: QuoteSample["source"], price: number, receivedAt = Date.n
 }
 
 class FakeClock {
-  private listener?: (value: MarketSnapshot) => void;
+  private readonly listeners = new Set<(value: MarketSnapshot) => void>();
   current = snapshot();
 
   snapshot(): MarketSnapshot {
@@ -64,11 +64,9 @@ class FakeClock {
   }
 
   subscribe(listener: (value: MarketSnapshot) => void): () => void {
-    this.listener = listener;
+    this.listeners.add(listener);
     listener(this.current);
-    return () => {
-      if (this.listener === listener) this.listener = undefined;
-    };
+    return () => this.listeners.delete(listener);
   }
 
   start(): void {}
@@ -76,7 +74,7 @@ class FakeClock {
 
   emit(value: MarketSnapshot): void {
     this.current = value;
-    this.listener?.(value);
+    for (const listener of [...this.listeners]) listener(value);
   }
 }
 
@@ -185,6 +183,63 @@ class FakeSubscriptions {
 
   private active() {
     return [...this.subscriptions].reverse().find((entry) => !entry.released);
+  }
+}
+
+class SharedPhysicalSubscriptions extends FakeSubscriptions {
+  private physical?: {
+    descriptor: { trId: string; trKey: string };
+    state: "desired" | "pending" | "live" | "stale" | "parked" | "rejected";
+    refs: Set<Observer>;
+  };
+
+  get refCount(): number {
+    return this.physical?.refs.size ?? 0;
+  }
+
+  override subscribe(descriptor: { trId: string; trKey: string }, observer: Observer) {
+    if (!this.physical) {
+      this.physical = { descriptor, state: "desired", refs: new Set() };
+    }
+    const physical = this.physical;
+    physical.refs.add(observer);
+    observer.onState?.({ state: physical.state });
+    let released = false;
+    return {
+      get descriptor() {
+        return physical.descriptor;
+      },
+      get snapshot() {
+        return {
+          descriptor: physical.descriptor,
+          state: physical.state,
+          generation: 1,
+          refCount: physical.refs.size,
+          subscribed: physical.state === "live" || physical.state === "stale",
+        };
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        physical.refs.delete(observer);
+      },
+    };
+  }
+
+  override async retargetAll(oldDescriptor: unknown, nextDescriptor: unknown): Promise<void> {
+    const next = nextDescriptor as { trId: string; trKey: string };
+    if (
+      this.physical?.descriptor.trId === next.trId &&
+      this.physical.descriptor.trKey === next.trKey
+    ) return;
+    this.retargets.push({ oldDescriptor, nextDescriptor });
+    if (this.physical) this.physical.descriptor = next;
+  }
+
+  emitState(state: "desired" | "pending" | "live" | "stale" | "parked" | "rejected"): void {
+    if (!this.physical) return;
+    this.physical.state = state;
+    for (const observer of [...this.physical.refs]) void observer.onState?.({ state });
   }
 }
 
@@ -525,6 +580,43 @@ describe("StockActionController automatic policy and lifecycle", () => {
     expect(test.scheduler.intervals.at(-1)).toBe(5_000);
   });
 
+  it.each([
+    ["token", {
+      accessToken: "new-token",
+      accessTokenFingerprint: "fingerprint",
+      accessTokenVersion: 7,
+    }, 2_000],
+    ["revision", { settingsRevision: 99, arbitraryFutureField: "kept" }, 2_000],
+    ["render", {
+      preferences: {
+        dataMode: "automatic",
+        renderIntervalMs: 5_000,
+        backupPollIntervalMs: 30_000,
+      },
+    }, 5_000],
+  ] as const)(
+    "%s-only global 변경은 realtime policy/subscription/grace를 재시작하지 않는다",
+    async (_kind, overrides, expectedInterval) => {
+      const test = setup();
+      test.settings.resolve();
+      await test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage: vi.fn() },
+      });
+      test.subscriptions.data(70_000);
+      const physical = test.subscriptions.subscriptions[0]!;
+
+      test.settings.emit(overrides as Record<string, unknown>);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(test.subscriptions.subscriptions).toHaveLength(1);
+      expect(physical.released).toBe(false);
+      expect(test.rest.requests).toHaveLength(0);
+      expect(test.scheduler.intervals.at(-1)).toBe(expectedInterval);
+    },
+  );
+
   it.each(["desired", "stale", "parked", "rejected"] as const)(
     "유효 WS 이후 %s 상태는 즉시 fallback REST를 시작한다",
     async (state) => {
@@ -728,6 +820,54 @@ describe("StockActionController automatic policy and lifecycle", () => {
     expect(test.images.at(-1)?.quote?.price).toBe(71_000);
     expect(test.images.at(-1)?.refreshing).toBe(false);
   });
+
+  it.each([
+    ["desired", false],
+    ["stale", true],
+    ["parked", false],
+    ["rejected", false],
+  ] as const)(
+    "유효 WS 이후 %s 상태는 가격을 보존한 BROKEN 화면으로 즉시 전환한다",
+    async (state, stale) => {
+      const test = setup();
+      test.settings.resolve();
+      await test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage: vi.fn() },
+      });
+      test.subscriptions.data(70_000);
+
+      test.subscriptions.state(state);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(test.images.at(-1)?.connection).toBe("BROKEN");
+      expect(test.images.at(-1)?.quote?.price).toBe(70_000);
+      expect(test.images.at(-1)?.stale).toBe(stale);
+      test.rest.requests.at(-1)!.reject(new Error("fallback failed"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(test.images.at(-1)?.connection).toBe("BROKEN");
+      expect(test.images.at(-1)?.quote?.price).toBe(70_000);
+    },
+  );
+
+  it.each(["desired", "pending"] as const)(
+    "초기 %s 상태는 BROKEN이 아니라 waiting grace를 유지한다",
+    async (state) => {
+      const test = setup();
+      test.settings.resolve();
+      await test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage: vi.fn() },
+      });
+      test.subscriptions.state(state);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(test.images.at(-1)?.connection).toBe("waiting");
+      expect(test.rest.requests).toHaveLength(0);
+    },
+  );
 
   it("invalid instrument fatal scheduler target도 disappear에서 제거한다", async () => {
     const test = setup({
@@ -985,6 +1125,48 @@ describe("StockActionController settings, market and rendering boundaries", () =
     }]);
   });
 
+  it("공유 physical subscription에서 한 action의 disappear/cancel/retarget이 다른 action ref를 해치지 않는다", async () => {
+    let key = "DAY";
+    const adapter: MarketAdapter<TestSettings> = {
+      ...makeAdapter(),
+      webSocketDescriptor(instrument) {
+        return { trId: "WS", trKey: `${key}:${instrument.symbol}` };
+      },
+    };
+    const subscriptions = new SharedPhysicalSubscriptions();
+    const test = setup({ adapterResolver: () => adapter, subscriptions });
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    await test.controller.appear({
+      actionId: "b",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    expect(subscriptions.refCount).toBe(2);
+
+    subscriptions.emitState("stale");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.rest.requests).toHaveLength(2);
+    await test.controller.disappear("a");
+    expect(subscriptions.refCount).toBe(1);
+    expect(test.rest.requests[0]?.signal?.aborted).toBe(true);
+    expect(test.rest.requests[1]?.signal?.aborted).toBe(false);
+
+    key = "NIGHT";
+    test.clock.emit(snapshot("AFT", 2_000));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(subscriptions.refCount).toBe(1);
+    expect(subscriptions.retargets).toEqual([{
+      oldDescriptor: { trId: "WS", trKey: "DAY:005930" },
+      nextDescriptor: { trId: "WS", trKey: "NIGHT:005930" },
+    }]);
+  });
+
   it("CLOSED→OPEN 새 정책은 이전 WS valid 상태를 버리고 5초 no-data grace를 다시 적용한다", async () => {
     const test = setup();
     test.settings.resolve();
@@ -1150,7 +1332,7 @@ describe("StockActionController settings, market and rendering boundaries", () =
     expect(Object.isFrozen(test.images.at(-1)?.quote)).toBe(true);
   });
 
-  it("BACKUP에서 유효 WS로 회복하면 2초 recovery view 후 LIVE 일반 view로 돌아간다", async () => {
+  it("BACKUP에서 유효 WS로 회복하면 recovery hold 후 LIVE 일반 view로 돌아간다", async () => {
     const test = setup();
     test.settings.resolve();
     await test.controller.appear({
@@ -1168,14 +1350,60 @@ describe("StockActionController settings, market and rendering boundaries", () =
     expect(test.images.at(-1)?.connection).toBe("LIVE");
     expect(test.images.at(-1)?.recovery).toBe(true);
 
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(3_000);
     expect(test.images.at(-1)?.recovery).toBe(false);
+  });
+
+  it("실제 scheduler에서 recovery를 2초 이상 보이고 WS 최신 quote로 일반 화면을 복원한다", async () => {
+    const renderScheduler = new RenderScheduler({
+      now: () => Date.now(),
+      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    });
+    const test = setup({ renderScheduler });
+    test.settings.resolve();
+    const commits: Array<{ at: number; view: StockActionView }> = [];
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: {
+        setImage: (image) => {
+          commits.push({
+            at: Date.now(),
+            view: JSON.parse(image) as StockActionView,
+          });
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    test.rest.requests[0]!.resolve(quote("rest", 69_000));
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    test.subscriptions.data(70_000);
+    await vi.advanceTimersByTimeAsync(500);
+    test.subscriptions.data(71_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    test.subscriptions.data(72_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const firstRecovery = commits.find((entry) => entry.view.recovery);
+    const firstNormalLive = commits.find((entry) =>
+      firstRecovery !== undefined &&
+      entry.at > firstRecovery.at &&
+      entry.view.connection === "LIVE" &&
+      !entry.view.recovery
+    );
+    expect(firstRecovery).toBeDefined();
+    expect(firstNormalLive).toBeDefined();
+    expect(firstNormalLive!.at - firstRecovery!.at).toBeGreaterThanOrEqual(2_000);
+    expect(firstNormalLive!.view.quote?.price).toBe(72_000);
+    renderScheduler.destroy();
   });
 
   it("recovery timer 등록이 실패하면 recovery 상태에 고정되지 않는다", async () => {
     const test = setup({
       setTimeout: (callback, delayMs) => {
-        if (delayMs === 2_000) throw new Error("recovery timer unavailable");
+        if (delayMs === 3_000) throw new Error("recovery timer unavailable");
         return setTimeout(callback, delayMs);
       },
     });
@@ -1303,4 +1531,66 @@ describe("StockActionController settings, market and rendering boundaries", () =
       renderScheduler.destroy();
     },
   );
+
+  it("readiness 대기 중 원본 settings 변경과 accessor를 차단해 한 번 snapshot한 값만 사용한다", async () => {
+    const test = setup();
+    const mutable = { symbol: "005930" };
+    const appearing = test.controller.appear({
+      actionId: "snapshot",
+      settings: mutable,
+      actionPort: { setImage: vi.fn() },
+    });
+    mutable.symbol = "000660";
+    test.settings.resolve();
+    await appearing;
+
+    expect(test.subscriptions.subscriptions[0]?.descriptor.trKey).toBe("005930");
+
+    let getterCalls = 0;
+    const accessorSettings = Object.create(null) as TestSettings;
+    Object.defineProperty(accessorSettings, "symbol", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "035420";
+      },
+    });
+    await expect(test.controller.appear({
+      actionId: "accessor",
+      settings: accessorSettings,
+      actionPort: { setImage: vi.fn() },
+    })).rejects.toBeInstanceOf(KisError);
+    expect(getterCalls).toBe(0);
+  });
+
+  it("lifecycle input proxy/accessor와 유효하지 않은 actionId를 safe KisError로 거부한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    let portGetterCalls = 0;
+    const actionPort = Object.create(null);
+    Object.defineProperty(actionPort, "setImage", {
+      enumerable: true,
+      get() {
+        portGetterCalls += 1;
+        return vi.fn();
+      },
+    });
+    await expect(test.controller.appear({
+      actionId: "port-accessor",
+      settings: { symbol: "005930" },
+      actionPort,
+    })).rejects.toBeInstanceOf(KisError);
+    expect(portGetterCalls).toBe(0);
+
+    const proxy = new Proxy({}, {
+      getOwnPropertyDescriptor() {
+        throw new Error("proxy trap");
+      },
+    });
+    await expect(test.controller.appear(proxy as never)).rejects.toBeInstanceOf(KisError);
+    await expect(test.controller.manualRefresh("")).rejects.toBeInstanceOf(KisError);
+    await expect(test.controller.updateSettings("x".repeat(200), { symbol: "005930" }))
+      .rejects.toBeInstanceOf(KisError);
+    expect(test.subscriptions.subscriptions).toHaveLength(0);
+  });
 });

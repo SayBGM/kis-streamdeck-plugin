@@ -21,7 +21,9 @@ import type { Market, MarketSession } from "../types/index.js";
 
 const INITIAL_WS_GRACE_MS = 5_000;
 const POLICY_TICK_MS = 60_000;
-const RECOVERY_DISPLAY_MS = 2_000;
+const RECOVERY_HOLD_MS = 3_000;
+const MAX_ACTION_ID_LENGTH = 128;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F]/;
 
 type TimerHandle = unknown;
 
@@ -140,6 +142,7 @@ interface ActionSession<Settings> {
   pollTimer?: TimerHandle;
   policyTimer?: TimerHandle;
   recoveryTimer?: TimerHandle;
+  recoveryActive: boolean;
   fallbackAbort?: AbortController;
   readonly policyAbortControllers: Set<AbortController>;
   retargetPromise?: Promise<void>;
@@ -154,6 +157,7 @@ interface ActionSession<Settings> {
   closedRequestKey?: string;
   manualPromise?: Promise<void>;
   credentialIdentityKey: string;
+  policySettingsSignature: string;
   destroyed: boolean;
 }
 
@@ -163,6 +167,110 @@ function defaultSetTimeout(callback: () => void, delayMs: number): TimerHandle {
 
 function defaultClearTimeout(handle: TimerHandle): void {
   clearTimeout(handle as ReturnType<typeof setTimeout>);
+}
+
+function lifecycleInputError(): KisError {
+  return Object.freeze(new KisError({
+    code: "SETTINGS",
+    scope: "action",
+    retryable: false,
+    safeMessage: "액션 이벤트 형식이 올바르지 않습니다.",
+  }));
+}
+
+function ownLifecycleData(value: unknown, key: string): unknown {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw lifecycleInputError();
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !("value" in descriptor)) throw lifecycleInputError();
+    return descriptor.value;
+  } catch (error) {
+    if (error instanceof KisError) throw error;
+    throw lifecycleInputError();
+  }
+}
+
+function snapshotActionId(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    value.length > MAX_ACTION_ID_LENGTH ||
+    CONTROL_CHARACTER_PATTERN.test(value)
+  ) throw lifecycleInputError();
+  return value;
+}
+
+function snapshotSettingsValue(value: unknown, ancestors: WeakSet<object>): unknown {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  ) return value;
+  if (typeof value !== "object") throw lifecycleInputError();
+  if (ancestors.has(value)) throw lifecycleInputError();
+  ancestors.add(value);
+  try {
+    const prototype = Object.getPrototypeOf(value) as object | null;
+    const symbols = Object.getOwnPropertySymbols(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (symbols.length > 0) throw lifecycleInputError();
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype) throw lifecycleInputError();
+      const clone: unknown[] = [];
+      const length = descriptors.length;
+      if (!("value" in length) || typeof length.value !== "number") throw lifecycleInputError();
+      clone.length = length.value;
+      for (const [key, descriptor] of Object.entries(descriptors)) {
+        if (key === "length") continue;
+        if (!descriptor.enumerable || !("value" in descriptor) || !/^\d+$/.test(key)) {
+          throw lifecycleInputError();
+        }
+        clone[Number(key)] = snapshotSettingsValue(descriptor.value, ancestors);
+      }
+      return Object.freeze(clone);
+    }
+    if (prototype !== Object.prototype && prototype !== null) throw lifecycleInputError();
+    const clone = Object.create(null) as Record<string, unknown>;
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (!descriptor.enumerable || !("value" in descriptor)) throw lifecycleInputError();
+      clone[key] = snapshotSettingsValue(descriptor.value, ancestors);
+    }
+    return Object.freeze(clone);
+  } catch (error) {
+    if (error instanceof KisError) throw error;
+    throw lifecycleInputError();
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function snapshotSettings<Settings>(value: unknown): Settings {
+  const snapshot = snapshotSettingsValue(value, new WeakSet());
+  if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
+    throw lifecycleInputError();
+  }
+  return snapshot as Settings;
+}
+
+function snapshotActionPort(value: unknown): StockActionPort {
+  const setImage = ownLifecycleData(value, "setImage");
+  if (typeof setImage !== "function") throw lifecycleInputError();
+  const receiver = value as object;
+  return Object.freeze({
+    setImage: (image: string) => Reflect.apply(setImage, receiver, [image]) as void | Promise<void>,
+  });
+}
+
+function snapshotAppearInput<Settings>(value: unknown): StockActionAppearInput<Settings> {
+  return Object.freeze({
+    actionId: snapshotActionId(ownLifecycleData(value, "actionId")),
+    settings: snapshotSettings<Settings>(ownLifecycleData(value, "settings")),
+    actionPort: snapshotActionPort(ownLifecycleData(value, "actionPort")),
+  });
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -180,6 +288,17 @@ function credentialIdentityKey(snapshot: SettingsSnapshot): string {
     hasCredentials(snapshot),
     snapshot.settings.credentialGeneration,
     snapshot.settings.credentialFingerprint ?? "",
+  ]);
+}
+
+function policySettingsSignature(snapshot: SettingsSnapshot): string {
+  return JSON.stringify([
+    snapshot.status.baseKnown,
+    hasCredentials(snapshot),
+    snapshot.settings.credentialGeneration,
+    snapshot.settings.credentialFingerprint ?? "",
+    snapshot.settings.preferences.dataMode,
+    snapshot.settings.preferences.backupPollIntervalMs,
   ]);
 }
 
@@ -287,56 +406,61 @@ export class StockActionController<Settings> {
   }
 
   async appear(input: StockActionAppearInput<Settings>): Promise<void> {
+    const safeInput = snapshotAppearInput<Settings>(input);
     if (this.destroyed) {
       await this.settingsRepository.whenReady();
       return;
     }
     const epoch = ++this.nextEpoch;
-    const previous = this.records.get(input.actionId);
-    this.records.set(input.actionId, { epoch, input });
-    if (previous) this.teardownSession(input.actionId);
+    const previous = this.records.get(safeInput.actionId);
+    this.records.set(safeInput.actionId, { epoch, input: safeInput });
+    if (previous) this.teardownSession(safeInput.actionId);
 
     const ready = await this.ensureReady();
-    const record = this.records.get(input.actionId);
-    if (this.destroyed || record?.epoch !== epoch || record.input !== input) return;
-    await this.createSession(input, epoch, ready);
+    const record = this.records.get(safeInput.actionId);
+    if (this.destroyed || record?.epoch !== epoch || record.input !== safeInput) return;
+    await this.createSession(safeInput, epoch, ready);
   }
 
   async updateSettings(actionId: string, settings: Settings): Promise<void> {
+    const safeActionId = snapshotActionId(actionId);
+    const safeSettings = snapshotSettings<Settings>(settings);
     if (this.destroyed) {
       await this.settingsRepository.whenReady();
       return;
     }
-    const previous = this.records.get(actionId);
+    const previous = this.records.get(safeActionId);
     if (!previous?.input) {
       await this.ensureReady();
       return;
     }
     const epoch = ++this.nextEpoch;
     const input: StockActionAppearInput<Settings> = {
-      actionId,
-      settings,
+      actionId: safeActionId,
+      settings: safeSettings,
       actionPort: previous.input.actionPort,
     };
-    this.records.set(actionId, { epoch, input });
-    this.teardownSession(actionId);
+    this.records.set(safeActionId, { epoch, input });
+    this.teardownSession(safeActionId);
 
     const ready = await this.ensureReady();
-    if (this.destroyed || this.records.get(actionId)?.epoch !== epoch) return;
+    if (this.destroyed || this.records.get(safeActionId)?.epoch !== epoch) return;
     await this.createSession(input, epoch, ready);
   }
 
   async disappear(actionId: string): Promise<void> {
+    const safeActionId = snapshotActionId(actionId);
     const epoch = ++this.nextEpoch;
-    this.records.set(actionId, { epoch });
-    this.teardownSession(actionId);
+    this.records.set(safeActionId, { epoch });
+    this.teardownSession(safeActionId);
     await this.ensureReady();
-    if (this.records.get(actionId)?.epoch === epoch) this.records.delete(actionId);
+    if (this.records.get(safeActionId)?.epoch === epoch) this.records.delete(safeActionId);
   }
 
   async manualRefresh(actionId: string): Promise<void> {
+    const safeActionId = snapshotActionId(actionId);
     await this.ensureReady();
-    const session = this.sessions.get(actionId);
+    const session = this.sessions.get(safeActionId);
     if (!session || !this.isCurrent(session) || session.manualPromise) {
       return session?.manualPromise;
     }
@@ -415,7 +539,9 @@ export class StockActionController<Settings> {
       webSocketRevision: 0,
       fallbackActive: false,
       policyAbortControllers: new Set(),
+      recoveryActive: false,
       credentialIdentityKey: credentialIdentityKey(global),
+      policySettingsSignature: policySettingsSignature(global),
       destroyed: false,
     };
     this.sessions.set(input.actionId, session);
@@ -473,18 +599,21 @@ export class StockActionController<Settings> {
     for (const session of [...this.sessions.values()]) {
       if (!this.isCurrent(session)) continue;
       const nextIdentityKey = credentialIdentityKey(snapshot);
-      const effective = this.effectiveSnapshot(session.adapter.market, session.clock.snapshot());
-      const preserveClosedRequest = hasCredentials(snapshot) &&
-        session.credentialIdentityKey === nextIdentityKey &&
-        !isRealtime(session.snapshot.session) &&
-        !isRealtime(effective.session) &&
-        session.snapshot.sessionEpoch === effective.sessionEpoch;
+      const nextPolicySignature = policySettingsSignature(snapshot);
       session.preferences = clonePreferences(snapshot);
       this.renderScheduler.updateInterval(
         session.actionId,
         session.renderGeneration,
         session.preferences.renderIntervalMs,
       );
+      if (session.policySettingsSignature === nextPolicySignature) continue;
+      session.policySettingsSignature = nextPolicySignature;
+      const effective = this.effectiveSnapshot(session.adapter.market, session.clock.snapshot());
+      const preserveClosedRequest = hasCredentials(snapshot) &&
+        session.credentialIdentityKey === nextIdentityKey &&
+        !isRealtime(session.snapshot.session) &&
+        !isRealtime(effective.session) &&
+        session.snapshot.sessionEpoch === effective.sessionEpoch;
       if (preserveClosedRequest) {
         session.snapshot = effective;
         continue;
@@ -620,6 +749,8 @@ export class StockActionController<Settings> {
       (session.hasValidWebSocketData &&
         (snapshot.state === "desired" || snapshot.state === "pending"))
     ) {
+      this.cancelRecovery(session);
+      session.connection = "BROKEN";
       this.submitView(session, "control");
       this.startFallback(session, generation, true);
       return;
@@ -650,7 +781,8 @@ export class StockActionController<Settings> {
       return;
     }
 
-    const recovering = session.connection === "BACKUP" || session.connection === "BROKEN";
+    const recovering = !session.recoveryActive &&
+      (session.connection === "BACKUP" || session.connection === "BROKEN");
     session.lastQuote = parsed;
     session.connection = "LIVE";
     session.error = undefined;
@@ -658,7 +790,8 @@ export class StockActionController<Settings> {
     session.hasValidWebSocketData = true;
     session.webSocketRevision += 1;
     this.stopFallback(session);
-    if (recovering) this.showRecovery(session, generation);
+    if (session.recoveryActive) this.submitView(session, "control", { recovery: true });
+    else if (recovering) this.showRecovery(session, generation);
     else this.submitView(session, "normal");
   }
 
@@ -781,15 +914,25 @@ export class StockActionController<Settings> {
 
   private showRecovery(session: ActionSession<Settings>, generation: number): void {
     this.clearHandle(session, "recoveryTimer");
+    session.recoveryActive = true;
     this.submitView(session, "control", { recovery: true });
     const timer = this.safeSetTimeout(() => {
       session.recoveryTimer = undefined;
-      if (this.isPolicyCurrent(session, generation)) this.submitView(session, "normal");
-    }, RECOVERY_DISPLAY_MS);
+      if (!this.isPolicyCurrent(session, generation)) return;
+      session.recoveryActive = false;
+      this.submitView(session, "normal");
+    }, RECOVERY_HOLD_MS);
     session.recoveryTimer = timer;
     if (timer === undefined && this.isPolicyCurrent(session, generation)) {
+      session.recoveryActive = false;
       this.submitView(session, "normal");
     }
+  }
+
+  private cancelRecovery(session: ActionSession<Settings>): void {
+    if (!session.recoveryActive) return;
+    session.recoveryActive = false;
+    this.clearHandle(session, "recoveryTimer");
   }
 
   private armPolicyTick(session: ActionSession<Settings>, generation: number): void {
@@ -941,6 +1084,7 @@ export class StockActionController<Settings> {
     this.clearHandle(session, "pollTimer");
     this.clearHandle(session, "policyTimer");
     this.clearHandle(session, "recoveryTimer");
+    session.recoveryActive = false;
     session.fallbackActive = false;
     session.fallbackAbort = undefined;
     for (const controller of [...session.policyAbortControllers]) {
