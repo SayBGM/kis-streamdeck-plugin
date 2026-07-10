@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,6 +32,67 @@ function percent(covered, total) {
   return total === 0 ? 100 : (covered / total) * 100;
 }
 
+function normalizedSourceRelative(sourceRoot, canonicalSource) {
+  const sourceRelative = path.relative(sourceRoot, canonicalSource);
+  if (
+    sourceRelative === "" ||
+    sourceRelative === ".." ||
+    sourceRelative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(sourceRelative)
+  ) {
+    return null;
+  }
+  return sourceRelative.replaceAll("\\", "/");
+}
+
+function isExcludedSource(relative) {
+  return relative === "plugin.ts" ||
+    relative.endsWith(".test.ts") ||
+    relative.split("/").includes("__tests__");
+}
+
+function portableSourceKey(relative) {
+  return relative
+    .split("/")
+    .map((component) => component.normalize("NFC").toLocaleLowerCase("en-US"))
+    .join("/");
+}
+
+async function enumerateProductionSources(sourceRoot) {
+  const production = new Map();
+  const portableSources = new Set();
+  const pending = [sourceRoot];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name, "en-US"));
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+        continue;
+      }
+      if (!entry.name.endsWith(".ts")) continue;
+
+      const canonicalSource = await realpath(entryPath);
+      const sourceInfo = await stat(canonicalSource);
+      const relative = normalizedSourceRelative(sourceRoot, canonicalSource);
+      if (!sourceInfo.isFile() || path.extname(canonicalSource) !== ".ts" || relative === null) {
+        throw new Error(`production source가 projectRoot/src의 regular .ts 파일이 아닙니다: ${entryPath}`);
+      }
+      if (isExcludedSource(relative)) continue;
+
+      const portable = portableSourceKey(relative);
+      if (production.has(canonicalSource) || portableSources.has(portable)) {
+        throw new Error(`중복 또는 Unicode/대소문자 충돌 production source입니다: ${relative}`);
+      }
+      production.set(canonicalSource, `src/${relative}`);
+      portableSources.add(portable);
+    }
+  }
+  return production;
+}
+
 async function canonicalCoverageRecords(coverage, projectRoot) {
   const canonicalProjectRoot = await realpath(projectRoot);
   const sourceRoot = await realpath(path.join(canonicalProjectRoot, "src"));
@@ -39,6 +100,7 @@ async function canonicalCoverageRecords(coverage, projectRoot) {
   if (!sourceRootInfo.isDirectory()) {
     throw new Error(`projectRoot/src가 디렉터리가 아닙니다: ${sourceRoot}`);
   }
+  const productionSources = await enumerateProductionSources(sourceRoot);
 
   const canonicalSources = new Set();
   const portableSources = new Set();
@@ -59,14 +121,15 @@ async function canonicalCoverageRecords(coverage, projectRoot) {
       throw new Error(`coverage source가 regular TypeScript .ts 파일이 아닙니다: ${reportKey}`);
     }
 
-    const sourceRelative = path.relative(sourceRoot, canonicalSource);
-    if (
-      sourceRelative === "" ||
-      sourceRelative === ".." ||
-      sourceRelative.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(sourceRelative)
-    ) {
+    const relative = normalizedSourceRelative(sourceRoot, canonicalSource);
+    if (relative === null) {
       throw new Error(`coverage source가 projectRoot/src 밖을 가리킵니다: ${reportKey}`);
+    }
+    if (isExcludedSource(relative)) {
+      throw new Error(`coverage report에 제외된 non-production source가 있습니다: ${reportKey}`);
+    }
+    if (!productionSources.has(canonicalSource)) {
+      throw new Error(`coverage source가 production allowlist에 없습니다: ${reportKey}`);
     }
 
     if (typeof data !== "object" || data === null || typeof data.path !== "string") {
@@ -85,17 +148,19 @@ async function canonicalCoverageRecords(coverage, projectRoot) {
       throw new Error(`coverage key와 record path가 다른 source를 가리킵니다: ${reportKey}`);
     }
 
-    const relative = sourceRelative.replaceAll("\\", "/");
-    const portable = relative
-      .split("/")
-      .map((component) => component.normalize("NFC").toLocaleLowerCase("en-US"))
-      .join("/");
+    const portable = portableSourceKey(relative);
     if (canonicalSources.has(canonicalSource) || portableSources.has(portable)) {
       throw new Error(`중복 또는 Unicode/대소문자 충돌 coverage source입니다: ${reportKey}`);
     }
     canonicalSources.add(canonicalSource);
     portableSources.add(portable);
     records.push({ relative: `src/${relative}`, data });
+  }
+  if (canonicalSources.size !== productionSources.size) {
+    const missing = [...productionSources]
+      .filter(([canonical]) => !canonicalSources.has(canonical))
+      .map(([, relative]) => relative);
+    throw new Error(`coverage report에서 production source가 누락됐습니다: ${missing.join(", ")}`);
   }
   return records;
 }

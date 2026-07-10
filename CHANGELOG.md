@@ -17,11 +17,13 @@
 - REST를 동시 4개·초당 10개 제한, 호출 우선순위, 공유 취소, 세션 캐시 기반 조정기로 교체
 - 일반 렌더를 trailing last-write-wins로 제한하고 실제 SVG 문자열 기반 LRU와 semantic 중복 제거 적용
 - release workflow가 공통 verify/package 스크립트를 재사용하도록 통합
+- forced-exit Rollup 종료와 파일시스템 반영 사이를 bounded readiness barrier로 동기화
 
 ### Security
 - 취약한 이전 `ws` 잠금 버전을 제거하고 `npm audit --omit=dev`를 검증 게이트에 추가
 - fingerprint가 없는 legacy access token 폐기, 자격증명 세대 및 token-version CAS 적용
 - archive path traversal, 심볼릭 링크, Windows 예약 경로, Unicode·대소문자 충돌, 깨진 manifest asset 참조와 비정상 크기 차단
+- coverage report를 실제 production TypeScript source allowlist와 정확히 대조해 누락·주입 차단
 
 ## [1.3.4] - 2026-03-15
 

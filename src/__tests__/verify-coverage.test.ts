@@ -191,4 +191,36 @@ describe("verify-coverage", () => {
     expect(error).toMatchObject({ code: 1 });
     expect(error.stderr).toMatch(/중복|Unicode|대소문자|collision/i);
   });
+
+  it("rejects a report that omits an existing production TypeScript source", async () => {
+    const { root, report } = await coverageFixture();
+    const omittedPath = path.join(root, "src/core/unreported.ts");
+    await writeFile(omittedPath, "export {};\n", "utf8");
+
+    const error = await execFileAsync(process.execPath, [scriptPath, report, root])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/누락|missing|unreported\.ts/i);
+  });
+
+  it.each([
+    "src/plugin.ts",
+    "src/core/injected.test.ts",
+    "src/core/__tests__/helper.ts",
+  ])("rejects an excluded non-production coverage record: %s", async (relative) => {
+    const { root, report } = await coverageFixture();
+    const excludedPath = path.join(root, ...relative.split("/"));
+    await mkdir(path.dirname(excludedPath), { recursive: true });
+    await writeFile(excludedPath, "export {};\n", "utf8");
+    const coverage = JSON.parse(await readFile(report, "utf8"));
+    coverage[excludedPath] = coveredFile([2, 2], excludedPath);
+    await writeFile(report, JSON.stringify(coverage), "utf8");
+
+    const error = await execFileAsync(process.execPath, [scriptPath, report, root])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/제외|non-production|test|plugin\.ts/i);
+  });
 });

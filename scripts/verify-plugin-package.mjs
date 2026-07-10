@@ -21,7 +21,7 @@ const REQUIRED_ACTION_UUIDS = [
   "com.kis.streamdeck.domestic-stock",
   "com.kis.streamdeck.overseas-stock",
 ];
-const WINDOWS_RESERVED_COMPONENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+const WINDOWS_RESERVED_COMPONENT = /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/iu;
 
 function findEndOfCentralDirectory(archive) {
   const signature = 0x06054b50;
@@ -53,7 +53,7 @@ function normalizeEntryName(rawName) {
   }
   const components = rawComponents.map((component) => {
     const normalized = component.normalize("NFC");
-    if (/[:\u0000-\u001f]/u.test(normalized) || /[. ]$/u.test(normalized)) {
+    if (/["<>|?*:\u0000-\u001f]/u.test(normalized) || /[. ]$/u.test(normalized)) {
       throw new Error(`Windows에서 모호한 패키지 경로를 허용하지 않습니다: ${rawName}`);
     }
     if (WINDOWS_RESERVED_COMPONENT.test(normalized)) {
@@ -175,6 +175,14 @@ function extractEntry(archive, entry, centralOffset, maxInstalledBytes) {
   const dataEnd = dataStart + entry.compressedSize;
   if (flags !== entry.flags || compression !== entry.compression || dataEnd > centralOffset) {
     throw new Error(`ZIP local/central 메타데이터가 일치하지 않습니다: ${entry.name}`);
+  }
+  if (
+    (flags & 0x8) === 0 &&
+    (localChecksum !== entry.checksum ||
+      localCompressedSize !== entry.compressedSize ||
+      localUncompressedSize !== entry.uncompressedSize)
+  ) {
+    throw new Error(`ZIP local/central CRC 또는 크기 메타데이터가 일치하지 않습니다: ${entry.name}`);
   }
   if (
     entry.isDirectory &&

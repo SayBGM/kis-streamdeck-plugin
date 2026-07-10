@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { waitForBuildArtifacts } from "./wait-for-build-artifacts.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDir, "..");
@@ -30,4 +31,5 @@ await Promise.all([
   rm(sourceMapPath, { force: true }),
 ]);
 await runNode([rollupBin, "-c", "--forceExit"]);
+await waitForBuildArtifacts([pluginPath, sourceMapPath]);
 await runNode([path.join(scriptDir, "verify-build-output.mjs"), projectRoot]);

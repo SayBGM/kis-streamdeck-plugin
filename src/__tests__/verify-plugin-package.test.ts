@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -177,7 +177,17 @@ describe("verify-plugin-package", () => {
     expect(error.stderr).toMatch(/경로|path traversal/i);
   });
 
-  it.each(["CON", "prn.txt", "Aux.json", "nul", "COM1.log", "lPt9.js"])(
+  it.each([
+    "CON",
+    "prn.txt",
+    "Aux.json",
+    "nul",
+    "COM1.log",
+    "lPt9.js",
+    "COM\u00b9.log",
+    "com\u00b2",
+    "LPT\u00b3.svg",
+  ])(
     "rejects the Windows reserved device component %s",
     async (reservedName) => {
       const entries = validEntries();
@@ -192,7 +202,18 @@ describe("verify-plugin-package", () => {
     },
   );
 
-  it.each(["trailing.", "trailing ", "quote.txt:secret"])(
+  it.each([
+    "trailing.",
+    "trailing ",
+    "quote.txt:secret",
+    "a?.js",
+    "x*.svg",
+    'quote"name.png',
+    "less<name.png",
+    "more>name.png",
+    "pipe|name.png",
+    "control\u0007name.png",
+  ])(
     "rejects the Windows-ambiguous component %s",
     async (unsafeName) => {
       const entries = validEntries();
@@ -258,6 +279,30 @@ describe("verify-plugin-package", () => {
 
     expect(error).toMatchObject({ code: 1 });
     expect(error.stderr).toMatch(/directory|디렉터리|size|크기/i);
+  });
+
+  it.each([
+    [14, "CRC"],
+    [18, "compressed size"],
+    [22, "uncompressed size"],
+  ])("rejects a regular file whose local header %s differs from central metadata", async (
+    fieldOffset,
+    label,
+  ) => {
+    const entryName = "com.kis.streamdeck.sdPlugin/ui/domestic-stock-pi.html";
+    const archivePath = await archive();
+    const bytes = await readFile(archivePath);
+    const nameOffset = bytes.indexOf(Buffer.from(entryName, "utf8"));
+    expect(nameOffset).toBeGreaterThanOrEqual(30);
+    bytes.writeUInt32LE(0x12345678, nameOffset - 30 + fieldOffset);
+    await writeFile(archivePath, bytes);
+
+    const error = await execFileAsync(process.execPath, [scriptPath, archivePath])
+      .catch((caught: unknown) => caught as { code: number; stderr: string });
+
+    expect(label).toBeTruthy();
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr).toMatch(/local.*central|메타데이터/i);
   });
 
   it("rejects a broken Property Inspector reference", async () => {
