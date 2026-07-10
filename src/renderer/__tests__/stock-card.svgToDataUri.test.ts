@@ -116,4 +116,17 @@ describe("svgToDataUri() — characterization tests", () => {
 
     encodeSpy.mockRestore();
   });
+
+  it("does not retain oversized SVG strings in the cache", async () => {
+    const { svgToDataUri } = await import("../stock-card.js");
+    const svg = `<svg>${"x".repeat(256 * 1024)}</svg>`;
+    const encodeSpy = vi.spyOn(globalThis, "encodeURIComponent");
+    encodeSpy.mockClear();
+
+    svgToDataUri(svg, "ignored-one");
+    svgToDataUri(svg, "ignored-two");
+
+    expect(encodeSpy).toHaveBeenCalledTimes(2);
+    encodeSpy.mockRestore();
+  });
 });

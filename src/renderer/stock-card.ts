@@ -45,6 +45,7 @@ const CONNECTION_LINE_HEIGHT = 4;
 const ARROW_UP = "\u25B2"; // ▲
 const ARROW_DOWN = "\u25BC"; // ▼
 const SVG_DATA_URI_CACHE_MAX_ENTRIES = 500;
+const SVG_DATA_URI_CACHE_MAX_SVG_CHARS = 256 * 1024;
 
 // Intl 객체 생성 비용을 줄이기 위해 재사용합니다.
 const KR_INT_FORMAT = new Intl.NumberFormat("ko-KR", {
@@ -509,6 +510,9 @@ function escapeXml(str: string): string {
 // mapping between their state key and the generated markup.
 // @MX:SPEC: SPEC-PERF-001 REQ-PERF-001-2.1.1, REQ-PERF-001-2.1.3
 export function svgToDataUri(svg: string, _legacySemanticKey?: string): string {
+  if (svg.length > SVG_DATA_URI_CACHE_MAX_SVG_CHARS) {
+    return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  }
   const cached = svgDataUriCache.get(svg);
   if (cached) {
     // LRU 갱신: 조회된 키를 최근 사용으로 이동

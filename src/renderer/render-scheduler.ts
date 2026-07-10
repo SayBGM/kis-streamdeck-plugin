@@ -29,11 +29,14 @@ export interface RenderSchedulerDiagnostics {
   readonly commits: number;
   readonly semanticSkips: number;
   readonly imageSkips: number;
+  readonly supersededSkips: number;
   readonly staleDrops: number;
   readonly failures: number;
 }
 
-type ScheduledRequest = RenderRequest;
+interface ScheduledRequest extends RenderRequest {
+  readonly sequence: number;
+}
 
 interface TimerToken {
   handle?: unknown;
@@ -42,14 +45,23 @@ interface TimerToken {
 interface TargetState {
   readonly id: string;
   readonly generation: number;
+  readonly lane: TargetLane;
   normalIntervalMs: RenderIntervalMs;
-  pending?: ScheduledRequest;
+  pendingImmediate?: ScheduledRequest;
+  pendingRegular?: ScheduledRequest;
   timer?: TimerToken;
   inFlight: boolean;
   lastSemanticKey?: string;
   lastImage?: string;
   readonly lastFlushAt: Partial<Record<Exclude<RenderCategory, "immediate">, number>>;
   readonly windowStartedAt: Partial<Record<Exclude<RenderCategory, "immediate">, number>>;
+}
+
+interface TargetLane {
+  readonly id: string;
+  tail: Promise<void>;
+  activeOperations: number;
+  queuedCommits: number;
 }
 
 const CONTROL_INTERVAL_MS = 1_000;
@@ -71,8 +83,10 @@ const defaultDependencies: RenderSchedulerDependencies = {
 export class RenderScheduler {
   private readonly dependencies: RenderSchedulerDependencies;
   private readonly targets = new Map<string, TargetState>();
-  private readonly generationCounters = new Map<string, number>();
+  private readonly lanes = new Map<string, TargetLane>();
   private destroyed = false;
+  private nextGeneration = 0;
+  private nextSequence = 0;
   private monotonicNow = Number.NEGATIVE_INFINITY;
   private readonly counters = {
     submitted: 0,
@@ -81,6 +95,7 @@ export class RenderScheduler {
     commits: 0,
     semanticSkips: 0,
     imageSkips: 0,
+    supersededSkips: 0,
     staleDrops: 0,
     failures: 0,
   };
@@ -99,14 +114,17 @@ export class RenderScheduler {
     const previous = this.targets.get(targetId);
     if (previous) {
       this.cancelTimer(previous);
+      previous.pendingImmediate = undefined;
+      previous.pendingRegular = undefined;
       this.targets.delete(targetId);
     }
 
-    const generation = (this.generationCounters.get(targetId) ?? 0) + 1;
-    this.generationCounters.set(targetId, generation);
+    const lane = previous?.lane ?? this.getOrCreateLane(targetId);
+    const generation = ++this.nextGeneration;
     this.targets.set(targetId, {
       id: targetId,
       generation,
+      lane,
       normalIntervalMs,
       inFlight: false,
       lastFlushAt: {},
@@ -124,9 +142,10 @@ export class RenderScheduler {
     this.assertInterval(normalIntervalMs);
     const state = this.current(targetId, generation);
     if (!state) return false;
+    if (state.normalIntervalMs === normalIntervalMs) return true;
 
     state.normalIntervalMs = normalIntervalMs;
-    if (state.pending?.category === "normal") {
+    if (state.pendingRegular?.category === "normal") {
       state.windowStartedAt.normal = this.now();
       this.cancelTimer(state);
       this.schedulePending(state);
@@ -135,8 +154,9 @@ export class RenderScheduler {
   }
 
   /**
-   * Submits a full rendering intent. The newest pending intent replaces any
-   * older category, while in-flight render/IPC work remains serialized.
+   * Submits a full rendering intent. Immediate work has strict priority and
+   * LWW-coalesces independently; normal/control work shares a lower-priority
+   * LWW slot. Commits stay serialized across lifecycle generations.
    */
   submit(targetId: string, generation: number, request: RenderRequest): boolean {
     const state = this.current(targetId, generation);
@@ -145,35 +165,43 @@ export class RenderScheduler {
       return false;
     }
 
-    this.counters.submitted += 1;
-    const previousCategory = state.pending?.category;
-    if (state.pending) this.counters.coalesced += 1;
-    if (previousCategory && previousCategory !== request.category && previousCategory !== "immediate") {
-      delete state.windowStartedAt[previousCategory];
+    const scheduled = this.snapshotRequest(request);
+    if (!scheduled) {
+      this.counters.failures += 1;
+      return false;
     }
 
-    const scheduled: ScheduledRequest = Object.freeze({
-      category: request.category,
-      semanticKey: request.semanticKey,
-      render: request.render,
-      commit: request.commit,
-    });
-    state.pending = scheduled;
-
-    if (request.category === "immediate") {
+    this.counters.submitted += 1;
+    if (scheduled.category === "immediate") {
+      if (state.pendingImmediate) this.counters.coalesced += 1;
+      state.pendingImmediate = scheduled;
+      if (state.pendingRegular) {
+        this.counters.coalesced += 1;
+        const category = state.pendingRegular.category as Exclude<RenderCategory, "immediate">;
+        delete state.windowStartedAt[category];
+        state.pendingRegular = undefined;
+      }
       this.cancelTimer(state);
-      delete state.windowStartedAt.normal;
-      delete state.windowStartedAt.control;
       if (!state.inFlight) void this.drain(state);
       return true;
     }
 
-    if (state.windowStartedAt[request.category] === undefined) {
-      state.windowStartedAt[request.category] = this.now();
+    const regularCategory = scheduled.category as Exclude<RenderCategory, "immediate">;
+    const previousCategory = state.pendingRegular?.category as
+      | Exclude<RenderCategory, "immediate">
+      | undefined;
+    if (state.pendingRegular) this.counters.coalesced += 1;
+    if (previousCategory && previousCategory !== scheduled.category) {
+      delete state.windowStartedAt[previousCategory];
+    }
+    state.pendingRegular = scheduled;
+    if (state.windowStartedAt[regularCategory] === undefined) {
+      state.windowStartedAt[regularCategory] = this.now();
     }
     if (!state.inFlight) {
       this.cancelTimer(state);
-      this.schedulePending(state);
+      if (state.pendingImmediate) void this.drain(state);
+      else this.schedulePending(state);
     }
     return true;
   }
@@ -183,8 +211,10 @@ export class RenderScheduler {
     const state = this.current(targetId, generation);
     if (!state) return false;
     this.cancelTimer(state);
-    state.pending = undefined;
+    state.pendingImmediate = undefined;
+    state.pendingRegular = undefined;
     this.targets.delete(targetId);
+    this.cleanupLane(state.lane);
     return true;
   }
 
@@ -193,15 +223,17 @@ export class RenderScheduler {
     this.destroyed = true;
     for (const state of this.targets.values()) {
       this.cancelTimer(state);
-      state.pending = undefined;
+      state.pendingImmediate = undefined;
+      state.pendingRegular = undefined;
     }
     this.targets.clear();
+    for (const lane of this.lanes.values()) this.cleanupLane(lane);
   }
 
   getDiagnostics(): RenderSchedulerDiagnostics {
     let queuedTargets = 0;
     for (const state of this.targets.values()) {
-      if (state.pending || state.inFlight) queuedTargets += 1;
+      if (state.pendingImmediate || state.pendingRegular || state.inFlight) queuedTargets += 1;
     }
     return Object.freeze({
       activeTargets: this.targets.size,
@@ -221,7 +253,13 @@ export class RenderScheduler {
   }
 
   private now(): number {
-    const candidate = this.dependencies.now();
+    let candidate: number;
+    try {
+      candidate = this.dependencies.now();
+    } catch {
+      this.counters.failures += 1;
+      candidate = Number.NaN;
+    }
     if (Number.isFinite(candidate)) {
       this.monotonicNow = Math.max(this.monotonicNow, candidate);
     } else if (this.monotonicNow === Number.NEGATIVE_INFINITY) {
@@ -231,13 +269,15 @@ export class RenderScheduler {
   }
 
   private schedulePending(state: TargetState): void {
-    if (!this.isCurrent(state) || state.inFlight || state.timer || !state.pending) return;
-    if (state.pending.category === "immediate") {
+    if (!this.isCurrent(state) || state.inFlight || state.timer) return;
+    if (state.pendingImmediate) {
       void this.drain(state);
       return;
     }
+    const request = state.pendingRegular;
+    if (!request) return;
 
-    const category = state.pending.category;
+    const category = request.category as Exclude<RenderCategory, "immediate">;
     const interval = category === "normal" ? state.normalIntervalMs : CONTROL_INTERVAL_MS;
     const now = this.now();
     const windowStartedAt = state.windowStartedAt[category] ?? now;
@@ -277,17 +317,19 @@ export class RenderScheduler {
 
   private async drain(state: TargetState): Promise<void> {
     if (!this.isCurrent(state) || state.inFlight) return;
-    const request = state.pending;
+    const request = state.pendingImmediate ?? state.pendingRegular;
     if (!request) return;
 
-    state.pending = undefined;
+    if (request.category === "immediate") state.pendingImmediate = undefined;
+    else state.pendingRegular = undefined;
     state.inFlight = true;
-    if (request.category !== "immediate") {
-      state.lastFlushAt[request.category] = this.now();
-      delete state.windowStartedAt[request.category];
-    }
+    state.lane.activeOperations += 1;
 
     try {
+      if (request.category !== "immediate") {
+        state.lastFlushAt[request.category] = this.now();
+        delete state.windowStartedAt[request.category];
+      }
       if (request.semanticKey === state.lastSemanticKey) {
         this.counters.semanticSkips += 1;
         return;
@@ -299,10 +341,45 @@ export class RenderScheduler {
         this.counters.staleDrops += 1;
         return;
       }
+      if (this.isSuperseded(state, request)) {
+        this.counters.supersededSkips += 1;
+        return;
+      }
 
       if (image === state.lastImage) {
         state.lastSemanticKey = request.semanticKey;
         this.counters.imageSkips += 1;
+        return;
+      }
+
+      await this.commitSerialized(state, request, image);
+    } catch {
+      this.counters.failures += 1;
+    } finally {
+      state.inFlight = false;
+      state.lane.activeOperations -= 1;
+      if (this.isCurrent(state)) {
+        if (state.pendingImmediate) void this.drain(state);
+        else if (state.pendingRegular) this.schedulePending(state);
+      }
+      this.cleanupLane(state.lane);
+    }
+  }
+
+  private async commitSerialized(
+    state: TargetState,
+    request: ScheduledRequest,
+    image: string,
+  ): Promise<void> {
+    const lane = state.lane;
+    lane.queuedCommits += 1;
+    const run = lane.tail.then(async () => {
+      if (!this.isCurrent(state)) {
+        this.counters.staleDrops += 1;
+        return;
+      }
+      if (this.isSuperseded(state, request)) {
+        this.counters.supersededSkips += 1;
         return;
       }
 
@@ -314,25 +391,88 @@ export class RenderScheduler {
       state.lastSemanticKey = request.semanticKey;
       state.lastImage = image;
       this.counters.commits += 1;
-    } catch {
-      this.counters.failures += 1;
+    });
+    lane.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      await run;
     } finally {
-      state.inFlight = false;
-      const nextRequest = this.peekPending(state);
-      if (this.isCurrent(state) && nextRequest) {
-        if (nextRequest.category === "immediate") {
-          void this.drain(state);
-        } else {
-          this.schedulePending(state);
-        }
-      }
+      lane.queuedCommits -= 1;
+      this.cleanupLane(lane);
     }
   }
 
-  // Kept behind a method boundary because callbacks can enqueue while drain()
-  // awaits even though TypeScript's local control-flow analysis cannot see it.
-  private peekPending(state: TargetState): ScheduledRequest | undefined {
-    return state.pending;
+  private isSuperseded(state: TargetState, request: ScheduledRequest): boolean {
+    if (request.category === "immediate") {
+      return (state.pendingImmediate?.sequence ?? Number.NEGATIVE_INFINITY) > request.sequence;
+    }
+    return Math.max(
+      state.pendingImmediate?.sequence ?? Number.NEGATIVE_INFINITY,
+      state.pendingRegular?.sequence ?? Number.NEGATIVE_INFINITY,
+    ) > request.sequence;
+  }
+
+  private snapshotRequest(request: RenderRequest): ScheduledRequest | undefined {
+    if ((typeof request !== "object" && typeof request !== "function") || request === null) {
+      return undefined;
+    }
+    try {
+      const descriptors = Object.getOwnPropertyDescriptors(request);
+      const categoryDescriptor = descriptors.category;
+      const keyDescriptor = descriptors.semanticKey;
+      const renderDescriptor = descriptors.render;
+      const commitDescriptor = descriptors.commit;
+      if (
+        !categoryDescriptor || !("value" in categoryDescriptor) ||
+        !keyDescriptor || !("value" in keyDescriptor) ||
+        !renderDescriptor || !("value" in renderDescriptor) ||
+        !commitDescriptor || !("value" in commitDescriptor)
+      ) {
+        return undefined;
+      }
+      const category = categoryDescriptor.value as unknown;
+      const semanticKey = keyDescriptor.value as unknown;
+      const render = renderDescriptor.value as unknown;
+      const commit = commitDescriptor.value as unknown;
+      if (
+        (category !== "normal" && category !== "control" && category !== "immediate") ||
+        typeof semanticKey !== "string" ||
+        typeof render !== "function" ||
+        typeof commit !== "function"
+      ) {
+        return undefined;
+      }
+      return Object.freeze({
+        category,
+        semanticKey,
+        render: render as RenderRequest["render"],
+        commit: commit as RenderRequest["commit"],
+        sequence: ++this.nextSequence,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getOrCreateLane(targetId: string): TargetLane {
+    const existing = this.lanes.get(targetId);
+    if (existing) return existing;
+    const lane: TargetLane = {
+      id: targetId,
+      tail: Promise.resolve(),
+      activeOperations: 0,
+      queuedCommits: 0,
+    };
+    this.lanes.set(targetId, lane);
+    return lane;
+  }
+
+  private cleanupLane(lane: TargetLane): void {
+    if (lane.activeOperations !== 0 || lane.queuedCommits !== 0) return;
+    if (this.targets.get(lane.id)?.lane === lane) return;
+    if (this.lanes.get(lane.id) === lane) this.lanes.delete(lane.id);
   }
 
   private assertInterval(intervalMs: number): asserts intervalMs is RenderIntervalMs {
