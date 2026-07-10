@@ -340,4 +340,61 @@ describe("SubscriptionSupervisor", () => {
 
     expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41] });
   });
+
+  async function settleInitialLiveSubscriptions(count: number): Promise<Array<{ trId: string; trKey: string }>> {
+    const descriptors = Array.from({ length: count }, (_, index) => ({
+      trId: "H0UNCNT0",
+      trKey: String(index).padStart(6, "0"),
+    }));
+    for (const descriptor of descriptors) supervisor.subscribe(descriptor);
+    await flush();
+    for (let index = 0; index < 41; index += 1) {
+      const command = connection.sent.at(-1)!;
+      connection.emitRaw(control(command.trId, command.trKey));
+      if (index < 40) advance(100);
+    }
+    return descriptors;
+  }
+
+  async function completeLease(descriptors: Array<{ trId: string; trKey: string }>, replacements: number): Promise<void> {
+    vi.advanceTimersByTime(60_000);
+    advance(100);
+    for (let index = 0; index < replacements; index += 1) {
+      expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[index] });
+      connection.emitRaw(control(descriptors[index].trId, descriptors[index].trKey, "OPSP0002"));
+      advance(100);
+      expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41 + index] });
+      connection.emitRaw(control(descriptors[41 + index].trId, descriptors[41 + index].trKey));
+      if (index < replacements - 1) advance(100);
+    }
+  }
+
+  it("rotates the oldest 9 live subscriptions for 50 unique desired keys without overlapping leases", async () => {
+    const descriptors = await settleInitialLiveSubscriptions(50);
+
+    vi.advanceTimersByTime(60_000);
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[0] });
+    (supervisor as unknown as { startRotationLease(): void }).startRotationLease();
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[0] });
+
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41] });
+    connection.emitRaw(control(descriptors[41].trId, descriptors[41].trKey));
+    advance(100);
+    for (let index = 1; index < 9; index += 1) {
+      expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[index] });
+      connection.emitRaw(control(descriptors[index].trId, descriptors[index].trKey, "OPSP0002"));
+      advance(100);
+      expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41 + index] });
+      connection.emitRaw(control(descriptors[41 + index].trId, descriptors[41 + index].trKey));
+      if (index < 8) advance(100);
+    }
+  });
+
+  it("rotates all 41 lease pairs in order for 82 unique desired keys", async () => {
+    const descriptors = await settleInitialLiveSubscriptions(82);
+    await completeLease(descriptors, 41);
+  });
 });
