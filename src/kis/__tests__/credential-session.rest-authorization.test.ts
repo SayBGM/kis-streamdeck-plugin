@@ -6,6 +6,7 @@ import {
   fingerprintCredentials,
   type AuthFetch,
   type CredentialSettingsPort,
+  type PreparedRestFetch,
 } from "../credential-session.js";
 
 function makeSession(
@@ -27,7 +28,7 @@ function makeSession(
 }
 
 describe("CredentialSession REST authorization lease", () => {
-  it("scopes REST secrets to a callback capability", async () => {
+  it("scopes REST secrets to the capability's one-shot transport", async () => {
     const fingerprint = fingerprintCredentials("key", "secret");
     const { session } = makeSession(migrateGlobalSettings({
       appKey: "key",
@@ -40,10 +41,46 @@ describe("CredentialSession REST authorization lease", () => {
       accessTokenVersion: 2,
     }), vi.fn<AuthFetch>());
 
-    await expect(session.withRestAuthorization(async (lease) => ({
-      generation: lease.credentialGeneration,
-      authorized: lease.token === "token" && lease.appSecret === "secret",
-    }))).resolves.toEqual({ generation: 1, authorized: true });
+    const capability = await session.prepareRestAuthorization();
+    const transport = vi.fn<PreparedRestFetch>(async () => ({ ok: true }));
+    await expect(capability.execute({
+      url: "https://openapi.koreainvestment.com:9443/uapi/test",
+      trId: "TEST0001",
+      signal: new AbortController().signal,
+    }, transport)).resolves.toEqual({ ok: true });
+    expect(transport.mock.calls[0][1].headers).toMatchObject({
+      authorization: "Bearer token",
+      appkey: "key",
+      appsecret: "secret",
+    });
+    expect(() => capability.execute({
+      url: "https://openapi.koreainvestment.com:9443/uapi/test",
+      trId: "TEST0001",
+      signal: new AbortController().signal,
+    }, transport)).toThrow();
+  });
+
+  it("prepares an opaque one-shot capability with no secret-bearing data properties", async () => {
+    const fingerprint = fingerprintCredentials("key", "secret");
+    const { session } = makeSession(migrateGlobalSettings({
+      appKey: "key",
+      appSecret: "secret",
+      credentialFingerprint: fingerprint,
+      credentialGeneration: 1,
+      accessToken: "token",
+      accessTokenExpiry: 1_900_000_000_000,
+      accessTokenFingerprint: fingerprint,
+      accessTokenVersion: 2,
+    }), vi.fn<AuthFetch>());
+
+    const capability = await session.prepareRestAuthorization();
+    const serialized = JSON.stringify(capability);
+    const descriptors = Object.getOwnPropertyDescriptors(capability);
+    expect(Object.keys(descriptors).sort()).toEqual(["execute", "expectation", "isCurrent"]);
+    expect(serialized).not.toContain("key");
+    expect(serialized).not.toContain("secret");
+    expect(serialized).not.toContain('"token":"token"');
+    expect(Object.isFrozen(capability)).toBe(true);
   });
 
   it("returns credentials bound to the exact access-token generation", async () => {
@@ -61,15 +98,13 @@ describe("CredentialSession REST authorization lease", () => {
       accessTokenVersion: 11,
     }), fetch);
 
-    await expect(session.withRestAuthorization(async (lease) => lease)).resolves.toEqual({
-      appKey: "key",
-      appSecret: "secret",
-      token: "token",
-      expiresAt: 1_800_003_600_000,
+    const capability = await session.prepareRestAuthorization();
+    expect(capability.expectation).toEqual({
       credentialGeneration: 7,
       credentialFingerprint: fingerprint,
       tokenVersion: 12,
     });
+    expect(capability.isCurrent()).toBe(true);
   });
 
   it("does not return an old token with credentials changed during issuance", async () => {
@@ -86,7 +121,7 @@ describe("CredentialSession REST authorization lease", () => {
       accessTokenVersion: 3,
     }), fetch);
 
-    const pending = session.withRestAuthorization(async (lease) => lease);
+    const pending = session.prepareRestAuthorization();
     while (fetch.mock.calls.length === 0) await Promise.resolve();
     await session.saveCredentials("new-key", "new-secret");
     resolveFetch({
@@ -130,7 +165,7 @@ describe("CredentialSession REST authorization lease", () => {
     };
     const session = new CredentialSession(port, { now: () => 1_800_000_000_000 });
 
-    await expect(session.withRestAuthorization(async (lease) => lease)).rejects.toMatchObject({
+    await expect(session.prepareRestAuthorization()).rejects.toMatchObject({
       code: "AUTH_REJECTED",
       scope: "auth",
     });

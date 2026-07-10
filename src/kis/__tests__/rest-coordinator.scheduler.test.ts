@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getMarketSnapshot } from "../../core/market-clock.js";
-import { domesticStockAdapter, type QuoteSample } from "../../markets/market-adapter.js";
+import { domesticStockAdapter } from "../../markets/market-adapter.js";
 import type {
   AccessTokenExpectation,
   CredentialIdentity,
+  PreparedRestAuthorization,
+  PreparedRestFetch,
+  PreparedRestRequest,
   RestAuthorizationLease,
 } from "../credential-session.js";
 import {
@@ -23,6 +26,32 @@ const lease: RestAuthorizationLease = Object.freeze({
   tokenVersion: 5,
 });
 
+function preparedAuthorization(): PreparedRestAuthorization {
+  let used = false;
+  return Object.freeze({
+    expectation: Object.freeze({
+      credentialGeneration: lease.credentialGeneration,
+      credentialFingerprint: lease.credentialFingerprint,
+      tokenVersion: lease.tokenVersion,
+    }),
+    isCurrent: () => true,
+    execute: (request: PreparedRestRequest, fetch: PreparedRestFetch) => {
+      if (used) throw new Error("used capability");
+      used = true;
+      return fetch(request.url, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${lease.token}`,
+          appkey: lease.appKey,
+          appsecret: lease.appSecret,
+          tr_id: request.trId,
+        },
+        signal: request.signal,
+      });
+    },
+  });
+}
+
 function credentials(): RestCredentialPort & {
   invalidateAccessToken: ReturnType<typeof vi.fn>;
 } {
@@ -32,9 +61,7 @@ function credentials(): RestCredentialPort & {
       credentialGeneration: lease.credentialGeneration,
       credentialFingerprint: fingerprint,
     })),
-    withRestAuthorization: vi.fn(async (
-      operation: (authorization: RestAuthorizationLease) => Promise<QuoteSample>,
-    ) => operation(lease)),
+    prepareRestAuthorization: vi.fn(async () => preparedAuthorization()),
     invalidateAccessToken: vi.fn(async (_expected: AccessTokenExpectation) => true),
   };
 }
@@ -125,11 +152,10 @@ describe("RestCoordinator scheduler", () => {
     vi.setSystemTime(0);
     const authorizationResolvers: Array<() => void> = [];
     const port = credentials();
-    port.withRestAuthorization = vi.fn(
-      (operation: (authorization: RestAuthorizationLease) => Promise<QuoteSample>) =>
-        new Promise<QuoteSample>((resolve, reject) => {
+    port.prepareRestAuthorization = vi.fn(
+      () => new Promise<PreparedRestAuthorization>((resolve) => {
       authorizationResolvers.push(() => {
-        void operation(lease).then(resolve, reject);
+        resolve(preparedAuthorization());
       });
     }));
     const starts: number[] = [];

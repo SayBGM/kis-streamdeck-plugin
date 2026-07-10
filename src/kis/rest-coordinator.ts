@@ -9,7 +9,7 @@ import { KIS_REST_BASE, type Market } from "../types/index.js";
 import type {
   AccessTokenExpectation,
   CredentialIdentity,
-  RestAuthorizationLease,
+  PreparedRestAuthorization,
 } from "./credential-session.js";
 
 const MAX_CONCURRENT_REQUESTS = 4;
@@ -27,9 +27,7 @@ export type RestRequestPriority = "manual" | "initial" | "fallback";
 
 export interface RestCredentialPort {
   initialize(): Promise<CredentialIdentity>;
-  withRestAuthorization(
-    operation: (authorization: RestAuthorizationLease) => Promise<QuoteSample>,
-  ): Promise<QuoteSample>;
+  prepareRestAuthorization(): Promise<PreparedRestAuthorization>;
   invalidateAccessToken(expected: AccessTokenExpectation): Promise<boolean>;
 }
 
@@ -103,12 +101,13 @@ interface Flight {
   state: "queued" | "preparing" | "gate_wait" | "running" | "settled";
   cacheAllowed: boolean;
   abandoned: boolean;
-  releaseTransport?: () => void;
+  transportStarted: boolean;
+  releaseTransport?: (removeRateReservation?: boolean) => void;
 }
 
 interface TransportGateWaiter {
   readonly flight: Flight;
-  readonly resolve: (release: () => void) => void;
+  readonly resolve: (release: (removeRateReservation?: boolean) => void) => void;
   readonly reject: (error: KisError) => void;
   readonly signal: AbortSignal;
   readonly abortListener: () => void;
@@ -520,6 +519,7 @@ export class RestCoordinator {
         state: "queued",
         cacheAllowed: request.priority !== "manual",
         abandoned: false,
+        transportStarted: false,
       };
       this.flights.set(flightKey, flight);
       this.queue.push(flight);
@@ -589,7 +589,7 @@ export class RestCoordinator {
     } catch {
       // The request completion path remains safe if a host signal cannot abort.
     }
-    flight.releaseTransport?.();
+    flight.releaseTransport?.(!flight.transportStarted);
   }
 
   private removeQueuedFlight(flight: Flight): void {
@@ -685,7 +685,9 @@ export class RestCoordinator {
     }
   }
 
-  private acquireTransportGate(flight: Flight): Promise<() => void> {
+  private acquireTransportGate(
+    flight: Flight,
+  ): Promise<(removeRateReservation?: boolean) => void> {
     const signal = flight.controller.signal;
     if (signal.aborted) return Promise.reject(cancelledError());
     flight.state = "gate_wait";
@@ -732,10 +734,15 @@ export class RestCoordinator {
       this.activeTransportCount += 1;
       waiter.flight.state = "running";
       let released = false;
-      const release = (): void => {
+      const release = (removeRateReservation = false): void => {
         if (released) return;
         released = true;
+        if (removeRateReservation) {
+          const timestampIndex = this.startTimes.indexOf(current);
+          if (timestampIndex >= 0) this.startTimes.splice(timestampIndex, 1);
+        }
         waiter.flight.releaseTransport = undefined;
+        waiter.flight.transportStarted = false;
         this.activeTransportCount = Math.max(0, this.activeTransportCount - 1);
         this.pumpTransportGate();
       };
@@ -783,12 +790,6 @@ export class RestCoordinator {
 
   private async execute(flight: Flight): Promise<QuoteSample> {
     if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
-    return this.credentials.withRestAuthorization(async (authorization) => {
-    if (!sameCredential(flight.expectedIdentity, authorization)) {
-      throw changedCredentialError();
-    }
-    if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
-
     let descriptor: KisRestDescriptor;
     try {
       descriptor = flight.request.adapter.restDescriptor(flight.request.instrument);
@@ -796,74 +797,98 @@ export class RestCoordinator {
       throw normalizeError(error);
     }
     const target = descriptorUrl(descriptor);
-    const releaseTransport = await this.acquireTransportGate(flight);
-    try {
-      if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
-      let rawResponse: unknown;
-      try {
-        const fetchOperation = Promise.resolve().then(() => this.fetch(target.url, {
-          method: "GET",
-          headers: Object.freeze({
-            "Content-Type": "application/json; charset=utf-8",
-            authorization: `Bearer ${authorization.token}`,
-            appkey: authorization.appKey,
-            appsecret: authorization.appSecret,
-            tr_id: target.trId,
-            custtype: "P",
-          }),
-          signal: flight.controller.signal,
-        }));
-        rawResponse = await raceWithAbort(fetchOperation, flight.controller.signal);
-      } catch (error) {
-        if (error instanceof KisError) throw error;
-        throw restError("NETWORK", true, "KIS 시세 서버에 연결하지 못했습니다.");
+    let authorization = await this.credentials.prepareRestAuthorization();
+
+    for (;;) {
+      if (!sameCredential(flight.expectedIdentity, authorization.expectation)) {
+        throw changedCredentialError();
       }
       if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
+      const releaseTransport = await this.acquireTransportGate(flight);
+      if (flight.abandoned || flight.controller.signal.aborted) {
+        releaseTransport(true);
+        throw cancelledError();
+      }
+      if (!authorization.isCurrent()) {
+        releaseTransport(true);
+        authorization = await this.credentials.prepareRestAuthorization();
+        continue;
+      }
 
-      const payload = await this.decodeResponse(
-        rawResponse,
-        authorization,
-        flight.controller.signal,
-      );
-      const receivedAt = this.now();
-      let parsedQuote: QuoteSample;
       try {
-        parsedQuote = flight.request.adapter.parseRest(
-          payload,
-          flight.request.instrument,
-          { receivedAt, sessionEpoch: flight.request.marketSnapshot.sessionEpoch },
+        let fetchOperation: Promise<unknown>;
+        try {
+          flight.transportStarted = true;
+          fetchOperation = authorization.execute({
+            url: target.url,
+            trId: target.trId,
+            signal: flight.controller.signal,
+          }, this.fetch);
+        } catch (error) {
+          if (!authorization.isCurrent()) {
+            flight.transportStarted = false;
+            releaseTransport(true);
+            authorization = await this.credentials.prepareRestAuthorization();
+            continue;
+          }
+          throw normalizeError(error);
+        }
+
+        let rawResponse: unknown;
+        try {
+          rawResponse = await raceWithAbort(fetchOperation, flight.controller.signal);
+        } catch (error) {
+          if (error instanceof KisError) throw error;
+          throw restError("NETWORK", true, "KIS 시세 서버에 연결하지 못했습니다.");
+        }
+        if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
+
+        const payload = await this.decodeResponse(
+          rawResponse,
+          authorization.expectation,
+          flight.controller.signal,
         );
-      } catch (error) {
-        throw normalizeError(error);
-      }
-      const quote = validateQuoteSample(
-        parsedQuote,
-        flight.request.instrumentSymbol,
-        receivedAt,
-        flight.request.marketSnapshot.sessionEpoch,
-      );
+        const receivedAt = this.now();
+        let parsedQuote: QuoteSample;
+        try {
+          parsedQuote = flight.request.adapter.parseRest(
+            payload,
+            flight.request.instrument,
+            { receivedAt, sessionEpoch: flight.request.marketSnapshot.sessionEpoch },
+          );
+        } catch (error) {
+          throw normalizeError(error);
+        }
+        const quote = validateQuoteSample(
+          parsedQuote,
+          flight.request.instrumentSymbol,
+          receivedAt,
+          flight.request.marketSnapshot.sessionEpoch,
+        );
 
-      let currentIdentity: CredentialIdentity;
-      try {
-        currentIdentity = await this.credentials.initialize();
-      } catch (error) {
-        throw normalizeError(error);
+        let currentIdentity: CredentialIdentity;
+        try {
+          currentIdentity = await this.credentials.initialize();
+        } catch (error) {
+          throw normalizeError(error);
+        }
+        if (!sameCredential(currentIdentity, authorization.expectation)) {
+          throw changedCredentialError();
+        }
+        if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
+        if (this.now() >= flight.request.marketSnapshot.nextTransitionAt) {
+          throw sessionTransitionError();
+        }
+        return quote;
+      } finally {
+        releaseTransport();
       }
-      if (!sameCredential(currentIdentity, authorization)) throw changedCredentialError();
-      if (flight.abandoned || flight.controller.signal.aborted) throw cancelledError();
-      if (this.now() >= flight.request.marketSnapshot.nextTransitionAt) {
-        throw sessionTransitionError();
-      }
-      return quote;
-    } finally {
-      releaseTransport();
     }
-    });
   }
 
   private async decodeResponse(
     rawResponse: unknown,
-    authorization: RestAuthorizationLease,
+    authorization: AccessTokenExpectation,
     signal: AbortSignal,
   ): Promise<unknown> {
     let ok: unknown;

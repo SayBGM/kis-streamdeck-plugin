@@ -9,6 +9,9 @@ import {
 import type {
   AccessTokenExpectation,
   CredentialIdentity,
+  PreparedRestAuthorization,
+  PreparedRestFetch,
+  PreparedRestRequest,
   RestAuthorizationLease,
 } from "../credential-session.js";
 import {
@@ -38,10 +41,56 @@ function identity(lease: RestAuthorizationLease): CredentialIdentity {
   });
 }
 
+function preparedAuthorization(
+  lease: RestAuthorizationLease,
+  current: () => RestAuthorizationLease,
+): PreparedRestAuthorization {
+  let used = false;
+  const expectation = Object.freeze({
+    credentialGeneration: lease.credentialGeneration,
+    credentialFingerprint: lease.credentialFingerprint,
+    tokenVersion: lease.tokenVersion,
+  });
+  const isCurrent = () => {
+    const value = current();
+    return value.credentialGeneration === lease.credentialGeneration &&
+      value.credentialFingerprint === lease.credentialFingerprint &&
+      value.tokenVersion === lease.tokenVersion &&
+      value.token === lease.token;
+  };
+  return Object.freeze({
+    expectation,
+    isCurrent,
+    execute: (request: PreparedRestRequest, fetch: PreparedRestFetch) => {
+      if (used || !isCurrent()) {
+        throw new KisError({
+          code: "AUTH_REJECTED",
+          scope: "auth",
+          retryable: true,
+          safeMessage: "stale authorization",
+        });
+      }
+      used = true;
+      return fetch(request.url, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          authorization: `Bearer ${lease.token}`,
+          appkey: lease.appKey,
+          appsecret: lease.appSecret,
+          tr_id: request.trId,
+          custtype: "P",
+        },
+        signal: request.signal,
+      });
+    },
+  });
+}
+
 function mutableCredentials(initial = authorization()): RestCredentialPort & {
   current: RestAuthorizationLease;
   initialize: ReturnType<typeof vi.fn>;
-  withRestAuthorization: ReturnType<typeof vi.fn>;
+  prepareRestAuthorization: ReturnType<typeof vi.fn>;
   invalidateAccessToken: ReturnType<typeof vi.fn>;
 } {
   let current = initial;
@@ -49,9 +98,8 @@ function mutableCredentials(initial = authorization()): RestCredentialPort & {
     get current(): RestAuthorizationLease { return current; },
     set current(value: RestAuthorizationLease) { current = value; },
     initialize: vi.fn(async () => identity(current)),
-    withRestAuthorization: vi.fn(async (
-      operation: (authorization: RestAuthorizationLease) => Promise<QuoteSample>,
-    ) => operation(current)),
+    prepareRestAuthorization: vi.fn(async () =>
+      preparedAuthorization(current, () => current)),
     invalidateAccessToken: vi.fn(async (_expected: AccessTokenExpectation) => true),
   };
   return port;
@@ -221,6 +269,35 @@ describe("RestCoordinator HTTP boundary", () => {
     await expect(request(coordinator)).resolves.toMatchObject({ price: 72_000 });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[1][1].headers.authorization).toBe("Bearer replacement-token");
+  });
+
+  it("refreshes an authorization invalidated while its flight waits for the transport gate", async () => {
+    const credentials = mutableCredentials(authorization(3, 5));
+    credentials.invalidateAccessToken.mockImplementation(async () => {
+      credentials.current = Object.freeze({
+        ...authorization(3, 6),
+        token: "replacement-token",
+      });
+      return true;
+    });
+    let calls = 0;
+    const fetch = vi.fn<RestFetch>(async () => {
+      calls += 1;
+      return calls === 1 ? { ok: false, status: 401 } : successfulResponse("72000");
+    });
+    const coordinator = new RestCoordinator(credentials, { fetch, now: () => openNow });
+    const results = await Promise.allSettled(Array.from({ length: 11 }, (_, index) =>
+      coordinator.requestQuote({
+        adapter: domesticStockAdapter,
+        instrument: instrument(String(index + 1).padStart(6, "0")),
+        marketSnapshot: openSnapshot,
+        priority: index === 10 ? "manual" : "initial",
+      }),
+    ));
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(10);
+    expect(fetch).toHaveBeenCalledTimes(11);
+    expect(fetch.mock.calls[10][1].headers.authorization).toBe("Bearer replacement-token");
   });
 
   it.each([

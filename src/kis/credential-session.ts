@@ -49,6 +49,29 @@ export interface RestAuthorizationLease extends AccessTokenLease {
   readonly appSecret: string;
 }
 
+export interface PreparedRestRequest {
+  readonly url: string;
+  readonly trId: string;
+  readonly signal: AbortSignal;
+}
+
+export interface PreparedRestFetchInit {
+  readonly method: "GET";
+  readonly headers: Readonly<Record<string, string>>;
+  readonly signal: AbortSignal;
+}
+
+export type PreparedRestFetch = (
+  url: string,
+  init: PreparedRestFetchInit,
+) => Promise<unknown>;
+
+export interface PreparedRestAuthorization {
+  readonly expectation: AccessTokenExpectation;
+  isCurrent(): boolean;
+  execute(request: PreparedRestRequest, fetch: PreparedRestFetch): Promise<unknown>;
+}
+
 export interface ApprovalKeyLease {
   readonly approvalKey: string;
   readonly credentialGeneration: number;
@@ -552,12 +575,63 @@ export class CredentialSession {
     return flight;
   }
 
-  async withRestAuthorization<T>(
-    operation: (authorization: RestAuthorizationLease) => Promise<T>,
-  ): Promise<T> {
-    if (typeof operation !== "function") throw invalidAuthInputError();
+  async prepareRestAuthorization(): Promise<PreparedRestAuthorization> {
     const authorization = await this.createRestAuthorization();
-    return operation(authorization);
+    const expectation = Object.freeze({
+      credentialGeneration: authorization.credentialGeneration,
+      credentialFingerprint: authorization.credentialFingerprint,
+      tokenVersion: authorization.tokenVersion,
+    });
+    let used = false;
+    const isCurrent = (): boolean => {
+      try {
+        const settings = this.repository.getSnapshot().settings;
+        return settings.appKey?.trim() === authorization.appKey &&
+          settings.appSecret?.trim() === authorization.appSecret &&
+          settings.credentialGeneration === authorization.credentialGeneration &&
+          settings.credentialFingerprint === authorization.credentialFingerprint &&
+          settings.accessToken === authorization.token &&
+          settings.accessTokenExpiry === authorization.expiresAt &&
+          settings.accessTokenFingerprint === authorization.credentialFingerprint &&
+          settings.accessTokenVersion === authorization.tokenVersion;
+      } catch {
+        return false;
+      }
+    };
+    const execute = (
+      request: PreparedRestRequest,
+      transport: PreparedRestFetch,
+    ): Promise<unknown> => {
+      if (used || typeof transport !== "function") throw invalidAuthInputError();
+      if (
+        typeof request !== "object" || request === null ||
+        typeof request.url !== "string" ||
+        !request.url.startsWith(`${KIS_REST_BASE}/uapi/`) ||
+        typeof request.trId !== "string" || !/^[A-Z0-9]+$/.test(request.trId) ||
+        !(request.signal instanceof AbortSignal)
+      ) throw invalidAuthInputError();
+      used = true;
+      if (!isCurrent()) {
+        throw authBoundaryError(
+          "AUTH_REJECTED",
+          true,
+          "자격증명이 변경되어 이전 인증 결과를 폐기했습니다.",
+        );
+      }
+      return Promise.resolve(transport(request.url, {
+        method: "GET",
+        headers: Object.freeze({
+          "Content-Type": "application/json; charset=utf-8",
+          authorization: `Bearer ${authorization.token}`,
+          appkey: authorization.appKey,
+          appsecret: authorization.appSecret,
+          tr_id: request.trId,
+          custtype: "P",
+        }),
+        signal: request.signal,
+      }));
+    };
+    return Object.freeze({ expectation, isCurrent, execute });
   }
 
   private async createRestAuthorization(): Promise<RestAuthorizationLease> {
