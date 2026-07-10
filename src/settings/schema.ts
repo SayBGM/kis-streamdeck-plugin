@@ -275,7 +275,6 @@ export function migrateGlobalSettings(input: unknown): GlobalSettingsV2 {
     delete migrated.accessTokenFingerprint;
     delete migrated.accessToken;
     delete migrated.accessTokenExpiry;
-    migrated.accessTokenVersion = 0;
   } else {
     if (typeof source.accessToken !== "string") delete migrated.accessToken;
     if (typeof source.accessTokenExpiry !== "number" || !Number.isFinite(source.accessTokenExpiry)) {

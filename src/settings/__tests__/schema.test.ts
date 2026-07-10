@@ -151,7 +151,7 @@ describe("migrateGlobalSettings", () => {
     expect(migrated).not.toHaveProperty("accessToken");
     expect(migrated).not.toHaveProperty("accessTokenExpiry");
     expect(migrated).not.toHaveProperty("accessTokenFingerprint");
-    expect(migrated.accessTokenVersion).toBe(0);
+    expect(migrated.accessTokenVersion).toBe(7);
   });
 
   it("is idempotent for normalized v2 settings", () => {
@@ -172,7 +172,7 @@ describe("migrateGlobalSettings", () => {
 
     expect(once.preferences.extension).toEqual({ nested: ["keep"] });
     expect(once.preferences.extension).not.toBe(extension);
-    expect(once.accessTokenVersion).toBe(0);
+    expect(once.accessTokenVersion).toBe(3);
     expect(migrateGlobalSettings(once)).toEqual(once);
   });
 
