@@ -116,6 +116,10 @@ interface ActionRecord<Settings> {
   input?: StockActionAppearInput<Settings>;
 }
 
+interface SubscriptionBinding {
+  policyGeneration: number;
+}
+
 interface ActionSession<Settings> {
   readonly actionId: string;
   readonly lifecycleEpoch: number;
@@ -128,6 +132,7 @@ interface ActionSession<Settings> {
   preferences: GlobalPreferencesV2;
   snapshot: MarketSnapshot;
   subscription?: SubscriptionHandle;
+  subscriptionBinding?: SubscriptionBinding;
   wsDescriptor?: KisWebSocketDescriptor;
   subscriptionState?: PhysicalSubscriptionState;
   unsubscribeClock?: () => void;
@@ -148,6 +153,7 @@ interface ActionSession<Settings> {
   fallbackActive: boolean;
   closedRequestKey?: string;
   manualPromise?: Promise<void>;
+  credentialIdentityKey: string;
   destroyed: boolean;
 }
 
@@ -167,6 +173,14 @@ function hasCredentials(snapshot: SettingsSnapshot): boolean {
   return snapshot.status.baseKnown &&
     isNonEmptyString(snapshot.settings.appKey) &&
     isNonEmptyString(snapshot.settings.appSecret);
+}
+
+function credentialIdentityKey(snapshot: SettingsSnapshot): string {
+  return JSON.stringify([
+    hasCredentials(snapshot),
+    snapshot.settings.credentialGeneration,
+    snapshot.settings.credentialFingerprint ?? "",
+  ]);
 }
 
 function safeError(value: unknown, fallbackCode: KisErrorCode): StockActionViewError {
@@ -349,8 +363,8 @@ export class StockActionController<Settings> {
   }
 
   private async ensureReady(): Promise<SettingsSnapshot> {
-    const ready = await this.settingsRepository.whenReady();
-    this.settingsSnapshot = ready;
+    await this.settingsRepository.whenReady();
+    this.settingsSnapshot = this.settingsRepository.getSnapshot();
     if (!this.settingsSubscriptionStarted && !this.destroyed) {
       this.settingsSubscriptionStarted = true;
       this.unsubscribeSettings = this.settingsRepository.subscribe((snapshot) => {
@@ -358,7 +372,7 @@ export class StockActionController<Settings> {
         this.reconfigureForGlobalSettings(snapshot);
       });
     }
-    return this.settingsSnapshot ?? ready;
+    return this.settingsSnapshot;
   }
 
   private async createSession(
@@ -401,6 +415,7 @@ export class StockActionController<Settings> {
       webSocketRevision: 0,
       fallbackActive: false,
       policyAbortControllers: new Set(),
+      credentialIdentityKey: credentialIdentityKey(global),
       destroyed: false,
     };
     this.sessions.set(input.actionId, session);
@@ -457,15 +472,26 @@ export class StockActionController<Settings> {
   private reconfigureForGlobalSettings(snapshot: SettingsSnapshot): void {
     for (const session of [...this.sessions.values()]) {
       if (!this.isCurrent(session)) continue;
+      const nextIdentityKey = credentialIdentityKey(snapshot);
+      const effective = this.effectiveSnapshot(session.adapter.market, session.clock.snapshot());
+      const preserveClosedRequest = hasCredentials(snapshot) &&
+        session.credentialIdentityKey === nextIdentityKey &&
+        !isRealtime(session.snapshot.session) &&
+        !isRealtime(effective.session) &&
+        session.snapshot.sessionEpoch === effective.sessionEpoch;
       session.preferences = clonePreferences(snapshot);
       this.renderScheduler.updateInterval(
         session.actionId,
         session.renderGeneration,
         session.preferences.renderIntervalMs,
       );
+      if (preserveClosedRequest) {
+        session.snapshot = effective;
+        continue;
+      }
+      session.credentialIdentityKey = nextIdentityKey;
       session.policyGeneration += 1;
       this.clearPolicyWork(session, true);
-      session.closedRequestKey = undefined;
       if (!hasCredentials(snapshot)) {
         this.detachClock(session);
         session.connection = "BROKEN";
@@ -491,6 +517,9 @@ export class StockActionController<Settings> {
     session.snapshot = this.effectiveSnapshot(session.adapter.market, session.clock.snapshot());
     this.armPolicyTick(session, generation);
     if (session.preferences.dataMode === "automatic" && isRealtime(session.snapshot.session)) {
+      session.hasValidWebSocketData = false;
+      session.webSocketRevision += 1;
+      session.subscriptionState = undefined;
       this.startAutomaticRealtime(session, generation);
       return;
     }
@@ -507,17 +536,35 @@ export class StockActionController<Settings> {
     session.connection = session.lastQuote ? session.connection : "waiting";
     session.stale = false;
     session.error = undefined;
+    let descriptor: KisWebSocketDescriptor;
     try {
-      const descriptor = session.adapter.webSocketDescriptor(session.instrument, this.safeNow());
-      session.wsDescriptor = descriptor;
-      const observer: SubscriptionObserver = {
-        onState: (value) => this.handleSubscriptionState(session, generation, value),
-        onData: (event) => this.handleSubscriptionData(session, generation, event),
-      };
-      session.subscription = this.subscriptions.subscribe(descriptor, observer);
+      descriptor = session.adapter.webSocketDescriptor(session.instrument, this.safeNow());
+      const existingBinding = session.subscriptionBinding;
+      if (session.subscription && existingBinding && session.wsDescriptor) {
+        existingBinding.policyGeneration = generation;
+        if (
+          !sameDescriptor(session.wsDescriptor, descriptor) &&
+          !this.beginRetarget(session, generation, descriptor)
+        ) return;
+      } else {
+        this.releaseSubscription(session);
+        const binding: SubscriptionBinding = { policyGeneration: generation };
+        session.subscriptionBinding = binding;
+        session.wsDescriptor = descriptor;
+        const observer: SubscriptionObserver = {
+          onState: (value) => {
+            if (session.subscriptionBinding !== binding) return;
+            this.handleSubscriptionState(session, binding.policyGeneration, value);
+          },
+          onData: (event) => {
+            if (session.subscriptionBinding !== binding) return;
+            this.handleSubscriptionData(session, binding.policyGeneration, event);
+          },
+        };
+        session.subscription = this.subscriptions.subscribe(descriptor, observer);
+      }
     } catch (error) {
-      session.wsDescriptor = undefined;
-      session.subscription = undefined;
+      this.releaseSubscription(session);
       session.connection = "BROKEN";
       session.error = safeError(error, "SUBSCRIPTION_REJECTED");
       this.submitView(session, "control");
@@ -687,6 +734,7 @@ export class StockActionController<Settings> {
 
   private async performManual(session: ActionSession<Settings>): Promise<void> {
     const generation = session.policyGeneration;
+    const webSocketRevision = session.webSocketRevision;
     const controller = new AbortController();
     session.manualAbort = controller;
     this.submitView(session, "immediate", { refreshing: true });
@@ -698,7 +746,10 @@ export class StockActionController<Settings> {
         priority: "manual",
         signal: controller.signal,
       });
-      if (!this.isPolicyCurrent(session, generation)) return;
+      if (
+        !this.isPolicyCurrent(session, generation) ||
+        session.webSocketRevision !== webSocketRevision
+      ) return;
       session.lastQuote = result;
       session.connection = "BACKUP";
       session.error = undefined;
@@ -751,29 +802,42 @@ export class StockActionController<Settings> {
     if (session.subscription && session.wsDescriptor && !session.retargetPromise) {
       const next = session.adapter.webSocketDescriptor(session.instrument, this.safeNow());
       if (!sameDescriptor(session.wsDescriptor, next)) {
-        const old = session.wsDescriptor;
-        let operation: Promise<void>;
-        try {
-          operation = Promise.resolve(this.subscriptions.retargetAll(old, next));
-        } catch (error) {
-          this.handleRetargetFailure(session, generation, error);
-          this.armPolicyTick(session, generation);
-          return;
-        }
-        session.retargetPromise = operation;
-        void operation.then(
-          () => {
-            if (session.retargetPromise === operation) session.retargetPromise = undefined;
-            if (this.isPolicyCurrent(session, generation)) session.wsDescriptor = next;
-          },
-          (error) => {
-            if (session.retargetPromise === operation) session.retargetPromise = undefined;
-            this.handleRetargetFailure(session, generation, error);
-          },
-        );
+        this.beginRetarget(session, generation, next);
       }
     }
     this.armPolicyTick(session, generation);
+  }
+
+  private beginRetarget(
+    session: ActionSession<Settings>,
+    generation: number,
+    next: KisWebSocketDescriptor,
+  ): boolean {
+    if (session.retargetPromise) return true;
+    const old = session.wsDescriptor;
+    const binding = session.subscriptionBinding;
+    if (!old || !binding || !session.subscription) return false;
+    let operation: Promise<void>;
+    try {
+      operation = Promise.resolve(this.subscriptions.retargetAll(old, next));
+    } catch (error) {
+      this.handleRetargetFailure(session, generation, error);
+      return false;
+    }
+    session.retargetPromise = operation;
+    void operation.then(
+      () => {
+        if (session.retargetPromise === operation) session.retargetPromise = undefined;
+        if (this.isCurrent(session) && session.subscriptionBinding === binding) {
+          session.wsDescriptor = next;
+        }
+      },
+      (error) => {
+        if (session.retargetPromise === operation) session.retargetPromise = undefined;
+        this.handleRetargetFailure(session, generation, error);
+      },
+    );
+    return true;
   }
 
   private handleRetargetFailure(
@@ -870,7 +934,6 @@ export class StockActionController<Settings> {
       try { controller.abort(); } catch { /* best effort */ }
     }
     session.policyAbortControllers.clear();
-    session.retargetPromise = undefined;
     const manual = session.manualAbort;
     session.manualAbort = undefined;
     try { manual?.abort(); } catch { /* best effort */ }
@@ -880,6 +943,8 @@ export class StockActionController<Settings> {
   private releaseSubscription(session: ActionSession<Settings>): void {
     const handle = session.subscription;
     session.subscription = undefined;
+    session.subscriptionBinding = undefined;
+    session.retargetPromise = undefined;
     session.wsDescriptor = undefined;
     session.subscriptionState = undefined;
     try { handle?.release(); } catch { /* best effort */ }

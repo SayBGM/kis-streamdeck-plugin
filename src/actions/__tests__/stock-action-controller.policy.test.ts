@@ -7,7 +7,7 @@ import type {
   MarketAdapter,
   QuoteSample,
 } from "../../markets/market-adapter.js";
-import type { RenderRequest } from "../../renderer/render-scheduler.js";
+import { RenderScheduler, type RenderRequest } from "../../renderer/render-scheduler.js";
 import { migrateGlobalSettings } from "../../settings/schema.js";
 import {
   StockActionController,
@@ -264,6 +264,7 @@ function makeAdapter(id = "stock"): MarketAdapter<TestSettings> {
 function setup(options: {
   adapterResolver?: (settings: TestSettings) => MarketAdapter<TestSettings>;
   subscriptions?: FakeSubscriptions;
+  renderScheduler?: RenderScheduler;
   setTimeout?: (callback: () => void, delayMs: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
   useDefaultRuntime?: boolean;
@@ -287,7 +288,7 @@ function setup(options: {
     clocks: { domestic: clock, overseas: clock },
     subscriptions,
     restCoordinator: rest,
-    renderScheduler: scheduler,
+    renderScheduler: options.renderScheduler ?? scheduler,
     adapterResolver: options.adapterResolver ?? ((actionSettings) => {
       const id = actionSettings.instrumentType === "etf" ? "etf" : "stock";
       adapters.push(id);
@@ -471,6 +472,36 @@ describe("StockActionController automatic policy and lifecycle", () => {
     expect(test.subscriptions.subscriptions).toHaveLength(0);
   });
 
+  it("초기 whenReady 결과보다 최신 repository snapshot으로 새 action을 구성한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "first",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    test.settings.emit({
+      preferences: {
+        dataMode: "rest-only",
+        renderIntervalMs: 5_000,
+        backupPollIntervalMs: 15_000,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const subscriptionCount = test.subscriptions.subscriptions.length;
+    const requestCount = test.rest.requests.length;
+
+    await test.controller.appear({
+      actionId: "second",
+      settings: { symbol: "000660" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(test.subscriptions.subscriptions).toHaveLength(subscriptionCount);
+    expect(test.rest.requests).toHaveLength(requestCount + 1);
+    expect(test.scheduler.intervals.at(-1)).toBe(5_000);
+  });
+
   it.each(["desired", "stale", "parked", "rejected"] as const)(
     "유효 WS 이후 %s 상태는 즉시 fallback REST를 시작한다",
     async (state) => {
@@ -487,6 +518,35 @@ describe("StockActionController automatic policy and lifecycle", () => {
       await Promise.resolve();
 
       expect(test.rest.requests.map((request) => request.priority)).toEqual(["fallback"]);
+    },
+  );
+
+  it.each(["parked", "rejected"] as const)(
+    "%s fallback은 즉시 요청 뒤 설정 간격으로 반복한다",
+    async (state) => {
+      const test = setup();
+      test.settings.resolve({
+        preferences: {
+          dataMode: "automatic",
+          renderIntervalMs: 2_000,
+          backupPollIntervalMs: 15_000,
+        },
+      });
+      await test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage: vi.fn() },
+      });
+
+      test.subscriptions.state(state);
+      expect(test.rest.requests.map((request) => request.priority)).toEqual(["fallback"]);
+      test.rest.requests[0]!.resolve(quote("rest", 69_000));
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(test.rest.requests.map((request) => request.priority)).toEqual([
+        "fallback",
+        "fallback",
+      ]);
     },
   );
 
@@ -621,6 +681,29 @@ describe("StockActionController automatic policy and lifecycle", () => {
 
     expect(request.signal?.aborted).toBe(true);
     await manual;
+  });
+
+  it("수동 REST 중 더 최신 WS가 오면 수동 결과를 폐기하고 LIVE quote를 유지한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    test.subscriptions.data(70_000);
+    const manual = test.controller.manualRefresh("a");
+    await vi.advanceTimersByTimeAsync(0);
+    const manualRequest = test.rest.requests.find((request) => request.priority === "manual")!;
+
+    test.subscriptions.data(71_000);
+    manualRequest.resolve(quote("rest", 69_000));
+    await manual;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(test.images.at(-1)?.connection).toBe("LIVE");
+    expect(test.images.at(-1)?.quote?.price).toBe(71_000);
+    expect(test.images.at(-1)?.refreshing).toBe(false);
   });
 
   it("invalid instrument fatal scheduler target도 disappear에서 제거한다", async () => {
@@ -784,6 +867,74 @@ describe("StockActionController settings, market and rendering boundaries", () =
     expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial"]);
   });
 
+  it("PRE→REG처럼 descriptor가 같은 realtime 전환은 기존 subscription ref를 재사용한다", async () => {
+    const test = setup();
+    test.clock.current = snapshot("PRE", 1_000);
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const original = test.subscriptions.subscriptions[0]!;
+
+    test.clock.emit(snapshot("REG", 2_000));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(test.subscriptions.subscriptions).toHaveLength(1);
+    expect(original.released).toBe(false);
+  });
+
+  it("REG→AFT에서 descriptor가 바뀌면 새 ref 없이 retargetAll을 사용한다", async () => {
+    let key = "DAY";
+    const adapter: MarketAdapter<TestSettings> = {
+      ...makeAdapter(),
+      webSocketDescriptor(instrument) {
+        return { trId: "WS", trKey: `${key}:${instrument.symbol}` };
+      },
+    };
+    const test = setup({ adapterResolver: () => adapter });
+    test.clock.current = snapshot("REG", 1_000);
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const original = test.subscriptions.subscriptions[0]!;
+
+    key = "NIGHT";
+    test.clock.emit(snapshot("AFT", 2_000));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(test.subscriptions.subscriptions).toHaveLength(1);
+    expect(original.released).toBe(false);
+    expect(test.subscriptions.retargets).toEqual([{
+      oldDescriptor: { trId: "WS", trKey: "DAY:005930" },
+      nextDescriptor: { trId: "WS", trKey: "NIGHT:005930" },
+    }]);
+  });
+
+  it("CLOSED→OPEN 새 정책은 이전 WS valid 상태를 버리고 5초 no-data grace를 다시 적용한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    test.subscriptions.data(70_000);
+
+    test.clock.emit(snapshot("CLOSED", 2_000));
+    await vi.advanceTimersByTimeAsync(0);
+    test.clock.emit(snapshot("REG", 3_000));
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(test.rest.requests.filter((request) => request.priority === "fallback")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(test.rest.requests.filter((request) => request.priority === "fallback")).toHaveLength(1);
+  });
+
   it("미국 ET CLOSED여도 KST 주간 거래 창은 realtime 세션으로 파생한다", async () => {
     vi.setSystemTime(Date.UTC(2026, 0, 5, 3, 0)); // 월요일 12:00 KST
     const overseas = makeAdapter("stock") as MarketAdapter<TestSettings>;
@@ -801,6 +952,54 @@ describe("StockActionController settings, market and rendering boundaries", () =
     expect(test.subscriptions.subscriptions).toHaveLength(1);
     expect(test.rest.requests).toHaveLength(0);
     expect(test.images.at(-1)?.session).toBe("REG");
+  });
+
+  it("동일 closed identity의 preference 변경은 in-flight 요청을 취소하거나 재요청하지 않는다", async () => {
+    const test = setup();
+    test.clock.current = snapshot("CLOSED", 5_000);
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const request = test.rest.requests[0]!;
+
+    test.settings.emit({
+      preferences: {
+        dataMode: "rest-only",
+        renderIntervalMs: 10_000,
+        backupPollIntervalMs: 60_000,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(request.signal?.aborted).toBe(false);
+    expect(test.rest.requests).toHaveLength(1);
+  });
+
+  it("closed 세션의 credential generation이 바뀌면 이전 요청을 취소하고 새 identity로 요청한다", async () => {
+    const test = setup();
+    test.clock.current = snapshot("CLOSED", 5_000);
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const oldRequest = test.rest.requests[0]!;
+
+    test.settings.emit({
+      credentialGeneration: 2,
+      credentialFingerprint: "next-fingerprint",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(oldRequest.signal?.aborted).toBe(true);
+    expect(test.rest.requests.map((request) => request.priority)).toEqual([
+      "initial",
+      "initial",
+    ]);
   });
 
   it("60초 정책 tick에서 해외 day/night descriptor를 break-before-make retarget한다", async () => {
@@ -976,4 +1175,36 @@ describe("StockActionController settings, market and rendering boundaries", () =
 
     expect(test.rest.requests).toHaveLength(0);
   });
+
+  it.each(["throw", "reject"] as const)(
+    "setImage %s 실패 뒤 다음 render commit을 계속 처리한다",
+    async (failure) => {
+      const renderScheduler = new RenderScheduler({
+        now: () => Date.now(),
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      });
+      const test = setup({ renderScheduler });
+      test.settings.resolve();
+      let attempts = 0;
+      const setImage = vi.fn(() => {
+        attempts += 1;
+        if (attempts !== 1) return undefined;
+        if (failure === "throw") throw new Error("sync image failure");
+        return Promise.reject(new Error("async image failure"));
+      });
+      await test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      test.subscriptions.data(70_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(setImage).toHaveBeenCalledTimes(2);
+      renderScheduler.destroy();
+    },
+  );
 });
