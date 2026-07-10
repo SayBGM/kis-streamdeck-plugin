@@ -874,4 +874,63 @@ describe("SubscriptionSupervisor", () => {
     expect(() => throwing.destroy()).not.toThrow();
     expect(isolatedConnection.listenerCount).toBe(0);
   });
+
+  it("wakes a target-identity waiter when the removing target reappears", async () => {
+    const source = { trId: "H0UNCNT0", trKey: "000121" } as const;
+    const target = { trId: "H0UNCNT0", trKey: "000122" } as const;
+    const sourceHandle = supervisor.subscribe(source);
+    await flush();
+    connection.emitRaw(control(source.trId, source.trKey, "ERROR"));
+    const targetHandle = supervisor.subscribe(target);
+    advance(100);
+    targetHandle.release();
+    const retargeted = supervisor.retargetAll(source, target);
+
+    const reappeared = supervisor.subscribe(target);
+    await retargeted;
+    expect(sourceHandle.descriptor).toEqual(target);
+    expect(sourceHandle.snapshot?.refCount).toBe(2);
+    connection.emitRaw(control(target.trId, target.trKey));
+    advance(100);
+    expect(connection.sent.at(-1)).not.toEqual({ trType: "2", ...target });
+    reappeared.release();
+  });
+
+  it("settles and detaches a waiting retarget when its source is finally released", async () => {
+    const source = { trId: "H0UNCNT0", trKey: "000131" } as const;
+    const target = { trId: "H0UNCNT0", trKey: "000132" } as const;
+    const sourceHandle = supervisor.subscribe(source);
+    await flush();
+    connection.emitRaw(control(source.trId, source.trKey, "ERROR"));
+    const targetHandle = supervisor.subscribe(target);
+    advance(100);
+    targetHandle.release();
+    const retargeted = supervisor.retargetAll(source, target);
+
+    sourceHandle.release();
+    await expect(retargeted).resolves.toBeUndefined();
+    expect(sourceHandle.snapshot).toBeUndefined();
+  });
+
+  it("commits target waiter wake before a reappeared target callback destroys the supervisor", async () => {
+    const source = { trId: "H0UNCNT0", trKey: "000141" } as const;
+    const target = { trId: "H0UNCNT0", trKey: "000142" } as const;
+    const sourceHandle = supervisor.subscribe(source);
+    await flush();
+    connection.emitRaw(control(source.trId, source.trKey, "ERROR"));
+    const targetHandle = supervisor.subscribe(target);
+    advance(100);
+    targetHandle.release();
+    const retargeted = supervisor.retargetAll(source, target);
+
+    supervisor.subscribe(target, {
+      onState: (snapshot) => {
+        if (snapshot.refCount === 2) supervisor.destroy();
+      },
+    });
+    await retargeted;
+
+    expect(sourceHandle.snapshot).toBeUndefined();
+    expect(connection.listenerCount).toBe(0);
+  });
 });

@@ -256,11 +256,13 @@ export class SubscriptionSupervisor {
       );
     }
     this.retiredDataKeys.delete(key);
-    if (entry.removing && entry.refs.size === 0) entry.removing = false;
+    const reappeared = entry.removing && entry.refs.size === 0;
+    if (reappeared) entry.removing = false;
 
     const ref: Ref = { observer: this.normalizeObserver(observer), entry, released: false };
     entry.refs.add(ref);
     this.enforceSubscriptionCap();
+    if (reappeared) this.wakeRetargetWaiters(entry);
     this.publishState(entry, ref);
     this.enqueueSubscribe(entry);
     this.pump();
@@ -1013,12 +1015,15 @@ export class SubscriptionSupervisor {
     if (this.entries.get(entry.key) !== entry) return;
     this.cancelRotationFor(entry);
     this.detachRetargetWaiter(entry);
+    const cancelledRetarget = entry.retarget;
+    entry.retarget = undefined;
     this.entries.delete(entry.key);
     entry.generation += 1;
     entry.queuedAction = undefined;
     for (const ref of entry.refs) ref.entry = undefined;
     entry.refs.clear();
     this.releaseDemand(entry);
+    cancelledRetarget?.resolve();
     this.wakeRetargetWaiters(entry);
     this.rebalanceSubscriptions();
   }
