@@ -216,4 +216,103 @@ describe("SubscriptionSupervisor", () => {
     expect(first.snapshot).toBeUndefined();
     expect(second.snapshot).toBeUndefined();
   });
+
+  it("keeps a reappearing reference when it arrives while the final unsubscribe is awaiting acknowledgement", async () => {
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    const onData = vi.fn();
+    const first = supervisor.subscribe(descriptor);
+    await flush();
+    connection.emitRaw(control(descriptor.trId, descriptor.trKey));
+
+    first.release();
+    const reappeared = supervisor.subscribe(descriptor, { onData });
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptor });
+    connection.emitRaw(control(descriptor.trId, descriptor.trKey, "OPSP0002"));
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptor });
+    connection.emitRaw(control(descriptor.trId, descriptor.trKey));
+    connection.emitRaw(domesticData(descriptor.trKey));
+
+    expect(reappeared.snapshot?.state).toBe("live");
+    expect(onData).toHaveBeenCalledTimes(1);
+    expect(connection.retains).toBe(1);
+  });
+
+  it("marks an active subscription stale after twenty seconds and ignores late data after release", async () => {
+    const onState = vi.fn();
+    const onData = vi.fn();
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    const handle = supervisor.subscribe(descriptor, { onState, onData });
+    await flush();
+    connection.emitRaw(control(descriptor.trId, descriptor.trKey));
+    connection.emitRaw(domesticData("005930"));
+
+    advance(20_000);
+    expect(handle.snapshot?.state).toBe("stale");
+    expect(onState).toHaveBeenCalledWith(expect.objectContaining({ state: "stale" }));
+
+    handle.release();
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptor });
+    connection.emitRaw(control(descriptor.trId, descriptor.trKey, "OPSP0002"));
+    connection.emitRaw(domesticData("005930"));
+
+    expect(onData).toHaveBeenCalledTimes(1);
+    expect(connection.releases).toBe(1);
+  });
+
+  it("retargets all references only after the old key unsubscribe acknowledgement", async () => {
+    const oldDescriptor = { trId: "HDFSCNT0", trKey: "RBAQPLTR" } as const;
+    const nextDescriptor = { trId: "HDFSCNT0", trKey: "DNASPLTR" } as const;
+    const data = vi.fn();
+    const first = supervisor.subscribe(oldDescriptor, { onData: data });
+    const second = supervisor.subscribe(oldDescriptor);
+    await flush();
+    connection.emitRaw(control(oldDescriptor.trId, oldDescriptor.trKey));
+
+    const retargeted = supervisor.retargetAll(oldDescriptor, nextDescriptor);
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...oldDescriptor });
+    expect(first.snapshot?.descriptor).toEqual(oldDescriptor);
+    connection.emitRaw(control(oldDescriptor.trId, oldDescriptor.trKey, "OPSP0002"));
+    await retargeted;
+    advance(100);
+
+    expect(first.snapshot?.descriptor).toEqual(nextDescriptor);
+    expect(second.snapshot?.descriptor).toEqual(nextDescriptor);
+    expect(connection.retains).toBe(1);
+    expect(connection.releases).toBe(0);
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...nextDescriptor });
+    connection.emitRaw(control(oldDescriptor.trId, oldDescriptor.trKey));
+    expect(first.snapshot?.state).toBe("pending");
+    connection.emitRaw(control(nextDescriptor.trId, nextDescriptor.trKey));
+    connection.emitRaw(overseasData(oldDescriptor.trKey, "PLTR"));
+    connection.emitRaw(overseasData(nextDescriptor.trKey, "PLTR"));
+    expect(data).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a safe error for a descriptor with an accessor instead of invoking the accessor", () => {
+    const descriptor = {} as { trId: string; trKey: string };
+    Object.defineProperty(descriptor, "trId", {
+      enumerable: true,
+      get: () => { throw new Error("must not execute"); },
+    });
+    Object.defineProperty(descriptor, "trKey", { enumerable: true, value: "005930" });
+
+    expect(() => supervisor.subscribe(descriptor)).toThrow(expect.objectContaining({
+      code: "SETTINGS",
+      scope: "websocket",
+    }));
+  });
+
+  it("returns a safe error when descriptor proxy reflection throws", () => {
+    const descriptor = new Proxy({ trId: "H0UNCNT0", trKey: "005930" }, {
+      getPrototypeOf: () => { throw new Error("must not execute outside the boundary"); },
+    });
+
+    expect(() => supervisor.subscribe(descriptor)).toThrow(expect.objectContaining({
+      code: "SETTINGS",
+      scope: "websocket",
+    }));
+  });
 });

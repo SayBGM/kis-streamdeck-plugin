@@ -1,7 +1,7 @@
 import type { DiagnosticsStore } from "../core/diagnostics-store.js";
 import { diagnosticsStore } from "../core/diagnostics-store.js";
 import { KisError } from "../core/errors.js";
-import { TR_ID_DOMESTIC, TR_ID_OVERSEAS } from "../types/index.js";
+import { TR_ID_OVERSEAS } from "../types/index.js";
 import type { ConnectionState, KisControlCommand, SupervisorListener } from "./connection-supervisor.js";
 
 export const PHYSICAL_SUBSCRIPTION_STATES = [
@@ -88,6 +88,15 @@ interface Entry {
   readonly refs: Set<Ref>;
   queuedAction: ControlAction | undefined;
   removing: boolean;
+  retarget: Retarget | undefined;
+}
+
+interface Retarget {
+  readonly next: SubscriptionDescriptor;
+  readonly promise: Promise<void>;
+  resolve(): void;
+  reject(error: KisError): void;
+  settled: boolean;
 }
 
 type ControlAction = "subscribe" | "unsubscribe";
@@ -102,6 +111,9 @@ interface QueuedJob extends ControlJob {}
 
 const CONTROL_SPACING_MS = 100;
 const CONTROL_TIMEOUT_MS = 5_000;
+const STALE_AFTER_MS = 20_000;
+const STALE_CHECK_INTERVAL_MS = 1_000;
+const MAX_RETIRED_DATA_KEYS = 256;
 
 function defaultSetTimeout(callback: () => void, milliseconds: number): TimerHandle {
   return setTimeout(callback, milliseconds);
@@ -149,6 +161,7 @@ export class SubscriptionSupervisor {
   private readonly clearIntervalFn: NonNullable<SubscriptionSupervisorOptions["clearInterval"]>;
   private readonly diagnostics: Pick<DiagnosticsStore, "record" | "increment">;
   private readonly entries = new Map<string, Entry>();
+  private readonly retiredDataKeys = new Set<string>();
   private readonly stateListeners = new Set<(snapshot: SubscriptionSnapshot) => void | Promise<void>>();
   private readonly dataListeners = new Set<(event: SubscriptionDataEvent) => void | Promise<void>>();
   private readonly controlQueue: QueuedJob[] = [];
@@ -158,6 +171,7 @@ export class SubscriptionSupervisor {
   private controlTimeout: TimerHandle | undefined;
   private controlSendTimer: TimerHandle | undefined;
   private controlRetryTimer: TimerHandle | undefined;
+  private staleTimer: TimerHandle | undefined;
   private lastSentAt = Number.NEGATIVE_INFINITY;
   private requiresFreshOpen = false;
   private destroyed = false;
@@ -172,6 +186,7 @@ export class SubscriptionSupervisor {
     this.diagnostics = options.diagnostics ?? diagnosticsStore;
     this.unsubscribeMessage = this.connection.onMessage((raw) => this.handleRawMessage(raw));
     this.unsubscribeState = this.connection.onState((state) => this.handleConnectionState(state));
+    this.staleTimer = this.setIntervalFn(() => this.markStaleEntries(), STALE_CHECK_INTERVAL_MS);
   }
 
   subscribe(descriptorInput: SubscriptionDescriptor, observer: SubscriptionObserver = {}): SubscriptionHandle {
@@ -192,6 +207,7 @@ export class SubscriptionSupervisor {
         refs: new Set(),
         queuedAction: undefined,
         removing: false,
+        retarget: undefined,
       };
       this.entries.set(key, entry);
       void Promise.resolve(this.connection.retain()).then(
@@ -199,6 +215,8 @@ export class SubscriptionSupervisor {
         () => this.recordSettingsFailure(),
       );
     }
+    this.retiredDataKeys.delete(key);
+    if (entry.removing && entry.refs.size === 0) entry.removing = false;
 
     const ref: Ref = { observer: this.normalizeObserver(observer), entry, released: false };
     entry.refs.add(ref);
@@ -217,9 +235,36 @@ export class SubscriptionSupervisor {
     });
   }
 
-  /** A2에서 ack 기반 physical retarget으로 확장합니다. */
-  retargetAll(_oldDescriptor: SubscriptionDescriptor, _nextDescriptor: SubscriptionDescriptor): Promise<void> {
-    return Promise.reject(subscriptionError("구독 키 전환은 아직 준비되지 않았습니다."));
+  /**
+   * 해외 주간/야간 키처럼 하나의 physical 구독 키가 바뀔 때 사용합니다.
+   * 기존 서버 구독 해제 확인 전에는 새 키의 subscribe frame을 넣지 않습니다.
+   */
+  retargetAll(oldInput: SubscriptionDescriptor, nextInput: SubscriptionDescriptor): Promise<void> {
+    this.assertUsable();
+    const oldDescriptor = this.normalizeDescriptor(oldInput);
+    const nextDescriptor = this.normalizeDescriptor(nextInput);
+    if (descriptorKey(oldDescriptor) === descriptorKey(nextDescriptor)) return Promise.resolve();
+    const entry = this.entries.get(descriptorKey(oldDescriptor));
+    if (!entry) return Promise.resolve();
+    if (entry.retarget) {
+      return descriptorKey(entry.retarget.next) === descriptorKey(nextDescriptor)
+        ? entry.retarget.promise
+        : Promise.reject(subscriptionError("진행 중인 구독 키 전환이 있습니다."));
+    }
+
+    const retarget = this.createRetarget(nextDescriptor);
+    entry.retarget = retarget;
+    if (entry.refs.size === 0) {
+      this.completeRetarget(entry);
+    } else if (entry.state === "pending") {
+      // 현재 subscribe의 결과를 먼저 해석한 뒤 success면 unsubscribe, reject면 즉시 이동합니다.
+    } else if (entry.subscribed || entry.state === "live" || entry.state === "stale") {
+      this.enqueueUnsubscribe(entry);
+    } else {
+      this.completeRetarget(entry);
+    }
+    this.pump();
+    return retarget.promise;
   }
 
   onState(listener: (snapshot: SubscriptionSnapshot) => void | Promise<void>): () => void {
@@ -244,10 +289,16 @@ export class SubscriptionSupervisor {
     if (this.destroyed) return;
     this.destroyed = true;
     this.clearControlTimers();
+    if (this.staleTimer !== undefined) this.clearIntervalFn(this.staleTimer);
+    this.staleTimer = undefined;
     this.unsubscribeMessage();
     this.unsubscribeState();
-    for (const entry of [...this.entries.values()]) this.deleteEntry(entry);
+    for (const entry of [...this.entries.values()]) {
+      this.rejectRetarget(entry, subscriptionError("구독 관리자가 종료되었습니다."));
+      this.deleteEntry(entry);
+    }
     this.controlQueue.length = 0;
+    this.retiredDataKeys.clear();
     this.currentJob = undefined;
     this.stateListeners.clear();
     this.dataListeners.clear();
@@ -344,6 +395,7 @@ export class SubscriptionSupervisor {
       this.pump();
       return;
     }
+    if (job.action === "subscribe") this.retiredDataKeys.delete(entry.key);
     const sent = this.connection.sendKisControl({
       trType: job.action === "subscribe" ? "1" : "2",
       trId: entry.descriptor.trId,
@@ -394,8 +446,10 @@ export class SubscriptionSupervisor {
       this.pump();
       return;
     }
-    this.clearControlTimeout();
+    this.clearControlTimers();
     this.currentJob = undefined;
+    this.controlQueue.length = 0;
+    this.retiredDataKeys.clear();
     for (const entry of [...this.entries.values()]) {
       entry.queuedAction = undefined;
       if (entry.state === "live" || entry.state === "pending" || entry.state === "stale") {
@@ -406,7 +460,10 @@ export class SubscriptionSupervisor {
         this.deleteEntry(entry);
       }
     }
-    this.controlQueue.length = 0;
+    // Socket이 끊기면 서버 쪽 기존 subscription도 함께 사라지므로 ack 없이 키를 옮겨도 됩니다.
+    for (const entry of [...this.entries.values()]) {
+      if (entry.retarget && entry.refs.size > 0) this.completeRetarget(entry);
+    }
   }
 
   private handleRawMessage(raw: string): void {
@@ -424,6 +481,7 @@ export class SubscriptionSupervisor {
     const fields = raw.slice(third + 1).split("^");
     const exactKey = fields[0]?.trim();
     if (!trId || !exactKey) return;
+    if (this.retiredDataKeys.has(descriptorKey({ trId, trKey: exactKey }))) return;
     for (const entry of [...this.entries.values()]) {
       if (!this.matchesData(entry, trId, exactKey, fields[1]?.trim())) continue;
       if (entry.refs.size === 0 || entry.generation < 1) continue;
@@ -473,16 +531,22 @@ export class SubscriptionSupervisor {
       if (success) {
         entry.liveAt = this.safeNow();
         this.setEntryState(entry, "live");
-        if (entry.refs.size === 0 || entry.removing) this.enqueueUnsubscribe(entry);
+        if (entry.refs.size === 0 || entry.removing || entry.retarget) this.enqueueUnsubscribe(entry);
       } else {
         this.setEntryState(entry, "rejected");
         try { this.diagnostics.increment("subscriptionRejects"); } catch { /* observability is optional */ }
-        if (entry.refs.size === 0) this.deleteEntry(entry);
+        if (entry.retarget) this.completeRetarget(entry);
+        else if (entry.refs.size === 0) this.deleteEntry(entry);
       }
     } else if (success) {
       entry.subscribed = false;
-      if (entry.refs.size === 0 || entry.removing) this.deleteEntry(entry);
-      else this.setEntryState(entry, "desired");
+      this.retireDataKey(entry.descriptor);
+      if (entry.retarget) this.completeRetarget(entry);
+      else if (entry.refs.size === 0 || entry.removing) this.deleteEntry(entry);
+      else {
+        this.setEntryState(entry, "desired");
+        this.enqueueSubscribe(entry);
+      }
     } else {
       entry.subscribed = false;
       if (entry.refs.size === 0) this.deleteEntry(entry);
@@ -506,6 +570,110 @@ export class SubscriptionSupervisor {
       typeof ticker === "string" &&
       ticker.length > 0 &&
       entry.descriptor.trKey.toUpperCase().endsWith(ticker.toUpperCase());
+  }
+
+  private markStaleEntries(): void {
+    if (this.destroyed) return;
+    const now = this.safeNow();
+    for (const entry of this.entries.values()) {
+      if (entry.state !== "live" || entry.refs.size === 0) continue;
+      const receivedAt = entry.lastDataAt ?? entry.liveAt;
+      if (receivedAt !== undefined && now - receivedAt >= STALE_AFTER_MS) {
+        this.setEntryState(entry, "stale");
+      }
+    }
+  }
+
+  private retireDataKey(descriptor: SubscriptionDescriptor): void {
+    const key = descriptorKey(descriptor);
+    this.retiredDataKeys.delete(key);
+    this.retiredDataKeys.add(key);
+    while (this.retiredDataKeys.size > MAX_RETIRED_DATA_KEYS) {
+      const oldest = this.retiredDataKeys.values().next().value;
+      if (typeof oldest !== "string") return;
+      this.retiredDataKeys.delete(oldest);
+    }
+  }
+
+  private createRetarget(next: SubscriptionDescriptor): Retarget {
+    let resolvePromise!: () => void;
+    let rejectPromise!: (error: KisError) => void;
+    const retarget: Retarget = {
+      next,
+      promise: new Promise<void>((resolve, reject) => {
+        resolvePromise = resolve;
+        rejectPromise = reject;
+      }),
+      resolve: () => {
+        if (retarget.settled) return;
+        retarget.settled = true;
+        resolvePromise();
+      },
+      reject: (error) => {
+        if (retarget.settled) return;
+        retarget.settled = true;
+        rejectPromise(error);
+      },
+      settled: false,
+    };
+    return retarget;
+  }
+
+  private completeRetarget(entry: Entry): void {
+    const retarget = entry.retarget;
+    if (!retarget || this.entries.get(entry.key) !== entry) return;
+    entry.retarget = undefined;
+    if (entry.refs.size === 0) {
+      this.deleteEntry(entry);
+      retarget.resolve();
+      return;
+    }
+
+    const nextKey = descriptorKey(retarget.next);
+    let next = this.entries.get(nextKey);
+    const mergesIntoExistingEntry = next !== undefined;
+    const refs = [...entry.refs];
+    if (!next) {
+      next = {
+        key: nextKey,
+        descriptor: retarget.next,
+        createdAt: this.safeNow(),
+        generation: 1,
+        state: "desired",
+        subscribed: false,
+        liveAt: undefined,
+        lastDataAt: undefined,
+        refs: new Set(),
+        queuedAction: undefined,
+        removing: false,
+        retarget: undefined,
+      };
+      this.entries.set(next.key, next);
+      // 기존 physical entry의 retain 하나를 새 entry가 그대로 승계합니다.
+    }
+    for (const ref of refs) {
+      entry.refs.delete(ref);
+      ref.entry = next;
+      next.refs.add(ref);
+      this.publishState(next, ref);
+    }
+    this.entries.delete(entry.key);
+    entry.generation += 1;
+    entry.queuedAction = undefined;
+    if (mergesIntoExistingEntry) {
+      // 대상 physical entry는 자체 retain을 이미 보유하므로 source retain 하나만 해제합니다.
+      try { this.connection.release(); } catch { /* release is best effort */ }
+    }
+    this.enqueueSubscribe(next);
+    retarget.resolve();
+    this.pump();
+  }
+
+  private rejectRetarget(entry: Entry, error: KisError): void {
+    const retarget = entry.retarget;
+    if (!retarget) return;
+    entry.retarget = undefined;
+    retarget.reject(error);
   }
 
   private setEntryState(entry: Entry, state: PhysicalSubscriptionState): void {
