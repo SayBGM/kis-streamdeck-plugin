@@ -189,12 +189,44 @@ describe("SettingsRepository updates", () => {
     });
   });
 
+  it("refreshes a healthy base and advances from the latest external revision", async () => {
+    let disk = v2({ settingsRevision: 2, initializedField: "initial" });
+    const persistence = makePersistence(
+      async () => structuredClone(disk),
+      async (settings) => {
+        disk = structuredClone(settings);
+      },
+    );
+    const repository = new SettingsRepository(persistence, {
+      sleep: async () => {},
+    });
+    await repository.initialize();
+
+    disk = v2({
+      settingsRevision: 9,
+      externalField: { installedOutsideRepository: true },
+    });
+    const snapshot = await repository.update((draft) => {
+      draft.repositoryField = "preserved-with-external";
+    });
+
+    expect(persistence.getGlobalSettings).toHaveBeenCalledTimes(2);
+    expect(snapshot.settings).toMatchObject({
+      settingsRevision: 10,
+      externalField: { installedOutsideRepository: true },
+      repositoryField: "preserved-with-external",
+    });
+    expect(snapshot.settings).not.toHaveProperty("initializedField");
+  });
+
   it("serializes concurrent updates without losing fields and increments revisions in order", async () => {
     const writes: GlobalSettingsV2[] = [];
+    let disk = v2({ settingsRevision: 4 });
     const persistence = makePersistence(
-      async () => v2({ settingsRevision: 4 }),
+      async () => structuredClone(disk),
       async (settings) => {
         writes.push(structuredClone(settings));
+        disk = structuredClone(settings);
       },
     );
     const repository = new SettingsRepository(persistence, {
@@ -227,6 +259,7 @@ describe("SettingsRepository updates", () => {
       firstExtension: { enabled: true },
       secondExtension: "preserved",
     });
+    expect(persistence.getGlobalSettings).toHaveBeenCalledTimes(3);
   });
 
   it("does not persist or emit for a structural no-op excluding revision", async () => {
@@ -254,37 +287,42 @@ describe("SettingsRepository updates", () => {
       settingsRevision: 7,
       externalField: { fromDisk: true },
     });
-    let reads = 0;
+    let disk = initial;
     let writes = 0;
     const persistence = makePersistence(
-      async () => {
-        reads += 1;
-        return reads === 1 ? initial : refreshed;
-      },
-      async () => {
+      async () => structuredClone(disk),
+      async (settings) => {
         writes += 1;
         if (writes <= 4) throw new Error("write unavailable");
+        disk = structuredClone(settings);
       },
     );
     const repository = new SettingsRepository(persistence, {
       sleep: async () => {},
     });
     await repository.initialize();
+    const listener = vi.fn();
+    repository.subscribe(listener);
+    disk = refreshed;
 
     await expect(repository.update((draft) => {
       draft.failedField = "never-commit";
     })).rejects.toMatchObject({ code: "SETTINGS" });
 
     const afterFailure = repository.getSnapshot();
-    expect(afterFailure.settings).toEqual(initial);
+    expect(afterFailure.settings).toEqual(refreshed);
     expect(afterFailure.settings).not.toHaveProperty("failedField");
-    expect(afterFailure.status.persistenceDegraded).toBe(true);
+    expect(afterFailure.status).toMatchObject({
+      baseKnown: true,
+      persistenceDegraded: true,
+    });
+    expect(listener).toHaveBeenCalledTimes(2);
 
     const recovered = await repository.update((draft) => {
       draft.recoveredField = "committed";
     });
 
-    expect(persistence.getGlobalSettings).toHaveBeenCalledTimes(2);
+    expect(persistence.getGlobalSettings).toHaveBeenCalledTimes(3);
     expect(persistence.setGlobalSettings).toHaveBeenCalledTimes(5);
     expect(recovered.settings).toMatchObject({
       settingsRevision: 8,
@@ -292,8 +330,131 @@ describe("SettingsRepository updates", () => {
       recoveredField: "committed",
     });
     expect(recovered.settings).not.toHaveProperty("failedField");
-    expect(recovered.settings).not.toHaveProperty("initialField");
     expect(recovered.status.persistenceDegraded).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(3);
+  });
+
+  it("persists a recovered legacy base even when the updater is a no-op", async () => {
+    const legacy: GlobalSettings = {
+      settingsRevision: 5,
+      updateMode: "hybrid",
+      throttleMs: "5001",
+      external: { preserved: true },
+    };
+    let reads = 0;
+    const persistence = makePersistence(async () => {
+      reads += 1;
+      if (reads <= 4) throw new Error("initial read unavailable");
+      return structuredClone(legacy);
+    });
+    const repository = new SettingsRepository(persistence, {
+      sleep: async () => {},
+    });
+    await repository.initialize();
+    const listener = vi.fn();
+    repository.subscribe(listener);
+
+    const recovered = await repository.update(() => {});
+
+    expect(persistence.getGlobalSettings).toHaveBeenCalledTimes(5);
+    expect(persistence.setGlobalSettings).toHaveBeenCalledTimes(1);
+    expect(persistence.setGlobalSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: 2,
+        settingsRevision: 5,
+        external: { preserved: true },
+        preferences: expect.objectContaining({ renderIntervalMs: 10_000 }),
+      }),
+    );
+    expect(recovered.settings).not.toHaveProperty("updateMode");
+    expect(recovered.settings).not.toHaveProperty("throttleMs");
+    expect(recovered.status).toEqual({
+      baseKnown: true,
+      persistenceDegraded: false,
+    });
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener.mock.calls[1]?.[0]).toEqual(recovered);
+  });
+
+  it("exposes a degraded recovered base when no-op migration persistence fails", async () => {
+    const legacy: GlobalSettings = {
+      settingsRevision: 6,
+      pollIntervalSec: "15",
+      external: "keep-after-failure",
+    };
+    let reads = 0;
+    const persistence = makePersistence(
+      async () => {
+        reads += 1;
+        if (reads <= 4) throw new Error("initial read unavailable");
+        return structuredClone(legacy);
+      },
+      async () => {
+        throw new Error("migration write unavailable");
+      },
+    );
+    const repository = new SettingsRepository(persistence, {
+      sleep: async () => {},
+    });
+    await repository.initialize();
+    const listener = vi.fn();
+    repository.subscribe(listener);
+
+    await expect(repository.update(() => {})).rejects.toMatchObject({
+      code: "SETTINGS",
+      scope: "settings",
+    });
+
+    const snapshot = repository.getSnapshot();
+    expect(persistence.setGlobalSettings).toHaveBeenCalledTimes(4);
+    expect(snapshot.settings).toMatchObject({
+      schemaVersion: 2,
+      settingsRevision: 6,
+      external: "keep-after-failure",
+      preferences: { backupPollIntervalMs: 15_000 },
+    });
+    expect(snapshot.settings).not.toHaveProperty("pollIntervalSec");
+    expect(snapshot.status).toMatchObject({
+      baseKnown: true,
+      persistenceDegraded: true,
+      error: { code: "SETTINGS" },
+    });
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the update queue usable after a mutator throws", async () => {
+    let disk = v2({ settingsRevision: 2, external: "keep" });
+    const persistence = makePersistence(
+      async () => structuredClone(disk),
+      async (settings) => {
+        disk = structuredClone(settings);
+      },
+    );
+    const repository = new SettingsRepository(persistence, {
+      sleep: async () => {},
+    });
+    await repository.initialize();
+
+    await expect(repository.update(() => {
+      throw new Error("mutator failed");
+    })).rejects.toThrow("mutator failed");
+    expect(persistence.setGlobalSettings).not.toHaveBeenCalled();
+    expect(repository.getSnapshot().settings).toEqual(v2({
+      settingsRevision: 2,
+      external: "keep",
+    }));
+
+    const recovered = await repository.update((draft) => {
+      draft.afterMutatorFailure = true;
+    });
+
+    expect(recovered.settings).toMatchObject({
+      settingsRevision: 3,
+      external: "keep",
+      afterMutatorFailure: true,
+    });
+    expect(persistence.getGlobalSettings).toHaveBeenCalledTimes(3);
+    expect(persistence.setGlobalSettings).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -337,5 +498,78 @@ describe("SettingsRepository snapshots and subscriptions", () => {
     const status = repository.getStatus();
     expect(Object.isFrozen(status)).toBe(true);
     expect(status).toEqual({ baseKnown: true, persistenceDegraded: false });
+  });
+
+  it("uses a stable listener snapshot when a callback unsubscribes and resubscribes", async () => {
+    let disk = v2();
+    const persistence = makePersistence(
+      async () => structuredClone(disk),
+      async (settings) => {
+        disk = structuredClone(settings);
+      },
+    );
+    const repository = new SettingsRepository(persistence, {
+      sleep: async () => {},
+    });
+    await repository.initialize();
+
+    let duringUpdate = false;
+    let resubscribed = false;
+    let unsubscribe = () => {};
+    const listener = vi.fn(() => {
+      if (duringUpdate && !resubscribed) {
+        resubscribed = true;
+        unsubscribe();
+        unsubscribe = repository.subscribe(listener);
+      }
+    });
+    unsubscribe = repository.subscribe(listener);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    duringUpdate = true;
+    await repository.update((draft) => {
+      draft.firstEmission = true;
+    });
+    duringUpdate = false;
+
+    expect(listener).toHaveBeenCalledTimes(3);
+    await repository.update((draft) => {
+      draft.secondEmission = true;
+    });
+    expect(listener).toHaveBeenCalledTimes(4);
+    unsubscribe();
+  });
+
+  it("consumes each asynchronous listener rejection", async () => {
+    let disk = v2();
+    const persistence = makePersistence(
+      async () => structuredClone(disk),
+      async (settings) => {
+        disk = structuredClone(settings);
+      },
+    );
+    const repository = new SettingsRepository(persistence, {
+      sleep: async () => {},
+    });
+    await repository.initialize();
+
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    let reject = false;
+    try {
+      repository.subscribe(async () => {
+        if (reject) throw new Error("async listener failed");
+      });
+      reject = true;
+
+      await repository.update((draft) => {
+        draft.emitAsyncFailure = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
   });
 });

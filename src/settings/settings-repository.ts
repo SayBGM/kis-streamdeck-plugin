@@ -29,7 +29,7 @@ export interface SettingsSnapshot {
  * assigning `undefined` is not a deletion. The return value is intentionally ignored.
  */
 export type SettingsUpdater = (draft: GlobalSettingsV2) => void;
-export type SettingsListener = (snapshot: SettingsSnapshot) => void;
+export type SettingsListener = (snapshot: SettingsSnapshot) => void | Promise<void>;
 
 export interface SettingsRepositoryOptions {
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -94,6 +94,12 @@ function nextRevisionError(): KisError {
   }));
 }
 
+/**
+ * Updates are serialized and each update re-reads persistence before applying its
+ * mutator. This closes races among writers using this repository. The persistence
+ * port has no compare-and-swap operation, so every in-process global-settings writer
+ * must use the same repository instance for this guarantee to hold.
+ */
 export class SettingsRepository {
   private readonly persistence: SettingsPersistence;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -207,38 +213,47 @@ export class SettingsRepository {
   }
 
   private async applyUpdate(updater: SettingsUpdater): Promise<SettingsSnapshot> {
-    let base = this.settings;
-    let refreshed = false;
-    if (!this.status.baseKnown || this.status.persistenceDegraded) {
-      const read = await this.readWithRetry();
-      if (!read.ok) {
-        const error = settingsPersistenceError("최신 설정을 불러오지 못했습니다.", {
-          baseKnown: false,
-          persistenceDegraded: true,
-        });
-        this.replaceState(this.settings, {
-          baseKnown: false,
-          persistenceDegraded: true,
-          error,
-        });
-        throw error;
-      }
-      base = read.value.settings;
-      refreshed = true;
+    const read = await this.readWithRetry();
+    if (!read.ok) {
+      const error = settingsPersistenceError("최신 설정을 불러오지 못했습니다.", {
+        baseKnown: false,
+        persistenceDegraded: true,
+      });
+      this.replaceStateAndEmitIfChanged(this.settings, {
+        baseKnown: false,
+        persistenceDegraded: true,
+        error,
+      });
+      throw error;
     }
 
+    const base = read.value.settings;
     const draft = cloneSettings(base);
     updater(draft);
     const candidate = migrateGlobalSettings(draft);
     candidate.settingsRevision = base.settingsRevision;
 
     if (globalSettingsEqual(candidate, base)) {
-      if (refreshed) {
-        this.replaceState(base, {
-          baseKnown: true,
-          persistenceDegraded: false,
-        });
+      if (read.value.migrationRequired) {
+        const persisted = await this.writeWithRetry(base);
+        if (!persisted.ok) {
+          const error = settingsPersistenceError("마이그레이션한 설정을 저장하지 못했습니다.", {
+            baseKnown: true,
+            persistenceDegraded: true,
+          });
+          this.replaceStateAndEmitIfChanged(base, {
+            baseKnown: true,
+            persistenceDegraded: true,
+            error,
+          });
+          throw error;
+        }
       }
+
+      this.replaceStateAndEmitIfChanged(base, {
+        baseKnown: true,
+        persistenceDegraded: false,
+      });
       return this.getSnapshot();
     }
 
@@ -250,22 +265,21 @@ export class SettingsRepository {
     const persisted = await this.writeWithRetry(candidate);
     if (!persisted.ok) {
       const error = settingsPersistenceError("설정을 저장하지 못했습니다.", {
-        baseKnown: this.status.baseKnown,
+        baseKnown: true,
         persistenceDegraded: true,
       });
-      this.replaceState(this.settings, {
-        baseKnown: this.status.baseKnown,
+      this.replaceStateAndEmitIfChanged(base, {
+        baseKnown: true,
         persistenceDegraded: true,
         error,
       });
       throw error;
     }
 
-    this.replaceState(candidate, {
+    this.replaceStateAndEmitIfChanged(candidate, {
       baseKnown: true,
       persistenceDegraded: false,
     });
-    this.emit();
     return this.getSnapshot();
   }
 
@@ -305,21 +319,37 @@ export class SettingsRepository {
   private replaceState(
     settings: GlobalSettingsV2,
     status: SettingsRepositoryStatus,
+  ): boolean {
+    const nextSettings = deepFreeze(cloneSettings(settings));
+    const nextStatus = freezeStatus(status);
+    const changed = !globalSettingsEqual(this.settings, nextSettings) ||
+      this.status.baseKnown !== nextStatus.baseKnown ||
+      this.status.persistenceDegraded !== nextStatus.persistenceDegraded ||
+      this.status.error !== nextStatus.error;
+    this.settings = nextSettings;
+    this.status = nextStatus;
+    return changed;
+  }
+
+  private replaceStateAndEmitIfChanged(
+    settings: GlobalSettingsV2,
+    status: SettingsRepositoryStatus,
   ): void {
-    this.settings = deepFreeze(cloneSettings(settings));
-    this.status = freezeStatus(status);
+    if (this.replaceState(settings, status)) {
+      this.emit();
+    }
   }
 
   private emit(): void {
     const snapshot = this.getSnapshot();
-    for (const listener of this.listeners) {
+    for (const listener of [...this.listeners]) {
       this.callListener(listener, snapshot);
     }
   }
 
   private callListener(listener: SettingsListener, snapshot: SettingsSnapshot): void {
     try {
-      listener(snapshot);
+      void Promise.resolve(listener(snapshot)).catch(() => {});
     } catch {
       // Listener ownership stays outside the persistence boundary.
     }
