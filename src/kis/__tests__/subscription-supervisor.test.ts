@@ -397,4 +397,47 @@ describe("SubscriptionSupervisor", () => {
     const descriptors = await settleInitialLiveSubscriptions(82);
     await completeLease(descriptors, 41);
   });
+
+  it("promotes the oldest parked key when a live subscription is rejected", async () => {
+    const descriptors = Array.from({ length: 42 }, (_, index) => ({
+      trId: "H0UNCNT0",
+      trKey: String(index).padStart(6, "0"),
+    }));
+    for (const descriptor of descriptors) supervisor.subscribe(descriptor);
+    await flush();
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "ERROR"));
+
+    expect(supervisor.getSnapshot(descriptors[0])?.state).toBe("rejected");
+    expect(supervisor.getSnapshot(descriptors[41])?.state).toBe("desired");
+    for (let index = 1; index < 41; index += 1) {
+      advance(100);
+      expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[index] });
+      connection.emitRaw(control(descriptors[index].trId, descriptors[index].trKey));
+    }
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41] });
+  });
+
+  it("promotes the oldest parked key after a live final-reference release is acknowledged", async () => {
+    const descriptors = Array.from({ length: 42 }, (_, index) => ({
+      trId: "H0UNCNT0",
+      trKey: String(index).padStart(6, "0"),
+    }));
+    const first = supervisor.subscribe(descriptors[0]);
+    for (const descriptor of descriptors.slice(1)) supervisor.subscribe(descriptor);
+    await flush();
+    for (let index = 0; index < 41; index += 1) {
+      const command = connection.sent.at(-1)!;
+      connection.emitRaw(control(command.trId, command.trKey));
+      if (index < 40) advance(100);
+    }
+
+    first.release();
+    advance(100);
+    expect(connection.sent.at(-1)).toEqual({ trType: "2", ...descriptors[0] });
+    connection.emitRaw(control(descriptors[0].trId, descriptors[0].trKey, "OPSP0002"));
+    advance(100);
+
+    expect(connection.sent.at(-1)).toEqual({ trType: "1", ...descriptors[41] });
+  });
 });
