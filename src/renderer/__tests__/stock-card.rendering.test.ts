@@ -1,4 +1,4 @@
-import { Window } from "happy-dom";
+import { Window, type Document } from "happy-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorType, type StockData, type StreamConnectionState } from "../../types/index.js";
 
@@ -74,12 +74,13 @@ describe("stock-card rendering", () => {
   });
 
   it.each<{
-    connectionState: StreamConnectionState | undefined;
+    connectionState: StreamConnectionState | null | undefined;
     color: string;
   }>([
     { connectionState: "LIVE", color: "#00c853" },
     { connectionState: "BACKUP", color: "#7dd3fc" },
     { connectionState: "BROKEN", color: "#ff1744" },
+    { connectionState: null, color: "#7f8aa8" },
     { connectionState: undefined, color: "#7f8aa8" },
   ])("uses $color for a $connectionState legacy stock title without a bottom bar", ({ connectionState, color }) => {
     const svg = renderStockCard(sampleData, "overseas", { connectionState });

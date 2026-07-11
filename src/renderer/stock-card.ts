@@ -25,7 +25,7 @@ const COLOR_RISE = "#00c853"; // 상승 (초록)
 const COLOR_FALL = "#ff1744"; // 하락 (빨강)
 const COLOR_FLAT = "#9e9e9e"; // 보합 (회색)
 const COLOR_TEXT = "#ffffff"; // 기본 텍스트
-const COLOR_TEXT_STALE = "#ffd54f"; // stale 상태 종목명 (노랑)
+const COLOR_TEXT_STALE = "#ffd54f"; // 지연/새로고침 상태 문구 (노랑)
 const COLOR_SESSION_REG = "#00c853"; // 정규장 (초록)
 const COLOR_SESSION_OTHER = "#ff9800"; // 프리/에프터 (주황)
 const COLOR_SESSION_CLOSED = "#616161"; // 장 마감 (어두운 회색)
@@ -330,7 +330,7 @@ function formatSignedChangeRate(rate: number, sign: QuoteSample["sign"]): string
 }
 
 function getConnectionTitleColor(
-  connection: SafeStockActionView["connection"] | undefined,
+  connection: SafeStockActionView["connection"] | null | undefined,
 ): string {
   switch (connection) {
     case "LIVE":
