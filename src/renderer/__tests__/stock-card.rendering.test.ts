@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-import type { StockData } from "../../types/index.js";
+import { Window } from "happy-dom";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ErrorType, type StockData, type StreamConnectionState } from "../../types/index.js";
 
 vi.mock("../../utils/timezone.js", () => ({
   getETDayOfWeek: vi.fn(() => 1),
@@ -9,7 +10,14 @@ vi.mock("../../utils/timezone.js", () => ({
 }));
 
 import * as timezone from "../../utils/timezone.js";
-import { renderConnectedCard, renderStockCard, renderWaitingCard } from "../stock-card.js";
+import {
+  renderConnectedCard,
+  renderErrorCard,
+  renderRecoveryCard,
+  renderSetupCard,
+  renderStockCard,
+  renderWaitingCard,
+} from "../stock-card.js";
 
 const sampleData: StockData = {
   ticker: "AAPL",
@@ -20,7 +28,41 @@ const sampleData: StockData = {
   sign: "fall",
 };
 
+function expectNoLegacyStatusBar(document: Document): void {
+  expect(
+    document.querySelector('rect[x="8"][y="136"][width="128"][height="4"]'),
+  ).toBeNull();
+}
+
+function expectConnectionTitle(svg: string, color: string): void {
+  const window = new Window();
+  const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
+
+  expect(document.querySelector('[data-role="connection-dot"]')?.getAttribute("fill")).toBe(color);
+  expect(document.querySelector('[data-role="stock-name"]')?.getAttribute("fill")).toBe(color);
+  expect(document.querySelector('[data-role="stock-name"]')?.getAttribute("x")).toBe("12");
+  expectNoLegacyStatusBar(document);
+  window.close();
+}
+
+function expectNoConnectionTitle(svg: string): void {
+  const window = new Window();
+  const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
+
+  expect(document.querySelector('[data-role="connection-dot"]')).toBeNull();
+  expect(document.querySelector('[data-role="stock-name"]')).toBeNull();
+  expectNoLegacyStatusBar(document);
+  window.close();
+}
+
 describe("stock-card rendering", () => {
+  beforeEach(() => {
+    vi.mocked(timezone.getETDayOfWeek).mockReturnValue(1);
+    vi.mocked(timezone.getETTotalMinutes).mockReturnValue(600);
+    vi.mocked(timezone.getKSTDayOfWeek).mockReturnValue(1);
+    vi.mocked(timezone.getKSTTotalMinutes).mockReturnValue(600);
+  });
+
   it("renders ticker and broken connection label on stock cards", () => {
     const svg = renderStockCard(sampleData, "overseas", {
       connectionState: "BROKEN",
@@ -29,6 +71,20 @@ describe("stock-card rendering", () => {
     expect(svg).toContain("AAPL");
     expect(svg).toContain("연결 확인 필요");
     expect(svg).toContain("정규");
+  });
+
+  it.each<{
+    connectionState: StreamConnectionState | undefined;
+    color: string;
+  }>([
+    { connectionState: "LIVE", color: "#00c853" },
+    { connectionState: "BACKUP", color: "#7dd3fc" },
+    { connectionState: "BROKEN", color: "#ff1744" },
+    { connectionState: undefined, color: "#7f8aa8" },
+  ])("uses $color for a $connectionState legacy stock title without a bottom bar", ({ connectionState, color }) => {
+    const svg = renderStockCard(sampleData, "overseas", { connectionState });
+
+    expectConnectionTitle(svg, color);
   });
 
   it("renders a refresh label when a manual refresh is in progress", () => {
@@ -58,6 +114,7 @@ describe("stock-card rendering", () => {
     expect(svg).toContain("실시간 연결됨");
     expect(svg).toContain("데이터 대기");
     expect(svg).toContain('data-role="loading-indicator"');
+    expectConnectionTitle(svg, "#00c853");
   });
 
   it("renders a loading indicator on waiting cards", () => {
@@ -65,6 +122,32 @@ describe("stock-card rendering", () => {
 
     expect(svg).toContain("초기화 중");
     expect(svg).toContain('data-role="loading-indicator"');
+    expectConnectionTitle(svg, "#7f8aa8");
+  });
+
+  it("uses the backup title and normal-waiting copy on closed connected cards", () => {
+    vi.mocked(timezone.getETTotalMinutes).mockReturnValue(1_300);
+
+    const svg = renderConnectedCard("Apple", "overseas");
+
+    expect(svg).toContain("정상 대기");
+    expect(svg).not.toContain("실시간 연결됨");
+    expectConnectionTitle(svg, "#7dd3fc");
+  });
+
+  it("uses a live title on recovery cards without a bottom bar", () => {
+    const svg = renderRecoveryCard("Apple");
+
+    expect(svg).toContain("연결 회복");
+    expectConnectionTitle(svg, "#00c853");
+  });
+
+  it.each([
+    { svg: renderErrorCard(ErrorType.NETWORK_ERROR), copy: "연결 오류" },
+    { svg: renderSetupCard("API 키 입력"), copy: "설정 필요" },
+  ])("keeps the dedicated $copy card without a connection title or bottom bar", ({ svg, copy }) => {
+    expect(svg).toContain(copy);
+    expectNoConnectionTitle(svg);
   });
 
   it("treats weekend sessions as closed instead of regular", () => {

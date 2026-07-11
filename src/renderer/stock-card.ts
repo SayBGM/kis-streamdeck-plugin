@@ -489,7 +489,7 @@ export function renderWaitingCard(
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   ${renderSessionPill(sessionBadge, sessionColor)}
-  <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${nameFontSize}" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(displayName)}</text>
+  ${renderConnectionTitle(displayName, nameFontSize, getConnectionTitleColor(undefined))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${market === "domestic" ? "국내 시세" : "미국 시세"}</text>
   ${renderLoadingIndicator(72, 70, 22)}
   <text x="72" y="102" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_TEXT}" text-anchor="middle">초기화 중</text>
@@ -531,11 +531,10 @@ export function renderRecoveryCard(name: string): string {
   const nameFontSize = getNameFontSize(displayName);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="#1b4332"/>
-  <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${nameFontSize}" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(displayName)}</text>
+  ${renderConnectionTitle(displayName, nameFontSize, getConnectionTitleColor("LIVE"))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#9ad1a7">실시간 복구</text>
   <text x="72" y="72" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="${COLOR_RISE}" text-anchor="middle">✓</text>
   <text x="72" y="102" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${COLOR_RISE}" text-anchor="middle">연결 회복</text>
-  <rect x="8" y="136" width="128" height="4" rx="2" fill="${COLOR_CONN_LIVE}" />
 </svg>`;
 }
 
@@ -551,6 +550,9 @@ export function renderConnectedCard(
   const sessionBadge = getSessionBadgeLabel(session);
   const statusText = session === "CLOSED" ? "장 마감" : "데이터 대기";
   const statusColor = session === "CLOSED" ? COLOR_TEXT_SUBTLE : COLOR_TEXT;
+  const connectionState = session === "CLOSED" ? "BACKUP" : "LIVE";
+  const connectionColor = getConnectionTitleColor(connectionState);
+  const connectionText = session === "CLOSED" ? "정상 대기" : "실시간 연결됨";
   const loadingMarkup =
     session === "CLOSED" ? "" : renderLoadingIndicator(72, 68, 18, COLOR_CONN_LIVE);
   const displayName = truncateName(name || "---", 8);
@@ -559,12 +561,11 @@ export function renderConnectedCard(
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   ${renderSessionPill(sessionBadge, sessionColor)}
-  <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${nameFontSize}" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(displayName)}</text>
+  ${renderConnectionTitle(displayName, nameFontSize, connectionColor)}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${market === "domestic" ? "국내 시세" : "미국 시세"}</text>
   ${loadingMarkup}
   <text x="72" y="${session === "CLOSED" ? "78" : "100"}" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${statusColor}" text-anchor="middle">${statusText}</text>
-  <text x="72" y="${session === "CLOSED" ? "102" : "120"}" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="${COLOR_CONN_LIVE}" text-anchor="middle">실시간 연결됨</text>
-  <rect x="8" y="136" width="128" height="4" rx="2" fill="${COLOR_CONN_LIVE}" />
+  <text x="72" y="${session === "CLOSED" ? "102" : "120"}" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="${connectionColor}" text-anchor="middle">${connectionText}</text>
 </svg>`;
 }
 
@@ -599,11 +600,10 @@ export function renderStockCard(
   const session = getMarketSession(market);
   const sessionColor = getSessionColor(session);
   const changeColor = getSignColor(data.sign);
-  const titleColor = renderOptions.isStale ? COLOR_TEXT_STALE : COLOR_TEXT;
   const connectionState = renderOptions.connectionState;
+  const titleColor = getConnectionTitleColor(connectionState);
   const effectiveRefreshing =
     connectionState !== "BROKEN" && (renderOptions.isRefreshing ?? false);
-  const connectionColor = getConnectionColor(connectionState);
   const sessionBadge = getSessionBadgeLabel(session);
 
   // 포맷된 문자열
@@ -636,7 +636,7 @@ export function renderStockCard(
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
 
   ${renderSessionPill(sessionBadge, sessionColor)}
-  <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${nameFontSize}" font-weight="bold" fill="${titleColor}">${escapeXml(displayName)}</text>
+  ${renderConnectionTitle(displayName, nameFontSize, titleColor)}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${escapeXml(tickerLabel)}</text>
 
   <!-- 현재가 (중앙) -->
@@ -648,7 +648,6 @@ export function renderStockCard(
   <!-- 변동률 (우측 하단) -->
   <text x="132" y="108" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}" text-anchor="end">${escapeXml(rateStr)}</text>
   ${statusMarkup}
-  ${connectionColor ? `<rect x="8" y="136" width="128" height="4" rx="2" fill="${connectionColor}" />` : ""}
 </svg>`;
 }
 
@@ -696,21 +695,6 @@ function getConnectionTextColor(
 
 function isWeekend(weekday: number): boolean {
   return weekday === 0 || weekday === 6;
-}
-
-function getConnectionColor(
-  connectionState: StreamConnectionState | null | undefined
-): string | null {
-  switch (connectionState) {
-    case "LIVE":
-      return COLOR_CONN_LIVE;
-    case "BACKUP":
-      return COLOR_CONN_BACKUP;
-    case "BROKEN":
-      return COLOR_CONN_BROKEN;
-    default:
-      return null;
-  }
 }
 
 function getSessionBadgeLabel(session: MarketSession): string {
