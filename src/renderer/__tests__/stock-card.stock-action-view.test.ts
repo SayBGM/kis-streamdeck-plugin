@@ -180,6 +180,19 @@ describe("renderStockActionView", () => {
     expectConnectionTitle(svg, titleColor);
   });
 
+  it("prioritizes refreshing over stale for a live quote", () => {
+    const svg = renderStockActionView(view({
+      connection: "LIVE",
+      stale: true,
+      refreshing: true,
+    }));
+
+    expectStatusLabel(svg, "새로고침 중", "#ffd54f");
+    expect(svg).toContain('data-role="loading-indicator"');
+    expect(svg).not.toContain("시세 지연");
+    expect(svg).not.toContain("백업 · 지연");
+  });
+
   it("renders waiting and recovery states with the injected session", () => {
     const waiting = renderStockActionView(view({
       session: "CLOSED",

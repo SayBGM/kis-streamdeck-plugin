@@ -601,6 +601,8 @@ export function renderStockCard(
   const changeColor = getSignColor(data.sign);
   const titleColor = renderOptions.isStale ? COLOR_TEXT_STALE : COLOR_TEXT;
   const connectionState = renderOptions.connectionState;
+  const effectiveRefreshing =
+    connectionState !== "BROKEN" && (renderOptions.isRefreshing ?? false);
   const connectionColor = getConnectionColor(connectionState);
   const sessionBadge = getSessionBadgeLabel(session);
 
@@ -617,17 +619,17 @@ export function renderStockCard(
   const statusText = getConnectionStatusText(
     connectionState,
     renderOptions.isStale ?? false,
-    renderOptions.isRefreshing ?? false
+    effectiveRefreshing,
   );
   const statusColor = getConnectionTextColor(
     connectionState,
     renderOptions.isStale ?? false,
-    renderOptions.isRefreshing ?? false
+    effectiveRefreshing,
   );
   const statusMarkup = renderStatusLabel(
     statusText,
     statusColor,
-    renderOptions.isRefreshing ?? false,
+    effectiveRefreshing,
   );
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">

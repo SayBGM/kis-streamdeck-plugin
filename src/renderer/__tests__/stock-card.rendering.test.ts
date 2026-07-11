@@ -41,6 +41,17 @@ describe("stock-card rendering", () => {
     expect(svg).toContain('data-role="loading-indicator"');
   });
 
+  it("suppresses refreshing UI when a legacy stock card connection is broken", () => {
+    const svg = renderStockCard(sampleData, "overseas", {
+      connectionState: "BROKEN",
+      isRefreshing: true,
+    });
+
+    expect(svg).toContain("연결 확인 필요");
+    expect(svg).not.toContain("새로고침 중");
+    expect(svg).not.toContain('data-role="loading-indicator"');
+  });
+
   it("renders clearer connected copy on waiting-for-trades cards", () => {
     const svg = renderConnectedCard("Apple", "overseas");
 
