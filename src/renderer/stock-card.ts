@@ -30,7 +30,7 @@ const COLOR_SESSION_REG = "#00c853"; // 정규장 (초록)
 const COLOR_SESSION_OTHER = "#ff9800"; // 프리/에프터 (주황)
 const COLOR_SESSION_CLOSED = "#616161"; // 장 마감 (어두운 회색)
 const COLOR_CONN_LIVE = "#00c853";
-const COLOR_CONN_BACKUP = "#ffd54f";
+const COLOR_CONN_BACKUP = "#7dd3fc";
 const COLOR_CONN_BROKEN = "#ff1744";
 const COLOR_TEXT_SUBTLE = "#a6b0cf";
 const COLOR_TEXT_MUTED = "#7f8aa8";
@@ -40,10 +40,11 @@ const SESSION_PILL_X = 94;
 const SESSION_PILL_Y = 14;
 const SESSION_PILL_WIDTH = 38;
 const SESSION_PILL_HEIGHT = 18;
-const CONNECTION_LINE_X = 8;
-const CONNECTION_LINE_Y = 136;
-const CONNECTION_LINE_WIDTH = 128;
-const CONNECTION_LINE_HEIGHT = 4;
+const CONNECTION_TITLE_DOT_X = 12;
+const CONNECTION_TITLE_DOT_Y = 22;
+const CONNECTION_TITLE_DOT_RADIUS = 3;
+const CONNECTION_TITLE_TEXT_X = 20;
+const CONNECTION_TITLE_TEXT_Y = 28;
 
 const ARROW_UP = "\u25B2"; // ▲
 const ARROW_DOWN = "\u25BC"; // ▼
@@ -328,9 +329,24 @@ function formatSignedChangeRate(rate: number, sign: QuoteSample["sign"]): string
   return `${amount}%`;
 }
 
-function viewStateBar(connection: SafeStockActionView["connection"]): string {
-  const color = getConnectionColor(connection === "waiting" ? undefined : connection) ?? COLOR_TEXT_MUTED;
-  return `<rect data-role="state-bar" x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${color}" />`;
+function getConnectionTitleColor(
+  connection: SafeStockActionView["connection"] | undefined,
+): string {
+  switch (connection) {
+    case "LIVE":
+      return COLOR_CONN_LIVE;
+    case "BACKUP":
+      return COLOR_CONN_BACKUP;
+    case "BROKEN":
+      return COLOR_CONN_BROKEN;
+    default:
+      return COLOR_TEXT_MUTED;
+  }
+}
+
+function renderConnectionTitle(displayName: string, fontSize: number, color: string): string {
+  return `<circle data-role="connection-dot" cx="${CONNECTION_TITLE_DOT_X}" cy="${CONNECTION_TITLE_DOT_Y}" r="${CONNECTION_TITLE_DOT_RADIUS}" fill="${color}" />
+  <text data-role="stock-name" x="${CONNECTION_TITLE_TEXT_X}" y="${CONNECTION_TITLE_TEXT_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" font-weight="bold" fill="${color}">${escapeXml(displayName)}</text>`;
 }
 
 function renderInvalidStockActionView(): string {
@@ -339,7 +355,6 @@ function renderInvalidStockActionView(): string {
   <text x="72" y="64" font-family="Arial, Helvetica, sans-serif" font-size="30" fill="${COLOR_FALL}" text-anchor="middle">!</text>
   <text x="72" y="94" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_TEXT}" text-anchor="middle">표시 오류</text>
   <text x="72" y="114" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_MUTED}" text-anchor="middle">화면 데이터를 확인하세요</text>
-  ${viewStateBar("BROKEN")}
 </svg>`;
 }
 
@@ -362,11 +377,10 @@ function renderStockActionError(view: SafeStockActionView): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   ${renderSessionPill(getSessionBadgeLabel(view.session), sessionColor)}
-  <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${getNameFontSize(displayName)}" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(displayName)}</text>
+  ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor("BROKEN"))}
   <text x="72" y="68" font-family="Arial, Helvetica, sans-serif" font-size="28" fill="${COLOR_FALL}" text-anchor="middle">${errorCopy.icon}</text>
   <text x="72" y="96" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_TEXT}" text-anchor="middle">${errorCopy.label}</text>
   <text x="72" y="116" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_MUTED}" text-anchor="middle">${errorCopy.hint}</text>
-  ${viewStateBar("BROKEN")}
 </svg>`;
 }
 
@@ -378,12 +392,11 @@ function renderStockActionWaiting(view: SafeStockActionView): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   ${renderSessionPill(getSessionBadgeLabel(view.session), getSessionColor(view.session))}
-  <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${getNameFontSize(displayName)}" font-weight="bold" fill="${view.stale ? COLOR_TEXT_STALE : COLOR_TEXT}">${escapeXml(displayName)}</text>
+  ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor(view.connection))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${escapeXml(truncateName(view.instrument.symbol.toUpperCase(), 10))}</text>
   ${view.connection === "BROKEN" ? "" : renderLoadingIndicator(72, 72, 22)}
   <text x="72" y="104" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${stateColor}" text-anchor="middle">${status}</text>
   <text x="72" y="122" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_MUTED}" text-anchor="middle">${view.session === "CLOSED" ? "장 마감 시세 준비" : "시세 연결 준비"}</text>
-  ${viewStateBar(view.connection)}
 </svg>`;
 }
 
@@ -392,11 +405,10 @@ function renderStockActionRecovery(view: SafeStockActionView): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="#1b4332"/>
   ${renderSessionPill(getSessionBadgeLabel(view.session), getSessionColor(view.session))}
-  <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${getNameFontSize(displayName)}" font-weight="bold" fill="${COLOR_TEXT}">${escapeXml(displayName)}</text>
+  ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor("LIVE"))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#9ad1a7">연결 상태</text>
   <text x="72" y="80" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="${COLOR_RISE}" text-anchor="middle">✓</text>
   <text x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="15" fill="${COLOR_RISE}" text-anchor="middle">연결 회복</text>
-  ${viewStateBar("LIVE")}
 </svg>`;
 }
 
@@ -419,12 +431,11 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   ${renderSessionPill(getSessionBadgeLabel(view.session), getSessionColor(view.session))}
-  <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="${getNameFontSize(displayName)}" font-weight="bold" fill="${view.stale ? COLOR_TEXT_STALE : COLOR_TEXT}">${escapeXml(displayName)}</text>
+  ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor(view.connection))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${escapeXml(truncateName(view.instrument.symbol.toUpperCase(), 10))}</text>
   <text x="72" y="82" font-family="Arial, Helvetica, sans-serif" font-size="${getPriceFontSize(priceText)}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceText)}</text>
   <text x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(rateText)}</text>
   ${renderStatusLabel(statusText, statusColor, view.refreshing)}
-  ${viewStateBar(view.connection)}
 </svg>`;
 }
 
@@ -522,7 +533,7 @@ export function renderRecoveryCard(name: string): string {
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#9ad1a7">실시간 복구</text>
   <text x="72" y="72" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="${COLOR_RISE}" text-anchor="middle">✓</text>
   <text x="72" y="102" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${COLOR_RISE}" text-anchor="middle">연결 회복</text>
-  <rect x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${COLOR_CONN_LIVE}" />
+  <rect x="8" y="136" width="128" height="4" rx="2" fill="${COLOR_CONN_LIVE}" />
 </svg>`;
 }
 
@@ -551,7 +562,7 @@ export function renderConnectedCard(
   ${loadingMarkup}
   <text x="72" y="${session === "CLOSED" ? "78" : "100"}" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${statusColor}" text-anchor="middle">${statusText}</text>
   <text x="72" y="${session === "CLOSED" ? "102" : "120"}" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="${COLOR_CONN_LIVE}" text-anchor="middle">실시간 연결됨</text>
-  <rect x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${COLOR_CONN_LIVE}" />
+  <rect x="8" y="136" width="128" height="4" rx="2" fill="${COLOR_CONN_LIVE}" />
 </svg>`;
 }
 
@@ -632,7 +643,7 @@ export function renderStockCard(
   <!-- 변동률 (우측 하단) -->
   <text x="132" y="108" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}" text-anchor="end">${escapeXml(rateStr)}</text>
   ${statusMarkup}
-  ${connectionColor ? `<rect x="${CONNECTION_LINE_X}" y="${CONNECTION_LINE_Y}" width="${CONNECTION_LINE_WIDTH}" height="${CONNECTION_LINE_HEIGHT}" rx="2" fill="${connectionColor}" />` : ""}
+  ${connectionColor ? `<rect x="8" y="136" width="128" height="4" rx="2" fill="${connectionColor}" />` : ""}
 </svg>`;
 }
 

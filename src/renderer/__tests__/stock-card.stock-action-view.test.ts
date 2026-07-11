@@ -43,6 +43,26 @@ function expectValidSvg(svg: string): void {
   window.close();
 }
 
+function expectConnectionTitle(svg: string, color: string): void {
+  const window = new Window();
+  const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
+
+  expect(document.querySelector('[data-role="connection-dot"]')?.getAttribute("fill")).toBe(color);
+  expect(document.querySelector('[data-role="stock-name"]')?.getAttribute("fill")).toBe(color);
+  expect(document.querySelector('[data-role="state-bar"]')).toBeNull();
+  window.close();
+}
+
+function expectNoConnectionTitle(svg: string): void {
+  const window = new Window();
+  const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
+
+  expect(document.querySelector('[data-role="connection-dot"]')).toBeNull();
+  expect(document.querySelector('[data-role="stock-name"]')).toBeNull();
+  expect(document.querySelector('[data-role="state-bar"]')).toBeNull();
+  window.close();
+}
+
 describe("renderStockActionView", () => {
   it("uses the injected session and renders the compact domestic quote layout", () => {
     const svg = renderStockActionView(view({ session: "PRE" }));
@@ -54,7 +74,7 @@ describe("renderStockActionView", () => {
     expect(svg).toContain("72,100");
     expect(svg).toContain("▲ +1.25%");
     expect(svg).toContain("실시간");
-    expect(svg).toContain('data-role="state-bar"');
+    expectConnectionTitle(svg, "#00c853");
     expect(svg).not.toContain("1,250");
   });
 
@@ -79,7 +99,14 @@ describe("renderStockActionView", () => {
     expect(svg).toContain("▼ -0.68%");
     expect(svg).toContain("애프터");
     expect(svg).toContain("백업");
-    expect(svg).toContain("#ffd54f");
+    expectConnectionTitle(svg, "#7dd3fc");
+  });
+
+  it("renders a red connection title for a broken quote", () => {
+    const svg = renderStockActionView(view({ connection: "BROKEN" }));
+
+    expectValidSvg(svg);
+    expectConnectionTitle(svg, "#ff1744");
   });
 
   it("is deterministic when only non-visible quote metadata changes", () => {
@@ -102,10 +129,11 @@ describe("renderStockActionView", () => {
     const refreshing = renderStockActionView(view({ refreshing: true }));
 
     expect(stale).toContain("백업 · 지연");
-    expect(stale).toContain("#ffd54f");
+    expectConnectionTitle(stale, "#7dd3fc");
     expect(refreshing).toContain("새로고침 중");
     expect(refreshing).toContain('data-role="loading-indicator"');
     expect(refreshing).toContain("72,100");
+    expectConnectionTitle(refreshing, "#00c853");
   });
 
   it("renders waiting and recovery states with the injected session", () => {
@@ -119,9 +147,10 @@ describe("renderStockActionView", () => {
     expect(waiting).toContain("데이터 대기");
     expect(waiting).toContain("마감");
     expect(waiting).toContain('data-role="loading-indicator"');
+    expectConnectionTitle(waiting, "#7f8aa8");
     expect(recovery).toContain("연결 회복");
     expect(recovery).toContain("프리");
-    expect(recovery).toContain('data-role="state-bar"');
+    expectConnectionTitle(recovery, "#00c853");
   });
 
   it.each<[KisErrorCode, string]>([
@@ -146,7 +175,7 @@ describe("renderStockActionView", () => {
     expect(svg).toContain(label);
     expect(svg).not.toContain(secret);
     expect(svg).not.toContain("APPSECRET");
-    expect(svg).toContain('data-role="state-bar"');
+    expectConnectionTitle(svg, "#ff1744");
   });
 
   it("escapes instrument text while preserving valid names and symbols", () => {
@@ -193,6 +222,7 @@ describe("renderStockActionView", () => {
     expect(svg).toContain("표시 오류");
     expect(svg).not.toContain("NaN");
     expect(svg).not.toContain("Infinity");
+    expectNoConnectionTitle(svg);
   });
 
   it("never executes accessors and safely rejects hostile proxies", () => {
