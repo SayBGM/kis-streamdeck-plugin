@@ -69,8 +69,9 @@ Stream Deck App
 각각 버튼에 구별 가능한 에러 카드로 표시.
 
 **`stock-card.ts` 시각적 상태 표시**:
-- 카드 하단 4px 컬러 바: LIVE=초록, BACKUP=노랑, BROKEN=빨강
-- stale 상태(마지막 데이터 수신 후 20초 경과): 종목명 노랑 표시
+- 종목명과 앞쪽 작은 점: LIVE=초록, BACKUP=파랑, BROKEN=빨강, 대기=회색
+- stale 상태(마지막 데이터 수신 후 20초 경과): 종목명 상태색은 유지하고 하단 지연 문구를 노랑으로 표시
+- 하단 연결 상태 컬러 바는 사용하지 않음
 - BROKEN→LIVE 회복 시 2초간 회복 알림 카드 표시 후 일반 카드 복원
 - `renderStockCard`, `renderWaitingCard`, `renderConnectedCard`, `renderSetupCard`, `renderErrorCard`, `renderRecoveryCard` 함수 제공
 
