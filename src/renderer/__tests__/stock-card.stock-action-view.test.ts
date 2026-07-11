@@ -49,6 +49,7 @@ function expectConnectionTitle(svg: string, color: string): void {
 
   expect(document.querySelector('[data-role="connection-dot"]')?.getAttribute("fill")).toBe(color);
   expect(document.querySelector('[data-role="stock-name"]')?.getAttribute("fill")).toBe(color);
+  expect(document.querySelector('[data-role="stock-name"]')?.getAttribute("x")).toBe("12");
   expect(document.querySelector('[data-role="state-bar"]')).toBeNull();
   window.close();
 }
