@@ -414,6 +414,7 @@ function renderStockActionRecovery(view: SafeStockActionView): string {
 
 function renderStockActionQuote(view: SafeStockActionView): string {
   const quote = view.quote!;
+  const effectiveRefreshing = view.connection !== "BROKEN" && view.refreshing;
   const displayName = truncateName(view.instrument.name, 8);
   const priceText = formatPrice(quote.price, view.instrument.market);
   const rateText = formatSignedChangeRate(quote.changeRate, quote.sign);
@@ -421,11 +422,12 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   const statusText = getConnectionStatusText(
     view.connection === "waiting" ? undefined : view.connection,
     view.stale,
-    view.refreshing,
+    effectiveRefreshing,
   ) ?? "대기";
   const statusColor = getConnectionTextColor(
     view.connection === "waiting" ? undefined : view.connection,
-    view.refreshing,
+    view.stale,
+    effectiveRefreshing,
   );
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
@@ -435,7 +437,7 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${escapeXml(truncateName(view.instrument.symbol.toUpperCase(), 10))}</text>
   <text x="72" y="82" font-family="Arial, Helvetica, sans-serif" font-size="${getPriceFontSize(priceText)}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceText)}</text>
   <text x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(rateText)}</text>
-  ${renderStatusLabel(statusText, statusColor, view.refreshing)}
+  ${renderStatusLabel(statusText, statusColor, effectiveRefreshing)}
 </svg>`;
 }
 
@@ -619,6 +621,7 @@ export function renderStockCard(
   );
   const statusColor = getConnectionTextColor(
     connectionState,
+    renderOptions.isStale ?? false,
     renderOptions.isRefreshing ?? false
   );
   const statusMarkup = renderStatusLabel(
@@ -673,17 +676,17 @@ function getSessionColor(session: MarketSession): string {
 
 function getConnectionTextColor(
   connectionState: StreamConnectionState | null | undefined,
+  isStale: boolean,
   isRefreshing: boolean
 ): string {
-  if (isRefreshing) return COLOR_TEXT_STALE;
+  if (connectionState === "BROKEN") return COLOR_CONN_BROKEN;
+  if (isRefreshing || isStale) return COLOR_TEXT_STALE;
 
   switch (connectionState) {
     case "LIVE":
       return COLOR_CONN_LIVE;
     case "BACKUP":
       return COLOR_CONN_BACKUP;
-    case "BROKEN":
-      return COLOR_CONN_BROKEN;
     default:
       return COLOR_TEXT_MUTED;
   }
@@ -728,17 +731,21 @@ function getConnectionStatusText(
   isStale: boolean,
   isRefreshing: boolean
 ): string | null {
+  if (connectionState === "BROKEN") return "연결 확인 필요";
   if (isRefreshing) return "새로고침 중";
+  if (isStale) {
+    if (connectionState === "BACKUP") return "백업 · 지연";
+    if (connectionState === "LIVE") return "시세 지연";
+    return "지연";
+  }
 
   switch (connectionState) {
     case "LIVE":
       return "실시간";
-    case "BROKEN":
-      return "연결 끊김";
     case "BACKUP":
-      return isStale ? "백업 · 지연" : "백업";
+      return "백업";
     default:
-      return isStale ? "지연" : null;
+      return null;
   }
 }
 

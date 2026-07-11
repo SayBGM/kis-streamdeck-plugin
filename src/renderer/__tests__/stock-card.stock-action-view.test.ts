@@ -64,6 +64,17 @@ function expectNoConnectionTitle(svg: string): void {
   window.close();
 }
 
+function expectStatusLabel(svg: string, text: string, color: string): void {
+  const window = new Window();
+  const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
+  const label = Array.from(document.querySelectorAll("text"))
+    .find((node) => node.textContent === text);
+
+  expect(label, `status label ${text}`).toBeDefined();
+  expect(label?.getAttribute("fill")).toBe(color);
+  window.close();
+}
+
 describe("renderStockActionView", () => {
   it("uses the injected session and renders the compact domestic quote layout", () => {
     const svg = renderStockActionView(view({ session: "PRE" }));
@@ -101,13 +112,17 @@ describe("renderStockActionView", () => {
     expect(svg).toContain("애프터");
     expect(svg).toContain("백업");
     expectConnectionTitle(svg, "#7dd3fc");
+    expectStatusLabel(svg, "백업", "#7dd3fc");
+    expect(svg).not.toContain("#ffd54f");
   });
 
-  it("renders a red connection title for a broken quote", () => {
+  it("prioritizes the broken status copy and color for a broken quote", () => {
     const svg = renderStockActionView(view({ connection: "BROKEN" }));
 
     expectValidSvg(svg);
     expectConnectionTitle(svg, "#ff1744");
+    expectStatusLabel(svg, "연결 확인 필요", "#ff1744");
+    expect(svg).not.toContain("연결 끊김");
   });
 
   it("is deterministic when only non-visible quote metadata changes", () => {
@@ -125,16 +140,44 @@ describe("renderStockActionView", () => {
     expect(renderStockActionView(first)).toBe(renderStockActionView(first));
   });
 
-  it("renders stale and refreshing control states without replacing quote data", () => {
-    const stale = renderStockActionView(view({ connection: "BACKUP", stale: true }));
-    const refreshing = renderStockActionView(view({ refreshing: true }));
+  it.each([
+    { connection: "BACKUP" as const, label: "백업 · 지연", titleColor: "#7dd3fc" },
+    { connection: "LIVE" as const, label: "시세 지연", titleColor: "#00c853" },
+  ])("renders $connection stale quotes with connection-colored titles and a yellow status", ({ connection, label, titleColor }) => {
+    const svg = renderStockActionView(view({ connection, stale: true }));
 
-    expect(stale).toContain("백업 · 지연");
-    expectConnectionTitle(stale, "#7dd3fc");
-    expect(refreshing).toContain("새로고침 중");
-    expect(refreshing).toContain('data-role="loading-indicator"');
-    expect(refreshing).toContain("72,100");
-    expectConnectionTitle(refreshing, "#00c853");
+    expectStatusLabel(svg, label, "#ffd54f");
+    expectConnectionTitle(svg, titleColor);
+    expect(svg).toContain("72,100");
+  });
+
+  it("keeps a broken stale quote red instead of downgrading it to a stale warning", () => {
+    const svg = renderStockActionView(view({ connection: "BROKEN", stale: true }));
+
+    expectStatusLabel(svg, "연결 확인 필요", "#ff1744");
+    expectConnectionTitle(svg, "#ff1744");
+    expect(svg).not.toContain("시세 지연");
+  });
+
+  it("suppresses refreshing UI when the connection is broken", () => {
+    const svg = renderStockActionView(view({ connection: "BROKEN", refreshing: true }));
+
+    expectStatusLabel(svg, "연결 확인 필요", "#ff1744");
+    expectConnectionTitle(svg, "#ff1744");
+    expect(svg).not.toContain("새로고침 중");
+    expect(svg).not.toContain('data-role="loading-indicator"');
+  });
+
+  it.each([
+    { connection: "LIVE" as const, titleColor: "#00c853" },
+    { connection: "BACKUP" as const, titleColor: "#7dd3fc" },
+  ])("keeps refreshing UI for $connection quotes", ({ connection, titleColor }) => {
+    const svg = renderStockActionView(view({ connection, refreshing: true }));
+
+    expectStatusLabel(svg, "새로고침 중", "#ffd54f");
+    expect(svg).toContain('data-role="loading-indicator"');
+    expect(svg).toContain("72,100");
+    expectConnectionTitle(svg, titleColor);
   });
 
   it("renders waiting and recovery states with the injected session", () => {
@@ -176,6 +219,19 @@ describe("renderStockActionView", () => {
     expect(svg).toContain(label);
     expect(svg).not.toContain(secret);
     expect(svg).not.toContain("APPSECRET");
+    expectConnectionTitle(svg, "#ff1744");
+  });
+
+  it("prioritizes the error-only screen over a quote when the connection is broken", () => {
+    const svg = renderStockActionView(view({
+      connection: "BROKEN",
+      error: { code: "NETWORK", message: "socket disconnected" },
+    }));
+
+    expectValidSvg(svg);
+    expect(svg).toContain("연결 오류");
+    expect(svg).not.toContain("72,100");
+    expect(svg).not.toContain("▲ +1.25%");
     expectConnectionTitle(svg, "#ff1744");
   });
 

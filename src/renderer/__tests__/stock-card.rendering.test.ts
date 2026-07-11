@@ -27,7 +27,7 @@ describe("stock-card rendering", () => {
     });
 
     expect(svg).toContain("AAPL");
-    expect(svg).toContain("연결 끊김");
+    expect(svg).toContain("연결 확인 필요");
     expect(svg).toContain("정규");
   });
 
