@@ -10,6 +10,13 @@
   ];
   var requestSequence = 0;
   var UNSAFE_DATA = {};
+  // Bound untrusted snapshot work before cloning or rendering diagnostics.
+  var SAFE_DATA_MAX_DEPTH = 32;
+  var SAFE_DATA_MAX_NODES = 4096;
+  var SAFE_DATA_MAX_PROPERTIES = 8192;
+  var SAFE_DATA_MAX_ARRAY_LENGTH = 512;
+  var SAFE_DATA_MAX_STRING_LENGTH = 16384;
+  var SAFE_DATA_MAX_TOTAL_STRING_LENGTH = 262144;
 
   function byId(id) {
     return document.getElementById(id);
@@ -37,13 +44,23 @@
     return Object.prototype.hasOwnProperty.call(value, key);
   }
 
-  function safeDataClone(value, ancestors) {
-    if (value === null || typeof value === "string" || typeof value === "boolean") {
-      return value;
+  function consumeSafeString(value, budget) {
+    if (value.length > SAFE_DATA_MAX_STRING_LENGTH) return false;
+    budget.stringLength += value.length;
+    return budget.stringLength <= SAFE_DATA_MAX_TOTAL_STRING_LENGTH;
+  }
+
+  function safeDataClone(value, budget, depth) {
+    if (depth > SAFE_DATA_MAX_DEPTH) return UNSAFE_DATA;
+    budget.nodes += 1;
+    if (budget.nodes > SAFE_DATA_MAX_NODES) return UNSAFE_DATA;
+    if (typeof value === "string") {
+      return consumeSafeString(value, budget) ? value : UNSAFE_DATA;
     }
+    if (value === null || typeof value === "boolean") return value;
     if (typeof value === "number") return Number.isFinite(value) ? value : UNSAFE_DATA;
     if (typeof value !== "object") return UNSAFE_DATA;
-    if (ancestors.indexOf(value) >= 0) return UNSAFE_DATA;
+    if (budget.ancestors.has(value)) return UNSAFE_DATA;
 
     var isArray = Array.isArray(value);
     var prototype;
@@ -61,66 +78,76 @@
     } catch (_error) {
       return UNSAFE_DATA;
     }
+    budget.properties += descriptors.length;
+    if (budget.properties > SAFE_DATA_MAX_PROPERTIES) return UNSAFE_DATA;
+    for (var keyIndex = 0; keyIndex < descriptors.length; keyIndex += 1) {
+      if (!consumeSafeString(descriptors[keyIndex][0], budget)) return UNSAFE_DATA;
+    }
 
-    var nextAncestors = ancestors.concat([value]);
-    if (isArray) {
-      var lengthDescriptor = null;
-      for (var descriptorIndex = 0; descriptorIndex < descriptors.length; descriptorIndex += 1) {
-        if (descriptors[descriptorIndex][0] === "length") {
-          lengthDescriptor = descriptors[descriptorIndex][1];
-          break;
+    budget.ancestors.add(value);
+    try {
+      if (isArray) {
+        var lengthDescriptor = null;
+        for (var descriptorIndex = 0; descriptorIndex < descriptors.length; descriptorIndex += 1) {
+          if (descriptors[descriptorIndex][0] === "length") {
+            lengthDescriptor = descriptors[descriptorIndex][1];
+            break;
+          }
         }
-      }
-      if (
-        !lengthDescriptor ||
-        lengthDescriptor.enumerable ||
-        !hasOwn(lengthDescriptor, "value") ||
-        !Number.isSafeInteger(lengthDescriptor.value) ||
-        lengthDescriptor.value < 0
-      ) {
-        return UNSAFE_DATA;
-      }
-      var arrayCopy = new Array(lengthDescriptor.value);
-      for (var arrayIndex = 0; arrayIndex < descriptors.length; arrayIndex += 1) {
-        var arrayEntry = descriptors[arrayIndex];
-        var arrayKey = arrayEntry[0];
-        var arrayDescriptor = arrayEntry[1];
-        if (arrayKey === "length") continue;
         if (
-          !/^(0|[1-9][0-9]*)$/.test(arrayKey) ||
-          !arrayDescriptor.enumerable ||
-          !hasOwn(arrayDescriptor, "value")
+          !lengthDescriptor ||
+          lengthDescriptor.enumerable ||
+          !hasOwn(lengthDescriptor, "value") ||
+          !Number.isSafeInteger(lengthDescriptor.value) ||
+          lengthDescriptor.value < 0 ||
+          lengthDescriptor.value > SAFE_DATA_MAX_ARRAY_LENGTH
         ) {
           return UNSAFE_DATA;
         }
-        var numericIndex = Number(arrayKey);
-        if (
-          !Number.isSafeInteger(numericIndex) ||
-          numericIndex < 0 ||
-          numericIndex >= lengthDescriptor.value ||
-          numericIndex >= 4294967295
-        ) {
+        var arrayCopy = new Array(lengthDescriptor.value);
+        for (var arrayIndex = 0; arrayIndex < descriptors.length; arrayIndex += 1) {
+          var arrayEntry = descriptors[arrayIndex];
+          var arrayKey = arrayEntry[0];
+          var arrayDescriptor = arrayEntry[1];
+          if (arrayKey === "length") continue;
+          if (
+            !/^(0|[1-9][0-9]*)$/.test(arrayKey) ||
+            !arrayDescriptor.enumerable ||
+            !hasOwn(arrayDescriptor, "value")
+          ) {
+            return UNSAFE_DATA;
+          }
+          var numericIndex = Number(arrayKey);
+          if (
+            !Number.isSafeInteger(numericIndex) ||
+            numericIndex < 0 ||
+            numericIndex >= lengthDescriptor.value ||
+            numericIndex >= 4294967295
+          ) {
+            return UNSAFE_DATA;
+          }
+          var arrayValue = safeDataClone(arrayDescriptor.value, budget, depth + 1);
+          if (arrayValue === UNSAFE_DATA) return UNSAFE_DATA;
+          arrayCopy[numericIndex] = arrayValue;
+        }
+        return arrayCopy;
+      }
+
+      var objectCopy = Object.create(null);
+      for (var objectIndex = 0; objectIndex < descriptors.length; objectIndex += 1) {
+        var objectEntry = descriptors[objectIndex];
+        var objectDescriptor = objectEntry[1];
+        if (!objectDescriptor.enumerable || !hasOwn(objectDescriptor, "value")) {
           return UNSAFE_DATA;
         }
-        var arrayValue = safeDataClone(arrayDescriptor.value, nextAncestors);
-        if (arrayValue === UNSAFE_DATA) return UNSAFE_DATA;
-        arrayCopy[numericIndex] = arrayValue;
+        var objectValue = safeDataClone(objectDescriptor.value, budget, depth + 1);
+        if (objectValue === UNSAFE_DATA) return UNSAFE_DATA;
+        objectCopy[objectEntry[0]] = objectValue;
       }
-      return arrayCopy;
+      return objectCopy;
+    } finally {
+      budget.ancestors.delete(value);
     }
-
-    var objectCopy = Object.create(null);
-    for (var objectIndex = 0; objectIndex < descriptors.length; objectIndex += 1) {
-      var objectEntry = descriptors[objectIndex];
-      var objectDescriptor = objectEntry[1];
-      if (!objectDescriptor.enumerable || !hasOwn(objectDescriptor, "value")) {
-        return UNSAFE_DATA;
-      }
-      var objectValue = safeDataClone(objectDescriptor.value, nextAncestors);
-      if (objectValue === UNSAFE_DATA) return UNSAFE_DATA;
-      objectCopy[objectEntry[0]] = objectValue;
-    }
-    return objectCopy;
   }
 
   function copyKnownPreferences(value) {
@@ -150,7 +177,12 @@
   function copyKnownSnapshot(value) {
     var safeValue;
     try {
-      safeValue = safeDataClone(value, []);
+      safeValue = safeDataClone(value, {
+        nodes: 0,
+        properties: 0,
+        stringLength: 0,
+        ancestors: new WeakSet(),
+      }, 0);
     } catch (_error) {
       return null;
     }
@@ -161,6 +193,9 @@
       Array.isArray(safeValue) ||
       !hasOwn(safeValue, "schemaVersion") ||
       safeValue.schemaVersion !== 2 ||
+      !hasOwn(safeValue, "snapshotSequence") ||
+      !Number.isSafeInteger(safeValue.snapshotSequence) ||
+      safeValue.snapshotSequence < 1 ||
       !hasOwn(safeValue, "settingsRevision") ||
       !Number.isSafeInteger(safeValue.settingsRevision) ||
       safeValue.settingsRevision < 0 ||
@@ -179,6 +214,7 @@
     if (!safePreferences) return null;
     var copy = Object.create(null);
     copy.schemaVersion = safeValue.schemaVersion;
+    copy.snapshotSequence = safeValue.snapshotSequence;
     copy.settingsRevision = safeValue.settingsRevision;
     copy.credentialsConfigured = safeValue.credentialsConfigured;
     if (hasOwn(safeValue, "maskedAppKey")) copy.maskedAppKey = safeValue.maskedAppKey;
@@ -311,6 +347,7 @@
     this.pendingRequests = Object.create(null);
     this.latestRequestBySection = Object.create(null);
     this.latestSafeSnapshot = null;
+    this.latestSnapshotSequence = 0;
     this.credentialEditVersion = 0;
     this.preferencesEditVersion = 0;
   }
@@ -431,17 +468,18 @@
   StockPropertyInspector.prototype.inspectSnapshot = function (snapshot) {
     var safeSnapshot = copyKnownSnapshot(snapshot);
     if (!safeSnapshot) return { safe: false, snapshot: null };
-    if (
-      !this.latestSafeSnapshot ||
-      safeSnapshot.settingsRevision >= this.latestSafeSnapshot.settingsRevision
-    ) {
+    if (safeSnapshot.snapshotSequence > this.latestSnapshotSequence) {
       this.latestSafeSnapshot = safeSnapshot;
+      this.latestSnapshotSequence = safeSnapshot.snapshotSequence;
     }
     return { safe: true, snapshot: safeSnapshot };
   };
 
   StockPropertyInspector.prototype.applySafeSnapshot = function (safeSnapshot, options) {
     options = options || {};
+    if (safeSnapshot !== this.latestSafeSnapshot) {
+      return { fresh: false, applied: false };
+    }
     var settingsRevision = safeSnapshot.settingsRevision;
     if (settingsRevision < this.settingsRevision) {
       if (options.applyStaleDiagnostics === true) {

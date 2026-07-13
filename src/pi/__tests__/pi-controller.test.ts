@@ -122,6 +122,28 @@ function lastResponse(harness: ReturnType<typeof createHarness>) {
 }
 
 describe("PiController", () => {
+  it("assigns monotonic snapshot sequences to settings, acknowledgement, and diagnostics messages", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    try {
+      await harness.controller.propertyInspectorDidAppear("ctx-1", "domestic");
+      await harness.controller.handleCommand("ctx-1", "domestic", {
+        type: "settings/request",
+        requestId: "settings-1",
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect(harness.sent).toHaveLength(3));
+
+      expect(harness.sent.map(({ message }) => message.snapshot?.snapshotSequence))
+        .toEqual([1, 2, 3]);
+      expect(harness.sent.map(({ message }) => "type" in message ? message.type : "ack"))
+        .toEqual(["settings/update", "ack", "diagnostics/update"]);
+    } finally {
+      harness.controller.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it("waits for v1 migration and exposes only masked credential state", async () => {
     const harness = createHarness({
       appKey: "ABCDEFGH1234",

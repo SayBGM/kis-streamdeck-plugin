@@ -116,6 +116,7 @@ describe("PI protocol", () => {
       ok: true,
       snapshot: {
         schemaVersion: 2,
+        snapshotSequence: 1,
         settingsRevision: 7,
         credentialsConfigured: true,
         maskedAppKey: "ABC••••XYZ",

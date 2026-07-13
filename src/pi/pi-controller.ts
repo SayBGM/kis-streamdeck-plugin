@@ -366,6 +366,7 @@ export class PiController {
   private interval: TimerHandle | undefined;
   private diagnosticsPush: Promise<void> | undefined;
   private nextGeneration = 0;
+  private snapshotSequence = 0;
   private controllerGeneration = 1;
   private commandTail: Promise<void> = Promise.resolve();
   private destroyed = false;
@@ -553,8 +554,14 @@ export class PiController {
     const settings = snapshot.settings;
     const diagnostics = this.buildDiagnostics(settings);
     const maskedAppKey = maskAppKey(settings.appKey);
+    const snapshotSequence = this.snapshotSequence + 1;
+    if (!Number.isSafeInteger(snapshotSequence)) {
+      throw new Error("Property Inspector snapshot sequence exhausted.");
+    }
+    this.snapshotSequence = snapshotSequence;
     return {
       schemaVersion: 2,
+      snapshotSequence,
       settingsRevision: settings.settingsRevision,
       credentialsConfigured: configured(settings),
       ...(maskedAppKey ? { maskedAppKey } : {}),
