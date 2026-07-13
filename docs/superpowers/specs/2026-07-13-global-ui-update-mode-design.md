@@ -69,7 +69,7 @@ PI 스냅샷에서 간격은 다음 세 관점으로 확인한다.
 | 설정값(configured) | `snapshot.diagnostics.render.configuredIntervalMs` | 현재 전역 설정에 구성된 스로틀 간격으로, 저장값과 같아야 함 |
 | 유효값(effective) | `snapshot.diagnostics.render.effectiveIntervalMs` | 스케줄러에 적용되는 일반 화면 간격. `realtime`은 50ms, `throttled`는 설정값 |
 
-같은 진단 객체의 `uiUpdateMode`와 `submitted`, `coalesced`, `renders`, `commits`, 중복·stale skip, failure 카운터로 LWW와 IPC 생략 동작을 함께 확인한다.
+같은 진단 객체의 `uiUpdateMode`, `submitted`, `coalesced`, `renders`, `commits`, `semanticSkips`, `imageSkips`, `supersededSkips`, `staleDrops`, `failures`로 LWW와 IPC 생략 동작을 함께 확인한다.
 
 ## 테스트와 완료 기준
 
@@ -77,7 +77,7 @@ PI 스냅샷에서 간격은 다음 세 관점으로 확인한다.
 
 1. 정책 단위 테스트가 두 모드, 50ms 유효값, 500~1000ms/100ms 허용 집합과 그 밖의 값 거부를 검증한다.
 2. 설정 테스트가 신규·손상·불완전 설정과 구형 2초·5초·10초를 `throttled + 1000ms`로 이전하고, 유효한 모드·간격 쌍과 `schemaVersion: 2`를 보존하는지 검증한다.
-3. 스케줄러 테스트가 각 유효 간격의 `normal` LWW, 고정 1초 `control`, 대기 우회 `immediate`, 실행 중 간격 재예약, generation fencing과 비동기 commit 직렬화를 검증한다.
+3. 스케줄러 테스트가 대표 유효 간격(50/700/1000ms)의 `normal` LWW, 고정 1초 `control`, 대기 우회 `immediate`, 실행 중 간격 재예약, generation fencing과 비동기 commit 직렬화를 검증한다.
 4. 컨트롤러·런타임 테스트가 국내·미국 버튼에 같은 전역 유효 간격을 적용하고, UI 설정만 바꿀 때 활성 타깃의 간격만 갱신하며 재연결·재구독·REST 정책 작업을 만들지 않는지 검증한다.
 5. PI 테스트가 number input 속성, `realtime` 비활성화와 값 보존, 명시 저장, 입력 검증, 전역 안내 문구를 검증한다.
 6. PI protocol/UI 테스트가 preference baseline과 revision, 원격 diff 충돌, push/ACK 역순 도착, 편집 보존, data-only 스냅샷 정제를 검증한다.

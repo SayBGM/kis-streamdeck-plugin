@@ -1,5 +1,7 @@
 # WebSocket 구독 복구와 시세 카드 상태 텍스트 정리 설계
 
+> **후속 정책 안내:** 이 문서의 화면 반영 2·5·10초 정책은 역사 기록이며, [`2026-07-13-global-ui-update-mode-design.md`](./2026-07-13-global-ui-update-mode-design.md) 후속 설계로 대체되었다. WebSocket 구독 복구와 카드 상태 텍스트 정리 등 나머지 내용은 당시 설계 기록으로 유지한다.
+
 ## 배경
 
 2.0.1 플러그인은 KIS WebSocket 연결 자체는 열지만 구독 성공 응답을 현재 제어 작업과 연결하지 못한다. KIS의 실제 구독 응답은 종목 키를 `header.tr_key`에 담지만, `SubscriptionSupervisor`는 `body.output.tr_key`와 `body.input.tr_key`만 읽는다. 그 결과 정상 응답도 키 없는 응답처럼 폐기되고, 5초 제어 타임아웃마다 열린 소켓을 종료한 뒤 지수 백오프로 재연결한다. 사용자는 이 동안 REST 스냅샷만 표시되는 `BACKUP` 상태를 보게 된다.
