@@ -57,7 +57,8 @@ function configuredSettings(
     accessTokenVersion: credentialGeneration,
     preferences: {
       dataMode: "automatic",
-      renderIntervalMs: 2_000,
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 1_000,
       backupPollIntervalMs: 15_000,
     },
   };
@@ -160,7 +161,8 @@ describe("PluginRuntime", () => {
         accessTokenVersion: 1,
         preferences: {
           dataMode: "automatic",
-          renderIntervalMs: 2_000,
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 1_000,
           backupPollIntervalMs: 15_000,
         },
       },
@@ -187,7 +189,8 @@ describe("PluginRuntime", () => {
         accessTokenVersion: 2,
         preferences: {
           dataMode: "automatic",
-          renderIntervalMs: 2_000,
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 1_000,
           backupPollIntervalMs: 15_000,
         },
       },
@@ -207,7 +210,8 @@ describe("PluginRuntime", () => {
         accessTokenVersion: 3,
         preferences: {
           dataMode: "automatic",
-          renderIntervalMs: 2_000,
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 1_000,
           backupPollIntervalMs: 15_000,
         },
       },
@@ -228,7 +232,8 @@ describe("PluginRuntime", () => {
         accessTokenVersion: 2,
         preferences: {
           dataMode: "automatic",
-          renderIntervalMs: 2_000,
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 1_000,
           backupPollIntervalMs: 15_000,
         },
       },
@@ -500,7 +505,11 @@ describe("PluginRuntime", () => {
       appKey: "app-key",
       appSecret: "app-secret",
       credentialGeneration: 1,
-      preferences: { dataMode: "automatic", renderIntervalMs: 5_000 },
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
+      },
     });
     expect(current.accessToken).toBeUndefined();
     expect(current.accessTokenExpiry).toBeUndefined();

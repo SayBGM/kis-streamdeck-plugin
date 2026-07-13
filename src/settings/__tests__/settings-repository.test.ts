@@ -15,7 +15,8 @@ function v2(overrides: Partial<GlobalSettingsV2> = {}): GlobalSettingsV2 {
     accessTokenVersion: 0,
     preferences: {
       dataMode: "automatic",
-      renderIntervalMs: 2_000,
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 1_000,
       backupPollIntervalMs: 30_000,
     },
     ...overrides,
@@ -113,7 +114,10 @@ describe("SettingsRepository initialization", () => {
       schemaVersion: 2,
       settingsRevision: 0,
       external: { keep: true },
-      preferences: { renderIntervalMs: 10_000 },
+      preferences: {
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
+      },
     });
     expect(snapshot.settings).not.toHaveProperty("updateMode");
     expect(snapshot.settings).not.toHaveProperty("throttleMs");
@@ -124,6 +128,44 @@ describe("SettingsRepository initialization", () => {
     expectSettingsError(snapshot.status.error);
     expect(persistence.setGlobalSettings).toHaveBeenCalledTimes(4);
     expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1_000, 2_000, 4_000]);
+  });
+
+  it("persists atomic UI defaults when a stored v2 preference uses an old interval", async () => {
+    const disk: GlobalSettings = {
+      schemaVersion: 2,
+      settingsRevision: 3,
+      credentialGeneration: 0,
+      accessTokenVersion: 0,
+      preferences: {
+        dataMode: "rest-only",
+        renderIntervalMs: 2_000,
+        backupPollIntervalMs: 60_000,
+      },
+    };
+    const persistence = makePersistence(async () => structuredClone(disk));
+    const repository = new SettingsRepository(persistence, {
+      sleep: async () => {},
+    });
+
+    const snapshot = await repository.initialize();
+
+    expect(snapshot.settings.preferences).toMatchObject({
+      dataMode: "rest-only",
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 1_000,
+      backupPollIntervalMs: 60_000,
+    });
+    expect(persistence.setGlobalSettings).toHaveBeenCalledTimes(1);
+    expect(persistence.setGlobalSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: 2,
+        settingsRevision: 3,
+        preferences: expect.objectContaining({
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 1_000,
+        }),
+      }),
+    );
   });
 });
 
@@ -363,7 +405,10 @@ describe("SettingsRepository updates", () => {
         schemaVersion: 2,
         settingsRevision: 5,
         external: { preserved: true },
-        preferences: expect.objectContaining({ renderIntervalMs: 10_000 }),
+        preferences: expect.objectContaining({
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 1_000,
+        }),
       }),
     );
     expect(recovered.settings).not.toHaveProperty("updateMode");

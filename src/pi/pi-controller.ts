@@ -559,6 +559,7 @@ export class PiController {
       ...(maskedAppKey ? { maskedAppKey } : {}),
       preferences: {
         dataMode: settings.preferences.dataMode,
+        uiUpdateMode: settings.preferences.uiUpdateMode,
         renderIntervalMs: settings.preferences.renderIntervalMs,
         backupPollIntervalMs: settings.preferences.backupPollIntervalMs,
       },

@@ -144,7 +144,11 @@ describe("PiController", () => {
         schemaVersion: 2,
         credentialsConfigured: true,
         maskedAppKey: "ABC••••234",
-        preferences: { dataMode: "automatic", renderIntervalMs: 5_000 },
+        preferences: {
+          dataMode: "automatic",
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 1_000,
+        },
       },
     });
     const serialized = JSON.stringify(lastResponse(harness));
@@ -195,7 +199,8 @@ describe("PiController", () => {
       settingsRevision: revision,
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 10_000,
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 600,
         backupPollIntervalMs: 60_000,
       },
     });
@@ -205,7 +210,8 @@ describe("PiController", () => {
       snapshot: {
         preferences: {
           dataMode: "rest-only",
-          renderIntervalMs: 10_000,
+          uiUpdateMode: "realtime",
+          renderIntervalMs: 600,
           backupPollIntervalMs: 60_000,
         },
       },
@@ -217,7 +223,8 @@ describe("PiController", () => {
       settingsRevision: revision,
       preferences: {
         dataMode: "automatic",
-        renderIntervalMs: 2_000,
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
         backupPollIntervalMs: 15_000,
       },
     });
@@ -244,7 +251,8 @@ describe("PiController", () => {
       settingsRevision: staleRevision,
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 10_000,
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
         backupPollIntervalMs: 60_000,
       },
     });
@@ -387,7 +395,8 @@ describe("PiController", () => {
       settingsRevision: revision,
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 10_000,
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 600,
         backupPollIntervalMs: 60_000,
       },
     });

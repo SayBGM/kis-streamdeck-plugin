@@ -3,16 +3,22 @@ import type {
   KisErrorCode,
   KisErrorScope,
 } from "../core/errors.js";
+import {
+  isThrottledRenderIntervalMs,
+  isUiUpdateMode,
+  type ThrottledRenderIntervalMs,
+  type UiUpdateMode,
+} from "../core/ui-update-policy.js";
 import type { ConnectionState } from "../kis/connection-supervisor.js";
 import type { PhysicalSubscriptionState } from "../kis/subscription-supervisor.js";
 
 export type DataMode = "automatic" | "rest-only";
-export type RenderIntervalMs = 2_000 | 5_000 | 10_000;
 export type BackupPollIntervalMs = 15_000 | 30_000 | 60_000;
 
 export interface PiPreferences {
   dataMode: DataMode;
-  renderIntervalMs: RenderIntervalMs;
+  uiUpdateMode: UiUpdateMode;
+  renderIntervalMs: ThrottledRenderIntervalMs;
   backupPollIntervalMs: BackupPollIntervalMs;
 }
 
@@ -180,6 +186,7 @@ function parsePreferences(value: unknown): PiPreferences | null {
   const data = readPlainDataObject(value);
   if (!data || !hasExactKeys(data, [
     "dataMode",
+    "uiUpdateMode",
     "renderIntervalMs",
     "backupPollIntervalMs",
   ])) {
@@ -187,9 +194,8 @@ function parsePreferences(value: unknown): PiPreferences | null {
   }
   if (!(
     (data.dataMode === "automatic" || data.dataMode === "rest-only") &&
-    (data.renderIntervalMs === 2_000 ||
-      data.renderIntervalMs === 5_000 ||
-      data.renderIntervalMs === 10_000) &&
+    isUiUpdateMode(data.uiUpdateMode) &&
+    isThrottledRenderIntervalMs(data.renderIntervalMs) &&
     (data.backupPollIntervalMs === 15_000 ||
       data.backupPollIntervalMs === 30_000 ||
       data.backupPollIntervalMs === 60_000)
@@ -198,6 +204,7 @@ function parsePreferences(value: unknown): PiPreferences | null {
   }
   return copyNullPrototype<PiPreferences>([
     ["dataMode", data.dataMode],
+    ["uiUpdateMode", data.uiUpdateMode],
     ["renderIntervalMs", data.renderIntervalMs],
     ["backupPollIntervalMs", data.backupPollIntervalMs],
   ]);

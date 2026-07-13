@@ -5,14 +5,20 @@ import type {
   OverseasExchange,
 } from "../types/index.js";
 import { KisError } from "../core/errors.js";
+import {
+  isThrottledRenderIntervalMs,
+  isUiUpdateMode,
+  type ThrottledRenderIntervalMs,
+  type UiUpdateMode,
+} from "../core/ui-update-policy.js";
 
 export type DataMode = "automatic" | "rest-only";
-export type RenderIntervalMs = 2_000 | 5_000 | 10_000;
 export type BackupPollIntervalMs = 15_000 | 30_000 | 60_000;
 
 export type GlobalPreferencesV2 = JsonObject & {
   dataMode: DataMode;
-  renderIntervalMs: RenderIntervalMs;
+  uiUpdateMode: UiUpdateMode;
+  renderIntervalMs: ThrottledRenderIntervalMs;
   backupPollIntervalMs: BackupPollIntervalMs;
 };
 
@@ -198,15 +204,6 @@ function parsedNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function migrateRenderInterval(updateMode: unknown, throttleMs: unknown): RenderIntervalMs {
-  if (updateMode !== "hybrid") return 2_000;
-  const parsed = parsedNumber(throttleMs);
-  if (parsed === null) return 2_000;
-  if (parsed <= 2_000) return 2_000;
-  if (parsed <= 5_000) return 5_000;
-  return 10_000;
-}
-
 function migrateBackupPollInterval(pollIntervalSec: unknown): BackupPollIntervalMs {
   const parsed = parsedNumber(pollIntervalSec);
   if (parsed === null) return 30_000;
@@ -224,12 +221,15 @@ function normalizePreferences(record: Readonly<Record<string, unknown>>): Global
     : legacyMode === "poll"
       ? "rest-only"
       : "automatic";
-  const renderIntervalMs: RenderIntervalMs =
-    candidate.renderIntervalMs === 2_000 ||
-    candidate.renderIntervalMs === 5_000 ||
-    candidate.renderIntervalMs === 10_000
-      ? candidate.renderIntervalMs
-      : migrateRenderInterval(legacyMode, record.throttleMs);
+  let uiUpdateMode: UiUpdateMode = "throttled";
+  let renderIntervalMs: ThrottledRenderIntervalMs = 1_000;
+  if (
+    isUiUpdateMode(candidate.uiUpdateMode) &&
+    isThrottledRenderIntervalMs(candidate.renderIntervalMs)
+  ) {
+    uiUpdateMode = candidate.uiUpdateMode;
+    renderIntervalMs = candidate.renderIntervalMs;
+  }
   const backupPollIntervalMs: BackupPollIntervalMs =
     candidate.backupPollIntervalMs === 15_000 ||
     candidate.backupPollIntervalMs === 30_000 ||
@@ -238,6 +238,7 @@ function normalizePreferences(record: Readonly<Record<string, unknown>>): Global
       : migrateBackupPollInterval(record.pollIntervalSec);
 
   migrated.dataMode = dataMode;
+  migrated.uiUpdateMode = uiUpdateMode;
   migrated.renderIntervalMs = renderIntervalMs;
   migrated.backupPollIntervalMs = backupPollIntervalMs;
   return migrated as GlobalPreferencesV2;

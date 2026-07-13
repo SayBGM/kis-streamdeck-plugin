@@ -44,7 +44,8 @@ describe("migrateGlobalSettings", () => {
       accessTokenVersion: 0,
       preferences: {
         dataMode: "automatic",
-        renderIntervalMs: 2_000,
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
         backupPollIntervalMs: 30_000,
       },
     });
@@ -53,22 +54,64 @@ describe("migrateGlobalSettings", () => {
   });
 
   it.each([
-    [undefined, undefined, "automatic", 2_000],
-    ["websocket", "5001", "automatic", 2_000],
-    ["hybrid", "invalid", "automatic", 2_000],
-    ["hybrid", "2000", "automatic", 2_000],
-    ["hybrid", "2001", "automatic", 5_000],
-    ["hybrid", "5000", "automatic", 5_000],
-    ["hybrid", "5001", "automatic", 10_000],
-    ["hybrid", "2001oops", "automatic", 2_000],
-    ["poll", "5001", "rest-only", 2_000],
+    [undefined, undefined, "automatic"],
+    ["websocket", "5001", "automatic"],
+    ["hybrid", "invalid", "automatic"],
+    ["hybrid", "2000", "automatic"],
+    ["hybrid", "2001", "automatic"],
+    ["hybrid", "5000", "automatic"],
+    ["hybrid", "5001", "automatic"],
+    ["hybrid", "2001oops", "automatic"],
+    ["poll", "5001", "rest-only"],
   ] as const)(
-    "maps legacy mode %s with throttle %s to %s/%d",
-    (updateMode, throttleMs, dataMode, renderIntervalMs) => {
+    "maps legacy mode %s with throttle %s to %s and the new UI defaults",
+    (updateMode, throttleMs, dataMode) => {
       const migrated = migrateGlobalSettings({ updateMode, throttleMs });
 
       expect(migrated.preferences.dataMode).toBe(dataMode);
-      expect(migrated.preferences.renderIntervalMs).toBe(renderIntervalMs);
+      expect(migrated.preferences.uiUpdateMode).toBe("throttled");
+      expect(migrated.preferences.renderIntervalMs).toBe(1_000);
+    },
+  );
+
+  it.each([
+    ["realtime", 500],
+    ["realtime", 1_000],
+    ["throttled", 500],
+    ["throttled", 1_000],
+  ] as const)(
+    "preserves a valid %s/%d UI preference pair",
+    (uiUpdateMode, renderIntervalMs) => {
+      const migrated = migrateGlobalSettings({
+        preferences: { uiUpdateMode, renderIntervalMs },
+      });
+
+      expect(migrated.preferences).toMatchObject({
+        uiUpdateMode,
+        renderIntervalMs,
+      });
+    },
+  );
+
+  it.each([
+    ["missing mode", undefined, 500],
+    ["missing interval", "realtime", undefined],
+    ["invalid mode", "automatic", 500],
+    ["invalid interval", "throttled", 550],
+    ["old 2000ms interval", "throttled", 2_000],
+    ["old 5000ms interval", "throttled", 5_000],
+    ["old 10000ms interval", "throttled", 10_000],
+  ])(
+    "atomically restores UI defaults for %s",
+    (_label, uiUpdateMode, renderIntervalMs) => {
+      const migrated = migrateGlobalSettings({
+        preferences: { uiUpdateMode, renderIntervalMs },
+      });
+
+      expect(migrated.preferences).toMatchObject({
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
+      });
     },
   );
 
@@ -163,7 +206,8 @@ describe("migrateGlobalSettings", () => {
       accessTokenVersion: 3,
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 10_000,
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 600,
         backupPollIntervalMs: 60_000,
         extension,
       },
@@ -179,7 +223,8 @@ describe("migrateGlobalSettings", () => {
   it("preserves preference extensions while overwriting known fields canonically", () => {
     const preferences = {
       dataMode: "invalid",
-      renderIntervalMs: 1234,
+      uiUpdateMode: "realtime",
+      renderIntervalMs: 550,
       backupPollIntervalMs: 1234,
       extension: { enabled: true },
     };
@@ -193,7 +238,8 @@ describe("migrateGlobalSettings", () => {
 
     expect(migrated.preferences).toEqual({
       dataMode: "automatic",
-      renderIntervalMs: 10_000,
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 1_000,
       backupPollIntervalMs: 60_000,
       extension: { enabled: true },
     });
@@ -201,7 +247,8 @@ describe("migrateGlobalSettings", () => {
     expect(migrated.preferences.extension).not.toBe(preferences.extension);
     expect(preferences).toEqual({
       dataMode: "invalid",
-      renderIntervalMs: 1234,
+      uiUpdateMode: "realtime",
+      renderIntervalMs: 550,
       backupPollIntervalMs: 1234,
       extension: { enabled: true },
     });

@@ -15,7 +15,8 @@ describe("PI protocol", () => {
       requestId: "r4",
       preferences: {
         dataMode: "automatic",
-        renderIntervalMs: 5_000,
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
         backupPollIntervalMs: 30_000,
       },
     },
@@ -26,6 +27,75 @@ describe("PI protocol", () => {
   ])("accepts the $type command", (command) => {
     expect(validatePiCommand(command)).toBe(true);
     expect(parsePiCommand(command)).toEqual(command);
+  });
+
+  it.each([500, 600, 700, 800, 900, 1_000])(
+    "accepts the shared throttled interval %dms",
+    (renderIntervalMs) => {
+      const command = {
+        type: "preferences/save",
+        requestId: "valid-interval",
+        preferences: {
+          dataMode: "automatic",
+          uiUpdateMode: "throttled",
+          renderIntervalMs,
+          backupPollIntervalMs: 30_000,
+        },
+      };
+
+      expect(validatePiCommand(command)).toBe(true);
+      expect(parsePiCommand(command)).toEqual(command);
+    },
+  );
+
+  it.each([499, 550, 1_100, 2_000])(
+    "rejects the unsupported render interval %dms",
+    (renderIntervalMs) => {
+      const command = {
+        type: "preferences/save",
+        requestId: "invalid-interval",
+        preferences: {
+          dataMode: "automatic",
+          uiUpdateMode: "throttled",
+          renderIntervalMs,
+          backupPollIntervalMs: 30_000,
+        },
+      };
+
+      expect(validatePiCommand(command)).toBe(false);
+      expect(parsePiCommand(command)).toBeNull();
+    },
+  );
+
+  it("requires uiUpdateMode in preference payloads", () => {
+    const command = {
+      type: "preferences/save",
+      requestId: "missing-mode",
+      preferences: {
+        dataMode: "automatic",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 30_000,
+      },
+    };
+
+    expect(validatePiCommand(command)).toBe(false);
+    expect(parsePiCommand(command)).toBeNull();
+  });
+
+  it("rejects an invalid uiUpdateMode", () => {
+    const command = {
+      type: "preferences/save",
+      requestId: "invalid-mode",
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "automatic",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 30_000,
+      },
+    };
+
+    expect(validatePiCommand(command)).toBe(false);
+    expect(parsePiCommand(command)).toBeNull();
   });
 
   it.each([
@@ -51,7 +121,8 @@ describe("PI protocol", () => {
         maskedAppKey: "ABC••••XYZ",
         preferences: {
           dataMode: "automatic",
-          renderIntervalMs: 2_000,
+          uiUpdateMode: "realtime",
+          renderIntervalMs: 1_000,
           backupPollIntervalMs: 30_000,
         },
         diagnostics: {
@@ -126,7 +197,8 @@ describe("PI protocol", () => {
   it("returns fresh null-prototype copies of allowlisted command fields", () => {
     const preferences = {
       dataMode: "automatic",
-      renderIntervalMs: 5_000,
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 700,
       backupPollIntervalMs: 30_000,
     };
     const command = {
