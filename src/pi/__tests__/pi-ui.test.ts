@@ -93,10 +93,9 @@ function snapshotAt(revision: number) {
   return { ...responseSnapshot(), settingsRevision: revision };
 }
 
-function snapshotWithRenderPreferences(
-  uiUpdateMode: "realtime" | "throttled",
-  renderIntervalMs: number,
-  settingsRevision = 4,
+function snapshotWithPreferenceChanges(
+  settingsRevision: number,
+  preferences: Partial<ReturnType<typeof responseSnapshot>["preferences"]>,
 ) {
   const snapshot = responseSnapshot();
   return {
@@ -104,10 +103,20 @@ function snapshotWithRenderPreferences(
     settingsRevision,
     preferences: {
       ...snapshot.preferences,
-      uiUpdateMode,
-      renderIntervalMs,
+      ...preferences,
     },
   };
+}
+
+function snapshotWithRenderPreferences(
+  uiUpdateMode: "realtime" | "throttled",
+  renderIntervalMs: number,
+  settingsRevision = 4,
+) {
+  return snapshotWithPreferenceChanges(settingsRevision, {
+    uiUpdateMode,
+    renderIntervalMs,
+  });
 }
 
 describe("Property Inspector UI", () => {
@@ -409,7 +418,139 @@ describe("Property Inspector UI", () => {
     expect(secret.value).toBe("newer-secret");
   });
 
-  it("advances only the revision on a token diagnostics tick so a dirty preference save succeeds", () => {
+  it("adopts remotely changed preferences from diagnostics when the form is clean", () => {
+    const { window, document } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "diagnostics/update",
+        snapshot: snapshotWithPreferenceChanges(5, {
+          dataMode: "rest-only",
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 900,
+          backupPollIntervalMs: 60_000,
+        }),
+      },
+    }));
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("rest-only");
+    expect((document.getElementById("uiUpdateMode") as unknown as { value: string }).value)
+      .toBe("throttled");
+    expect((document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      disabled: boolean;
+    })).toMatchObject({ value: "900", disabled: false });
+    expect((document.getElementById("backupPollIntervalMs") as unknown as { value: string }).value)
+      .toBe("60000");
+  });
+
+  it("keeps dirty inputs and the applied preference revision when diagnostics reveal remote changes", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const interval = document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      disabled: boolean;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const backup = document.getElementById("backupPollIntervalMs") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    uiUpdateMode.value = "throttled";
+    uiUpdateMode.dispatchEvent(new window.Event("change"));
+    interval.value = "900";
+    interval.dispatchEvent(new window.Event("input"));
+    backup.value = "60000";
+    backup.dispatchEvent(new window.Event("change"));
+    const remoteSnapshot = snapshotWithPreferenceChanges(5, { renderIntervalMs: 800 });
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: remoteSnapshot },
+    }));
+    expect(dataMode.value).toBe("rest-only");
+    expect(uiUpdateMode.value).toBe("throttled");
+    expect(interval).toMatchObject({ value: "900", disabled: false });
+    expect(backup.value).toBe("60000");
+
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const firstSave = commands.at(-1) as { requestId: string };
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 4,
+    });
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: firstSave.requestId,
+        ok: false,
+        error: { safeMessage: "원격 설정과 충돌했습니다." },
+        snapshot: remoteSnapshot,
+      },
+    }));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 4,
+    });
+    expect(dataMode.value).toBe("rest-only");
+    expect(interval.value).toBe("900");
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toContain("충돌");
+  });
+
+  it("does not inspect accessor-backed remote preferences or advance their revision", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    const getter = vi.fn(() => "automatic");
+    const preferences = Object.defineProperty({
+      uiUpdateMode: "realtime",
+      renderIntervalMs: 700,
+      backupPollIntervalMs: 30_000,
+    }, "dataMode", {
+      enumerable: true,
+      get: getter,
+    });
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "diagnostics/update",
+        snapshot: { ...snapshotAt(5), preferences },
+      },
+    }));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(getter).not.toHaveBeenCalled();
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 4,
+    });
+  });
+
+  it("advances the preference revision on a token diagnostics tick with the same baseline", () => {
     const { window, document, commands } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },

@@ -2,6 +2,12 @@
   "use strict";
 
   var ACTION_SAVE_DEBOUNCE_MS = 350;
+  var PREFERENCE_FIELDS = [
+    "dataMode",
+    "uiUpdateMode",
+    "renderIntervalMs",
+    "backupPollIntervalMs",
+  ];
   var requestSequence = 0;
 
   function byId(id) {
@@ -24,6 +30,53 @@
 
   function hasValue(value) {
     return value !== undefined && value !== null && value !== "";
+  }
+
+  function ownDataValue(value, key) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    try {
+      var descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return descriptor && "value" in descriptor ? descriptor.value : undefined;
+    } catch (_error) {
+      return undefined;
+    }
+  }
+
+  function copyKnownPreferences(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    var copy = Object.create(null);
+    try {
+      if (Object.getOwnPropertySymbols(value).length > 0) return null;
+      for (var index = 0; index < PREFERENCE_FIELDS.length; index += 1) {
+        var field = PREFERENCE_FIELDS[index];
+        var descriptor = Object.getOwnPropertyDescriptor(value, field);
+        if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) return null;
+        copy[field] = descriptor.value;
+      }
+    } catch (_error) {
+      return null;
+    }
+    if (
+      (copy.dataMode !== "automatic" && copy.dataMode !== "rest-only") ||
+      (copy.uiUpdateMode !== "realtime" && copy.uiUpdateMode !== "throttled") ||
+      !Number.isInteger(copy.renderIntervalMs) ||
+      copy.renderIntervalMs < 500 ||
+      copy.renderIntervalMs > 1000 ||
+      copy.renderIntervalMs % 100 !== 0 ||
+      (copy.backupPollIntervalMs !== 15000 &&
+        copy.backupPollIntervalMs !== 30000 &&
+        copy.backupPollIntervalMs !== 60000)
+    ) {
+      return null;
+    }
+    return copy;
+  }
+
+  function preferencesEqual(left, right) {
+    if (!left || !right) return false;
+    return PREFERENCE_FIELDS.every(function (field) {
+      return left[field] === right[field];
+    });
   }
 
   function fieldType(field) {
@@ -137,6 +190,8 @@
   function StockPropertyInspector(config) {
     this.config = config;
     this.settingsRevision = 0;
+    this.preferencesRevision = 0;
+    this.lastAppliedPreferences = null;
     this.actionSaveTimer = null;
     this.pendingRequests = Object.create(null);
     this.latestRequestBySection = Object.create(null);
@@ -201,6 +256,28 @@
     byId("renderIntervalMs").disabled = byId("uiUpdateMode").value === "realtime";
   };
 
+  StockPropertyInspector.prototype.applyPreferenceSnapshot = function (
+    snapshot,
+    settingsRevision,
+    applyPreferences
+  ) {
+    var preferences = copyKnownPreferences(ownDataValue(snapshot, "preferences"));
+    if (!preferences) return;
+    if (!applyPreferences) {
+      if (preferencesEqual(preferences, this.lastAppliedPreferences)) {
+        this.preferencesRevision = Math.max(this.preferencesRevision, settingsRevision);
+      }
+      return;
+    }
+    byId("dataMode").value = preferences.dataMode;
+    byId("uiUpdateMode").value = preferences.uiUpdateMode;
+    byId("renderIntervalMs").value = String(preferences.renderIntervalMs);
+    byId("backupPollIntervalMs").value = String(preferences.backupPollIntervalMs);
+    this.syncRenderIntervalDisabled();
+    this.lastAppliedPreferences = preferences;
+    this.preferencesRevision = Math.max(this.preferencesRevision, settingsRevision);
+  };
+
   StockPropertyInspector.prototype.actionPayload = function () {
     var payload = { schemaVersion: 2 };
     (this.config.fields || []).forEach(function (field) {
@@ -237,23 +314,18 @@
   StockPropertyInspector.prototype.applySnapshot = function (snapshot, options) {
     if (!snapshot || snapshot.schemaVersion !== 2) return;
     options = options || {};
-    if ((snapshot.settingsRevision || 0) < this.settingsRevision) {
+    var settingsRevision = snapshot.settingsRevision || 0;
+    if (settingsRevision < this.settingsRevision) {
       this.applyDiagnostics(snapshot.diagnostics);
       return;
     }
-    this.settingsRevision = Math.max(this.settingsRevision, snapshot.settingsRevision || 0);
+    this.settingsRevision = Math.max(this.settingsRevision, settingsRevision);
     byId("maskedAppKey").textContent = snapshot.maskedAppKey || "설정 안 됨";
     byId("credentialSummary").textContent = snapshot.credentialsConfigured
       ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
       : "자격증명을 입력해야 시세를 조회할 수 있습니다.";
     if (options.applyCredentials) byId("appSecret").value = "";
-    if (options.applyPreferences) {
-      byId("dataMode").value = snapshot.preferences.dataMode;
-      byId("uiUpdateMode").value = snapshot.preferences.uiUpdateMode;
-      byId("renderIntervalMs").value = String(snapshot.preferences.renderIntervalMs);
-      byId("backupPollIntervalMs").value = String(snapshot.preferences.backupPollIntervalMs);
-      this.syncRenderIntervalDisabled();
-    }
+    this.applyPreferenceSnapshot(snapshot, settingsRevision, options.applyPreferences === true);
     this.applyDiagnostics(snapshot.diagnostics);
   };
 
@@ -280,10 +352,10 @@
   StockPropertyInspector.prototype.handleMessage = function (message) {
     if (!message || typeof message !== "object") return;
     if (message.type === "diagnostics/update") {
-      if (message.snapshot) {
-        this.applyRevision(message.snapshot);
-        this.applyDiagnostics(message.snapshot.diagnostics);
-      }
+      if (message.snapshot) this.applySnapshot(message.snapshot, {
+        applyCredentials: false,
+        applyPreferences: this.preferencesEditVersion === 0,
+      });
       return;
     }
     if (message.type === "settings/update") {
@@ -416,7 +488,7 @@
         return;
       }
       inspector.sendCommand("preferences/save", {
-        settingsRevision: inspector.settingsRevision,
+        settingsRevision: inspector.preferencesRevision,
         preferences: {
           dataMode: byId("dataMode").value,
           uiUpdateMode: byId("uiUpdateMode").value,
