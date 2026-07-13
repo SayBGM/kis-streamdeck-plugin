@@ -61,7 +61,8 @@ Stream Deck App
 - `kisWebSocket`은 싱글턴. 모든 버튼이 하나의 WS 연결을 공유, 구독 키는 `trId:trKey`.
 - `approval_key`는 30분마다 자동 갱신 (`APPROVAL_KEY_REFRESH_INTERVAL_MS`).
 - WS 재연결: 지수 백오프 5초→10초→20초…최대 60초 (±10% 지터).
-- `setImage()` 호출은 50ms 디바운스로 일괄 처리 (IPC 부하 감소).
+- 모든 WS 시세 tick은 처리하고 `RenderScheduler`가 UI 경계에서 버튼별 LWW를 적용. 전역 `uiUpdateMode`의 실시간 모드는 50ms, 스로틀링 모드는 500~1000ms(100ms 단위)를 일반 시세 화면에 사용하며, 제어 상태는 1초·수동/치명 오류는 즉시 반영.
+- 실행 중 UI 모드 변경은 활성 국내·미국 타깃의 렌더 간격만 갱신하며 WebSocket 재연결·재구독 또는 REST 정책 재시작을 유발하지 않음.
 - SVG LRU 캐시 키는 `ticker|name|price|change|rate|sign|state|stale` 조합.
 - 미국주식 `trKey`는 시간대에 따라 주간(`R`접두사) / 야간(`D`접두사)이 다름 (`isOverseasDayTrading()`).
 
