@@ -215,20 +215,94 @@ describe("Property Inspector UI", () => {
     expect(shared).toContain('sendCommand("quote/refresh"');
   });
 
-  it("renders sections in the required order with folded advanced settings", () => {
+  it("renders the required information architecture with independent disclosure states", () => {
     const { document } = createUi();
     const sections = [...document.querySelectorAll("[data-section]")]
       .map((node) => node.getAttribute("data-section"));
 
     expect(sections).toEqual([
-      "stock-settings",
       "connection-status",
+      "stock-settings",
       "credentials",
-      "advanced-settings",
-      "diagnostics",
+      "global-preferences",
+      "troubleshooting",
     ]);
-    expect(document.querySelector("details[data-section='advanced-settings']")?.hasAttribute("open"))
-      .toBe(false);
+
+    const stockDetails = document.querySelector("details[data-section='stock-settings']") as
+      | HTMLDetailsElement
+      | null;
+    const credentialsDetails = document.getElementById("credentialsDetails") as
+      | HTMLDetailsElement
+      | null;
+    const preferencesDetails = document.getElementById("preferencesDetails") as
+      | HTMLDetailsElement
+      | null;
+    const troubleshootingDetails = document.getElementById("troubleshootingDetails") as
+      | HTMLDetailsElement
+      | null;
+    const diagnosticsDetails = document.getElementById("diagnosticsDetails") as
+      | HTMLDetailsElement
+      | null;
+
+    expect(stockDetails?.open).toBe(true);
+    expect(credentialsDetails?.open).toBe(false);
+    expect(preferencesDetails?.open).toBe(false);
+    expect(troubleshootingDetails?.open).toBe(false);
+    expect(diagnosticsDetails?.open).toBe(false);
+
+    const disclosures = [
+      stockDetails,
+      credentialsDetails,
+      preferencesDetails,
+      troubleshootingDetails,
+      diagnosticsDetails,
+    ];
+    for (const disclosure of disclosures) {
+      const summary = disclosure?.firstElementChild;
+      expect(summary?.tagName).toBe("SUMMARY");
+      expect(summary?.querySelector(".sdpi-summary-title")?.textContent?.trim()).toBeTruthy();
+      expect(summary?.querySelector(".sdpi-disclosure-icon")).not.toBeNull();
+      expect(summary?.querySelector(".sdpi-scope, .sdpi-summary-meta")).not.toBeNull();
+    }
+
+    expect(stockDetails?.querySelector("summary .sdpi-scope")?.textContent).toContain("현재 버튼만");
+    expect(credentialsDetails?.querySelector("summary .sdpi-scope")?.textContent)
+      .toContain("모든 버튼 공통");
+    expect(credentialsDetails?.querySelector("summary .sdpi-summary-meta")?.textContent?.trim())
+      .toBeTruthy();
+    expect(preferencesDetails?.querySelector("summary .sdpi-scope")?.textContent)
+      .toContain("모든 버튼 공통");
+    expect(troubleshootingDetails?.querySelector("summary .sdpi-summary-meta")?.textContent)
+      .toContain("재연결");
+    expect(diagnosticsDetails?.querySelector("summary .sdpi-summary-meta")?.textContent)
+      .toContain("필요할 때만");
+  });
+
+  it("styles the connection strip and accordion affordances accessibly", () => {
+    const stylesheet = readUi("sdpi.css");
+
+    expect(stylesheet).toMatch(/\.sdpi-connection-strip\s*\{/);
+    expect(stylesheet).toMatch(/\.sdpi-disclosure\s*>\s*summary\s*\{/);
+    expect(stylesheet).toMatch(/summary::-webkit-details-marker/);
+    expect(stylesheet).toMatch(/\.sdpi-disclosure-icon\s*\{/);
+    expect(stylesheet).toMatch(/\.sdpi-disclosure\[open\]\s*>\s*summary\s+\.sdpi-disclosure-icon/);
+    expect(stylesheet).toMatch(/\.sdpi-summary-copy\s*\{/);
+    expect(stylesheet).toMatch(/\.sdpi-summary-meta\s*\{/);
+    expect(stylesheet).toMatch(/\.sdpi-scope\s*\{/);
+    expect(stylesheet).toMatch(/\.sdpi-disclosure-body\s*\{/);
+    expect(stylesheet).toMatch(/\.sdpi-nested-disclosure\s*\{/);
+    expect(stylesheet).toMatch(/\.sdpi-disclosure\s*>\s*summary\s*\{[^}]*min-height:\s*40px/s);
+    expect(stylesheet).toMatch(/\.sdpi-disclosure\s*>\s*summary:focus-visible/);
+    expect(stylesheet).toMatch(
+      /\.sdpi-summary-meta\s*\{[^}]*overflow:\s*hidden[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap/s,
+    );
+    expect(stylesheet).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+    expect(stylesheet).toMatch(
+      /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[^}]*\.sdpi-disclosure-icon[^}]*transition-duration:\s*0s/s,
+    );
+    expect(stylesheet).toMatch(
+      /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[^}]*\.sdpi-status[^}]*transition-duration:\s*0s/s,
+    );
   });
 
   it("renders global render mode and throttled interval controls", () => {

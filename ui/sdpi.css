@@ -35,6 +35,34 @@ body {
   padding: 10px 12px 16px;
 }
 
+/* ─── 연결 상태 ─── */
+.sdpi-connection-strip {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(103, 179, 255, 0.35);
+  border-radius: 8px;
+  background-color: rgba(103, 179, 255, 0.08);
+}
+
+.sdpi-connection-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--sdpi-group-labelcolor);
+  font-weight: 600;
+}
+
+.sdpi-connection-summary {
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--sdpi-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ─── 그룹 ─── */
 .sdpi-group {
   margin-bottom: 14px;
@@ -42,6 +70,130 @@ body {
   border: 1px solid var(--sdpi-bordercolor);
   border-radius: 8px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01));
+}
+
+.sdpi-group.sdpi-disclosure {
+  padding: 0;
+  overflow: hidden;
+}
+
+.sdpi-disclosure > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 12px;
+  color: var(--sdpi-group-labelcolor);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.sdpi-disclosure > summary::-webkit-details-marker,
+.sdpi-nested-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sdpi-disclosure > summary:focus-visible {
+  border-radius: 7px;
+  outline: 2px solid var(--sdpi-focusborder);
+  outline-offset: -2px;
+}
+
+.sdpi-disclosure[open] > summary {
+  border-bottom: 1px solid var(--sdpi-bordercolor);
+  background-color: rgba(255, 255, 255, 0.025);
+}
+
+.sdpi-summary-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sdpi-summary-title {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sdpi-summary-meta {
+  overflow: hidden;
+  color: var(--sdpi-muted);
+  font-size: 10px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sdpi-scope {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #dce7ff;
+  background-color: rgba(103, 179, 255, 0.14);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.sdpi-disclosure-icon {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+.sdpi-disclosure[open] > summary .sdpi-disclosure-icon,
+.sdpi-nested-disclosure[open] > summary .sdpi-disclosure-icon {
+  transform: rotate(45deg);
+}
+
+.sdpi-disclosure-body {
+  padding: 12px;
+}
+
+.sdpi-nested-disclosure {
+  margin-top: 12px;
+  border: 1px solid var(--sdpi-bordercolor);
+  border-radius: 6px;
+  overflow: hidden;
+  background-color: rgba(0, 0, 0, 0.12);
+}
+
+.sdpi-nested-disclosure > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 10px;
+  color: var(--sdpi-group-labelcolor);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.sdpi-nested-disclosure > summary:focus-visible {
+  border-radius: 5px;
+  outline: 2px solid var(--sdpi-focusborder);
+  outline-offset: -2px;
+}
+
+.sdpi-nested-disclosure[open] > summary {
+  border-bottom: 1px solid var(--sdpi-bordercolor);
+}
+
+.sdpi-nested-disclosure-body {
+  padding: 10px;
 }
 
 .sdpi-group-label {
@@ -200,6 +352,7 @@ select:focus {
   border-radius: 6px;
   line-height: 1.4;
   text-align: left;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
 }
 
 .sdpi-status.success {
@@ -253,11 +406,6 @@ select:focus {
   font-size: 10px;
 }
 
-details.sdpi-group > summary {
-  cursor: pointer;
-  list-style-position: inside;
-}
-
 .sdpi-error {
   display: none;
   padding: 2px 8px 4px;
@@ -283,4 +431,11 @@ details.sdpi-group > summary {
 
 .sdpi-help.tight {
   margin-bottom: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sdpi-disclosure-icon,
+  .sdpi-status {
+    transition-duration: 0s;
+  }
 }
