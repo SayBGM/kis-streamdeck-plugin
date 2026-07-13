@@ -414,21 +414,10 @@ function renderStockActionRecovery(view: SafeStockActionView): string {
 
 function renderStockActionQuote(view: SafeStockActionView): string {
   const quote = view.quote!;
-  const effectiveRefreshing = view.connection !== "BROKEN" && view.refreshing;
   const displayName = truncateName(view.instrument.name, 8);
   const priceText = formatPrice(quote.price, view.instrument.market);
   const rateText = formatSignedChangeRate(quote.changeRate, quote.sign);
   const changeColor = getSignColor(quote.sign);
-  const statusText = getConnectionStatusText(
-    view.connection === "waiting" ? undefined : view.connection,
-    view.stale,
-    effectiveRefreshing,
-  ) ?? "대기";
-  const statusColor = getConnectionTextColor(
-    view.connection === "waiting" ? undefined : view.connection,
-    view.stale,
-    effectiveRefreshing,
-  );
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
@@ -436,8 +425,7 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor(view.connection))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${escapeXml(truncateName(view.instrument.symbol.toUpperCase(), 10))}</text>
   <text x="72" y="82" font-family="Arial, Helvetica, sans-serif" font-size="${getPriceFontSize(priceText)}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceText)}</text>
-  <text x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(rateText)}</text>
-  ${renderStatusLabel(statusText, statusColor, effectiveRefreshing)}
+  <text x="72" y="116" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(rateText)}</text>
 </svg>`;
 }
 
