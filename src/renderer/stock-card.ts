@@ -25,7 +25,6 @@ const COLOR_RISE = "#00c853"; // 상승 (초록)
 const COLOR_FALL = "#ff1744"; // 하락 (빨강)
 const COLOR_FLAT = "#9e9e9e"; // 보합 (회색)
 const COLOR_TEXT = "#ffffff"; // 기본 텍스트
-const COLOR_TEXT_STALE = "#ffd54f"; // 지연/새로고침 상태 문구 (노랑)
 const COLOR_SESSION_REG = "#00c853"; // 정규장 (초록)
 const COLOR_SESSION_OTHER = "#ff9800"; // 프리/에프터 (주황)
 const COLOR_SESSION_CLOSED = "#616161"; // 장 마감 (어두운 회색)
@@ -590,8 +589,6 @@ export function renderStockCard(
   const changeColor = getSignColor(data.sign);
   const connectionState = renderOptions.connectionState;
   const titleColor = getConnectionTitleColor(connectionState);
-  const effectiveRefreshing =
-    connectionState !== "BROKEN" && (renderOptions.isRefreshing ?? false);
   const sessionBadge = getSessionBadgeLabel(session);
 
   // 포맷된 문자열
@@ -604,21 +601,6 @@ export function renderStockCard(
   const displayName = truncateName(data.name, 8);
   const nameFontSize = getNameFontSize(displayName);
   const tickerLabel = truncateName(data.ticker.toUpperCase(), 10);
-  const statusText = getConnectionStatusText(
-    connectionState,
-    renderOptions.isStale ?? false,
-    effectiveRefreshing,
-  );
-  const statusColor = getConnectionTextColor(
-    connectionState,
-    renderOptions.isStale ?? false,
-    effectiveRefreshing,
-  );
-  const statusMarkup = renderStatusLabel(
-    statusText,
-    statusColor,
-    effectiveRefreshing,
-  );
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
@@ -631,11 +613,10 @@ export function renderStockCard(
   <text x="72" y="78" font-family="Arial, Helvetica, sans-serif" font-size="${priceFontSize}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceStr)}</text>
 
   <!-- 변동량 + 화살표 (좌측 하단) -->
-  <text x="12" y="108" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}">${escapeXml(changeStr)}</text>
+  <text x="12" y="116" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}">${escapeXml(changeStr)}</text>
 
   <!-- 변동률 (우측 하단) -->
-  <text x="132" y="108" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}" text-anchor="end">${escapeXml(rateStr)}</text>
-  ${statusMarkup}
+  <text x="132" y="116" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}" text-anchor="end">${escapeXml(rateStr)}</text>
 </svg>`;
 }
 
@@ -663,24 +644,6 @@ function getSessionColor(session: MarketSession): string {
   }
 }
 
-function getConnectionTextColor(
-  connectionState: StreamConnectionState | null | undefined,
-  isStale: boolean,
-  isRefreshing: boolean
-): string {
-  if (connectionState === "BROKEN") return COLOR_CONN_BROKEN;
-  if (isRefreshing || isStale) return COLOR_TEXT_STALE;
-
-  switch (connectionState) {
-    case "LIVE":
-      return COLOR_CONN_LIVE;
-    case "BACKUP":
-      return COLOR_CONN_BACKUP;
-    default:
-      return COLOR_TEXT_MUTED;
-  }
-}
-
 function isWeekend(weekday: number): boolean {
   return weekday === 0 || weekday === 6;
 }
@@ -698,48 +661,6 @@ function getSessionBadgeLabel(session: MarketSession): string {
     default:
       return "마감";
   }
-}
-
-function getConnectionStatusText(
-  connectionState: StreamConnectionState | null | undefined,
-  isStale: boolean,
-  isRefreshing: boolean
-): string | null {
-  if (connectionState === "BROKEN") return "연결 확인 필요";
-  if (isRefreshing) return "새로고침 중";
-  if (isStale) {
-    if (connectionState === "BACKUP") return "백업 · 지연";
-    if (connectionState === "LIVE") return "시세 지연";
-    return "지연";
-  }
-
-  switch (connectionState) {
-    case "LIVE":
-      return "실시간";
-    case "BACKUP":
-      return "백업";
-    default:
-      return null;
-  }
-}
-
-function renderStatusLabel(
-  statusText: string | null,
-  statusColor: string,
-  isRefreshing: boolean,
-): string {
-  if (!statusText) {
-    return "";
-  }
-
-  if (!isRefreshing) {
-    return `<text x="72" y="124" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${statusColor}" text-anchor="middle">${escapeXml(statusText)}</text>`;
-  }
-
-  return `<g>
-  ${renderLoadingIndicator(44, 120, 10, statusColor)}
-  <text x="54" y="124" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${statusColor}" text-anchor="start">${escapeXml(statusText)}</text>
-</g>`;
 }
 
 function getNameFontSize(name: string): number {

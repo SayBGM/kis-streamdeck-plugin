@@ -55,6 +55,36 @@ function expectNoConnectionTitle(svg: string): void {
   window.close();
 }
 
+const QUOTE_STATUS_TEXTS = [
+  "실시간",
+  "백업",
+  "백업 · 지연",
+  "지연",
+  "시세 지연",
+  "새로고침 중",
+  "연결 확인 필요",
+] as const;
+
+function expectNoQuoteStatus(svg: string): void {
+  const window = new Window();
+  const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
+  const labels = Array.from(document.querySelectorAll("text"))
+    .map((node) => node.textContent);
+
+  for (const status of QUOTE_STATUS_TEXTS) expect(labels).not.toContain(status);
+  expect(document.querySelector('[data-role="loading-indicator"]')).toBeNull();
+  window.close();
+}
+
+function expectLegacyChangeBaseline(svg: string): void {
+  const window = new Window();
+  const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
+
+  expect(document.querySelector('text[x="12"][font-size="14"]')?.getAttribute("y")).toBe("116");
+  expect(document.querySelector('text[x="132"][font-size="14"]')?.getAttribute("y")).toBe("116");
+  window.close();
+}
+
 describe("stock-card rendering", () => {
   beforeEach(() => {
     vi.mocked(timezone.getETDayOfWeek).mockReturnValue(1);
@@ -63,50 +93,48 @@ describe("stock-card rendering", () => {
     vi.mocked(timezone.getKSTTotalMinutes).mockReturnValue(600);
   });
 
-  it("renders ticker and broken connection label on stock cards", () => {
+  it("renders ticker and price data without a broken connection label on stock cards", () => {
     const svg = renderStockCard(sampleData, "overseas", {
       connectionState: "BROKEN",
     });
 
     expect(svg).toContain("AAPL");
-    expect(svg).toContain("연결 확인 필요");
+    expect(svg).toContain("$182.52");
+    expect(svg).toContain("0.68%");
+    expectNoQuoteStatus(svg);
+    expectLegacyChangeBaseline(svg);
     expect(svg).toContain("정규");
   });
 
   it.each<{
     connectionState: StreamConnectionState | null | undefined;
+    isStale?: boolean;
+    isRefreshing?: boolean;
     color: string;
   }>([
     { connectionState: "LIVE", color: "#00c853" },
-    { connectionState: "BACKUP", color: "#7dd3fc" },
-    { connectionState: "BROKEN", color: "#ff1744" },
+    { connectionState: "BACKUP", isStale: true, color: "#7dd3fc" },
+    { connectionState: "BROKEN", isRefreshing: true, color: "#ff1744" },
     { connectionState: null, color: "#7f8aa8" },
-    { connectionState: undefined, color: "#7f8aa8" },
-  ])("uses $color for a $connectionState legacy stock title without a bottom bar", ({ connectionState, color }) => {
-    const svg = renderStockCard(sampleData, "overseas", { connectionState });
+    { connectionState: undefined, isStale: true, color: "#7f8aa8" },
+  ])("uses $color for a $connectionState legacy stock title without quote status", ({
+    connectionState,
+    isStale,
+    isRefreshing,
+    color,
+  }) => {
+    const svg = renderStockCard(sampleData, "overseas", {
+      connectionState,
+      isStale,
+      isRefreshing,
+    });
 
     expectConnectionTitle(svg, color);
-  });
-
-  it("renders a refresh label when a manual refresh is in progress", () => {
-    const svg = renderStockCard(sampleData, "overseas", {
-      connectionState: "LIVE",
-      isRefreshing: true,
-    });
-
-    expect(svg).toContain("새로고침 중");
-    expect(svg).toContain('data-role="loading-indicator"');
-  });
-
-  it("suppresses refreshing UI when a legacy stock card connection is broken", () => {
-    const svg = renderStockCard(sampleData, "overseas", {
-      connectionState: "BROKEN",
-      isRefreshing: true,
-    });
-
-    expect(svg).toContain("연결 확인 필요");
-    expect(svg).not.toContain("새로고침 중");
-    expect(svg).not.toContain('data-role="loading-indicator"');
+    expectNoQuoteStatus(svg);
+    expectLegacyChangeBaseline(svg);
+    expect(svg).toContain("AAPL");
+    expect(svg).toContain("$182.52");
+    expect(svg).toContain("0.68%");
   });
 
   it("renders clearer connected copy on waiting-for-trades cards", () => {
