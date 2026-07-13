@@ -4,6 +4,7 @@ import { Window } from "happy-dom";
 import { describe, expect, it, vi } from "vitest";
 
 const UI_ROOT = resolve(process.cwd(), "ui");
+const DEFAULT_SNAPSHOT_EPOCH = "epoch-a";
 
 function readUi(file: string): string {
   return readFileSync(resolve(UI_ROOT, file), "utf8");
@@ -80,6 +81,7 @@ function withUnsafeSnapshotAccessor<T extends ReturnType<typeof responseSnapshot
 function responseSnapshot() {
   return withSafeSnapshotContainers({
     schemaVersion: 2,
+    snapshotEpoch: DEFAULT_SNAPSHOT_EPOCH,
     snapshotSequence: 4,
     settingsRevision: 4,
     credentialsConfigured: true,
@@ -134,9 +136,14 @@ function responseSnapshot() {
   });
 }
 
-function snapshotAt(revision: number, snapshotSequence = revision) {
+function snapshotAt(
+  revision: number,
+  snapshotSequence = revision,
+  snapshotEpoch = DEFAULT_SNAPSHOT_EPOCH,
+) {
   return withSafeSnapshotContainers({
     ...responseSnapshot(),
+    snapshotEpoch,
     snapshotSequence,
     settingsRevision: revision,
   });
@@ -146,10 +153,12 @@ function snapshotWithPreferenceChanges(
   settingsRevision: number,
   preferences: Partial<ReturnType<typeof responseSnapshot>["preferences"]>,
   snapshotSequence = settingsRevision,
+  snapshotEpoch = DEFAULT_SNAPSHOT_EPOCH,
 ) {
   const snapshot = responseSnapshot();
   return withSafeSnapshotContainers({
     ...snapshot,
+    snapshotEpoch,
     snapshotSequence,
     settingsRevision,
     preferences: {
@@ -164,11 +173,12 @@ function snapshotWithRenderPreferences(
   renderIntervalMs: number,
   settingsRevision = 4,
   snapshotSequence = settingsRevision,
+  snapshotEpoch = DEFAULT_SNAPSHOT_EPOCH,
 ) {
   return snapshotWithPreferenceChanges(settingsRevision, {
     uiUpdateMode,
     renderIntervalMs,
-  }, snapshotSequence);
+  }, snapshotSequence, snapshotEpoch);
 }
 
 function snapshotWithCredentialChanges(
@@ -176,9 +186,11 @@ function snapshotWithCredentialChanges(
   credentialsConfigured: boolean,
   maskedAppKey: string,
   snapshotSequence = settingsRevision,
+  snapshotEpoch = DEFAULT_SNAPSHOT_EPOCH,
 ) {
   return withSafeSnapshotContainers({
     ...responseSnapshot(),
+    snapshotEpoch,
     snapshotSequence,
     settingsRevision,
     credentialsConfigured,
@@ -1067,6 +1079,85 @@ describe("Property Inspector UI", () => {
     });
   });
 
+  it("adopts a restarted runtime epoch at sequence one and ignores the retired epoch", () => {
+    const { window, document, commands } = createUi();
+    const beforeRestart = snapshotWithPreferenceChanges(5, {
+      dataMode: "rest-only",
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 900,
+    }, 100, "epoch-a");
+    beforeRestart.diagnostics.websocket.state = "epoch-a-sequence-100";
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: beforeRestart },
+    }));
+
+    const restarted = snapshotWithPreferenceChanges(6, {
+      dataMode: "automatic",
+      uiUpdateMode: "realtime",
+      renderIntervalMs: 700,
+    }, 1, "epoch-b");
+    restarted.diagnostics.websocket.state = "epoch-b-sequence-1";
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: restarted },
+    }));
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("automatic");
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("epoch-b-sequence-1");
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 6,
+    });
+
+    const retired = snapshotWithPreferenceChanges(7, {
+      dataMode: "rest-only",
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 1_000,
+    }, 101, "epoch-a");
+    retired.diagnostics.websocket.state = "retired-epoch-a-sequence-101";
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: retired },
+    }));
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("automatic");
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("epoch-b-sequence-1");
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 6,
+    });
+  });
+
+  it("accepts a lower settings revision from a new runtime epoch", () => {
+    const { window, document, commands } = createUi();
+    const beforeRestart = snapshotWithPreferenceChanges(5, {
+      dataMode: "rest-only",
+    }, 100, "epoch-a");
+    beforeRestart.diagnostics.websocket.state = "epoch-a-revision-5";
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: beforeRestart },
+    }));
+    const restarted = snapshotWithPreferenceChanges(4, {
+      dataMode: "automatic",
+    }, 1, "epoch-b");
+    restarted.diagnostics.websocket.state = "epoch-b-revision-4";
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: restarted },
+    }));
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("automatic");
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("epoch-b-revision-4");
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 4,
+    });
+  });
+
   it("rejects an unsafe stale diagnostics snapshot without executing its accessor", () => {
     const { window, document, commands } = createUi();
     const current = snapshotWithPreferenceChanges(6, { dataMode: "rest-only" });
@@ -1222,6 +1313,36 @@ describe("Property Inspector UI", () => {
     });
   });
 
+  it.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["too-long", "x".repeat(129)],
+    ["custom-object", Object.assign(Object.create({ inherited: true }), { value: "epoch-b" })],
+  ] as const)("rejects a snapshot with a %s snapshotEpoch", (_label, epoch) => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4, 1) },
+    }));
+    const remote = snapshotWithPreferenceChanges(6, { dataMode: "rest-only" }, 2) as Record<
+      string,
+      unknown
+    >;
+    if (epoch === undefined) delete remote.snapshotEpoch;
+    else remote.snapshotEpoch = epoch;
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: remote },
+    }));
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("automatic");
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 4,
+    });
+  });
+
   it.each(["diagnostics/update", "settings/update"] as const)(
     "rejects custom-prototype preferences from %s snapshots",
     (messageType) => {
@@ -1318,7 +1439,7 @@ describe("Property Inspector UI", () => {
     },
   );
 
-  it.each(["schemaVersion", "snapshotSequence", "settingsRevision"] as const)(
+  it.each(["schemaVersion", "snapshotEpoch", "snapshotSequence", "settingsRevision"] as const)(
     "ignores snapshots with an own %s accessor without executing it",
     (accessorField) => {
       const { window, document, commands } = createUi();
@@ -1326,7 +1447,9 @@ describe("Property Inspector UI", () => {
         detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
       }));
       const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
-      const getter = vi.fn(() => accessorField === "schemaVersion" ? 2 : 6);
+      const getter = vi.fn(() => accessorField === "schemaVersion"
+        ? 2
+        : accessorField === "snapshotEpoch" ? "epoch-b" : 6);
       const remote = snapshotWithPreferenceChanges(6, {
         dataMode: "rest-only",
         uiUpdateMode: "throttled",
@@ -2038,6 +2161,132 @@ describe("Property Inspector UI", () => {
       type: "preferences/save",
       settingsRevision: 5,
       preferences: { dataMode: "rest-only" },
+    });
+  });
+
+  it("preserves dirty same-baseline preferences and adopts the new epoch revision", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(5, 100, "epoch-a") },
+    }));
+    const mode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(4, 1, "epoch-b") },
+    }));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(mode.value).toBe("rest-only");
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 4,
+      preferences: { dataMode: "rest-only" },
+    });
+  });
+
+  it("preserves dirty remote-diff preferences and keeps their stale conflict fence", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(5, 100, "epoch-a") },
+    }));
+    const mode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
+    const restarted = snapshotWithPreferenceChanges(4, {
+      dataMode: "automatic",
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 900,
+    }, 1, "epoch-b");
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: restarted },
+    }));
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 4,
+    });
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(mode.value).toBe("rest-only");
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 5,
+      preferences: {
+        dataMode: "rest-only",
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
+      },
+    });
+  });
+
+  it("keeps an old pending request for a new-epoch acknowledgement and ignores its retired ack", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(5, 100, "epoch-a") },
+    }));
+    const mode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+    const restarted = snapshotAt(4, 1, "epoch-b");
+    restarted.diagnostics.websocket.state = "epoch-b-current";
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: restarted },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: false,
+        error: { safeMessage: "old-runtime-without-snapshot" },
+      },
+    }));
+    const retiredAcknowledgement = snapshotWithPreferenceChanges(6, {
+      dataMode: "rest-only",
+    }, 101, "epoch-a");
+    retiredAcknowledgement.diagnostics.websocket.state = "epoch-a-retired-ack";
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: true,
+        snapshot: retiredAcknowledgement,
+      },
+    }));
+
+    expect(mode.value).toBe("rest-only");
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("epoch-b-current");
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: true,
+        snapshot: snapshotWithPreferenceChanges(5, { dataMode: "rest-only" }, 2, "epoch-b"),
+      },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithPreferenceChanges(6, { dataMode: "automatic" }, 3, "epoch-b"),
+      },
+    }));
+
+    expect(mode.value).toBe("automatic");
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 6,
     });
   });
 

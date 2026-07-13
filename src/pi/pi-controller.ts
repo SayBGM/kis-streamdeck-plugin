@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   DiagnosticEvent,
   DiagnosticsCounter,
@@ -366,6 +367,7 @@ export class PiController {
   private interval: TimerHandle | undefined;
   private diagnosticsPush: Promise<void> | undefined;
   private nextGeneration = 0;
+  private readonly snapshotEpoch = randomUUID();
   private snapshotSequence = 0;
   private controllerGeneration = 1;
   private commandTail: Promise<void> = Promise.resolve();
@@ -561,6 +563,7 @@ export class PiController {
     this.snapshotSequence = snapshotSequence;
     return {
       schemaVersion: 2,
+      snapshotEpoch: this.snapshotEpoch,
       snapshotSequence,
       settingsRevision: settings.settingsRevision,
       credentialsConfigured: configured(settings),

@@ -17,6 +17,8 @@
   var SAFE_DATA_MAX_ARRAY_LENGTH = 512;
   var SAFE_DATA_MAX_STRING_LENGTH = 16384;
   var SAFE_DATA_MAX_TOTAL_STRING_LENGTH = 262144;
+  var SNAPSHOT_EPOCH_MAX_LENGTH = 128;
+  var RETIRED_SNAPSHOT_EPOCH_LIMIT = 12;
 
   function byId(id) {
     return document.getElementById(id);
@@ -193,6 +195,10 @@
       Array.isArray(safeValue) ||
       !hasOwn(safeValue, "schemaVersion") ||
       safeValue.schemaVersion !== 2 ||
+      !hasOwn(safeValue, "snapshotEpoch") ||
+      typeof safeValue.snapshotEpoch !== "string" ||
+      safeValue.snapshotEpoch.trim().length === 0 ||
+      safeValue.snapshotEpoch.length > SNAPSHOT_EPOCH_MAX_LENGTH ||
       !hasOwn(safeValue, "snapshotSequence") ||
       !Number.isSafeInteger(safeValue.snapshotSequence) ||
       safeValue.snapshotSequence < 1 ||
@@ -214,6 +220,7 @@
     if (!safePreferences) return null;
     var copy = Object.create(null);
     copy.schemaVersion = safeValue.schemaVersion;
+    copy.snapshotEpoch = safeValue.snapshotEpoch;
     copy.snapshotSequence = safeValue.snapshotSequence;
     copy.settingsRevision = safeValue.settingsRevision;
     copy.credentialsConfigured = safeValue.credentialsConfigured;
@@ -347,6 +354,10 @@
     this.pendingRequests = Object.create(null);
     this.latestRequestBySection = Object.create(null);
     this.latestSafeSnapshot = null;
+    this.currentSnapshotEpoch = null;
+    this.appliedSnapshotEpoch = null;
+    this.retiredSnapshotEpochs = [];
+    this.retiredSnapshotEpochSet = Object.create(null);
     this.latestSnapshotSequence = 0;
     this.credentialEditVersion = 0;
     this.preferencesEditVersion = 0;
@@ -365,6 +376,7 @@
       section: section,
       credentialEditVersion: this.credentialEditVersion,
       preferencesEditVersion: this.preferencesEditVersion,
+      snapshotEpoch: this.currentSnapshotEpoch,
       submittedPreferences: type === "preferences/save"
         ? copyKnownPreferences(fields.preferences)
         : null,
@@ -415,11 +427,14 @@
   StockPropertyInspector.prototype.applyPreferenceSnapshot = function (
     preferences,
     settingsRevision,
-    applyPreferences
+    applyPreferences,
+    epochChanged
   ) {
     if (!applyPreferences) {
       if (preferencesEqual(preferences, this.lastAppliedPreferences)) {
-        this.preferencesRevision = Math.max(this.preferencesRevision, settingsRevision);
+        this.preferencesRevision = epochChanged
+          ? settingsRevision
+          : Math.max(this.preferencesRevision, settingsRevision);
       }
       return;
     }
@@ -429,7 +444,9 @@
     byId("backupPollIntervalMs").value = String(preferences.backupPollIntervalMs);
     this.syncRenderIntervalDisabled();
     this.lastAppliedPreferences = preferences;
-    this.preferencesRevision = Math.max(this.preferencesRevision, settingsRevision);
+    this.preferencesRevision = epochChanged
+      ? settingsRevision
+      : Math.max(this.preferencesRevision, settingsRevision);
   };
 
   StockPropertyInspector.prototype.actionPayload = function () {
@@ -465,14 +482,34 @@
     }, ACTION_SAVE_DEBOUNCE_MS);
   };
 
+  StockPropertyInspector.prototype.retireSnapshotEpoch = function (snapshotEpoch) {
+    if (!snapshotEpoch || hasOwn(this.retiredSnapshotEpochSet, snapshotEpoch)) return;
+    this.retiredSnapshotEpochs.push(snapshotEpoch);
+    this.retiredSnapshotEpochSet[snapshotEpoch] = true;
+    while (this.retiredSnapshotEpochs.length > RETIRED_SNAPSHOT_EPOCH_LIMIT) {
+      var expiredEpoch = this.retiredSnapshotEpochs.shift();
+      delete this.retiredSnapshotEpochSet[expiredEpoch];
+    }
+  };
+
   StockPropertyInspector.prototype.inspectSnapshot = function (snapshot) {
     var safeSnapshot = copyKnownSnapshot(snapshot);
     if (!safeSnapshot) return { safe: false, snapshot: null };
+    var snapshotEpoch = safeSnapshot.snapshotEpoch;
+    if (snapshotEpoch !== this.currentSnapshotEpoch) {
+      if (hasOwn(this.retiredSnapshotEpochSet, snapshotEpoch)) {
+        return { safe: true, current: false, snapshot: safeSnapshot };
+      }
+      this.retireSnapshotEpoch(this.currentSnapshotEpoch);
+      this.currentSnapshotEpoch = snapshotEpoch;
+      this.latestSafeSnapshot = null;
+      this.latestSnapshotSequence = 0;
+    }
     if (safeSnapshot.snapshotSequence > this.latestSnapshotSequence) {
       this.latestSafeSnapshot = safeSnapshot;
       this.latestSnapshotSequence = safeSnapshot.snapshotSequence;
     }
-    return { safe: true, snapshot: safeSnapshot };
+    return { safe: true, current: true, snapshot: safeSnapshot };
   };
 
   StockPropertyInspector.prototype.applySafeSnapshot = function (safeSnapshot, options) {
@@ -481,13 +518,17 @@
       return { fresh: false, applied: false };
     }
     var settingsRevision = safeSnapshot.settingsRevision;
-    if (settingsRevision < this.settingsRevision) {
+    var epochChanged = safeSnapshot.snapshotEpoch !== this.appliedSnapshotEpoch;
+    if (!epochChanged && settingsRevision < this.settingsRevision) {
       if (options.applyStaleDiagnostics === true) {
         this.applyDiagnostics(safeSnapshot.diagnostics);
       }
       return { fresh: false, applied: false };
     }
-    this.settingsRevision = Math.max(this.settingsRevision, settingsRevision);
+    this.appliedSnapshotEpoch = safeSnapshot.snapshotEpoch;
+    this.settingsRevision = epochChanged
+      ? settingsRevision
+      : Math.max(this.settingsRevision, settingsRevision);
     byId("maskedAppKey").textContent = safeSnapshot.maskedAppKey || "설정 안 됨";
     byId("credentialSummary").textContent = safeSnapshot.credentialsConfigured
       ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
@@ -496,7 +537,8 @@
     this.applyPreferenceSnapshot(
       safeSnapshot.preferences,
       settingsRevision,
-      options.applyPreferences === true
+      options.applyPreferences === true,
+      epochChanged
     );
     this.applyDiagnostics(safeSnapshot.diagnostics);
     return { fresh: true, applied: true };
@@ -568,6 +610,12 @@
     if (hasSnapshot) {
       inspectedSnapshot = this.inspectSnapshot(message.snapshot);
       if (!inspectedSnapshot.safe) return;
+      if (!inspectedSnapshot.current) return;
+    } else if (
+      pending.snapshotEpoch &&
+      pending.snapshotEpoch !== this.currentSnapshotEpoch
+    ) {
+      return;
     }
     delete this.pendingRequests[message.requestId];
     if (this.latestRequestBySection[pending.section] !== message.requestId) return;

@@ -46,6 +46,7 @@ export type PiCommand =
 
 export interface SanitizedPiSnapshot {
   schemaVersion: 2;
+  snapshotEpoch: string;
   snapshotSequence: number;
   settingsRevision: number;
   credentialsConfigured: boolean;

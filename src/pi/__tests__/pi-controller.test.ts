@@ -122,6 +122,42 @@ function lastResponse(harness: ReturnType<typeof createHarness>) {
 }
 
 describe("PiController", () => {
+  it("scopes monotonic snapshot sequences to a unique controller epoch", async () => {
+    const first = createHarness();
+    const second = createHarness();
+    try {
+      await first.controller.propertyInspectorDidAppear("ctx-1", "domestic");
+      await first.controller.handleCommand("ctx-1", "domestic", {
+        type: "settings/request",
+        requestId: "settings-first",
+      });
+      await second.controller.propertyInspectorDidAppear("ctx-2", "overseas");
+      await second.controller.handleCommand("ctx-2", "overseas", {
+        type: "settings/request",
+        requestId: "settings-second",
+      });
+
+      const firstSnapshots = first.sent.map(({ message }) => message.snapshot);
+      const secondSnapshots = second.sent.map(({ message }) => message.snapshot);
+      const firstEpoch = firstSnapshots[0]?.snapshotEpoch;
+      const secondEpoch = secondSnapshots[0]?.snapshotEpoch;
+      expect(firstEpoch).toEqual(expect.any(String));
+      expect(firstEpoch).not.toBe("");
+      expect(firstSnapshots.map((snapshot) => snapshot?.snapshotEpoch))
+        .toEqual([firstEpoch, firstEpoch]);
+      expect(firstSnapshots.map((snapshot) => snapshot?.snapshotSequence)).toEqual([1, 2]);
+      expect(secondEpoch).toEqual(expect.any(String));
+      expect(secondEpoch).not.toBe("");
+      expect(secondSnapshots.map((snapshot) => snapshot?.snapshotEpoch))
+        .toEqual([secondEpoch, secondEpoch]);
+      expect(secondSnapshots.map((snapshot) => snapshot?.snapshotSequence)).toEqual([1, 2]);
+      expect(secondEpoch).not.toBe(firstEpoch);
+    } finally {
+      first.controller.destroy();
+      second.controller.destroy();
+    }
+  });
+
   it("assigns monotonic snapshot sequences to settings, acknowledgement, and diagnostics messages", async () => {
     vi.useFakeTimers();
     const harness = createHarness();

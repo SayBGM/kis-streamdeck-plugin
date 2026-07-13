@@ -116,6 +116,7 @@ describe("PI protocol", () => {
       ok: true,
       snapshot: {
         schemaVersion: 2,
+        snapshotEpoch: "protocol-epoch",
         snapshotSequence: 1,
         settingsRevision: 7,
         credentialsConfigured: true,
