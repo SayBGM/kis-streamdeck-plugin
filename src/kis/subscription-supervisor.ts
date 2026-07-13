@@ -595,7 +595,9 @@ export class SubscriptionSupervisor {
     const msgCd = (body as { msg_cd?: unknown }).msg_cd;
     const input = (body as { input?: unknown }).input;
     const output = (body as { output?: unknown }).output;
-    const trKey = this.readControlKey(output) ?? this.readControlKey(input);
+    const trKey = this.readControlKey(header) ??
+      this.readControlKey(output) ??
+      this.readControlKey(input);
     const job = this.currentJob;
     if (!job || typeof trId !== "string" || trId !== job.entry.descriptor.trId) return;
     // KIS control frame에는 socket-wide correlation id가 없습니다. key 없는 응답은

@@ -73,6 +73,17 @@ function control(trId: string, trKey: string, msgCd = "OPSP0000"): string {
   });
 }
 
+function kisControl(trId: string, trKey: string, msgCd = "OPSP0000"): string {
+  return JSON.stringify({
+    header: { tr_id: trId, tr_key: trKey, encrypt: "N" },
+    body: {
+      rt_cd: msgCd === "OPSP0000" || msgCd === "OPSP0002" ? "0" : "1",
+      msg_cd: msgCd,
+      msg1: "SUBSCRIBE SUCCESS",
+    },
+  });
+}
+
 function domesticData(symbol: string): string {
   return `0|H0UNCNT0|001|${symbol}^100^1`;
 }
@@ -204,6 +215,30 @@ describe("SubscriptionSupervisor", () => {
       header: { tr_id: descriptor.trId },
       body: { msg_cd: "OPSP0000" },
     }));
+
+    expect(handle.snapshot?.state).toBe("pending");
+    advance(5_000);
+    expect(connection.reconnects).toBe(1);
+  });
+
+  it("accepts the KIS control key from the response header without reconnecting", async () => {
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    const handle = supervisor.subscribe(descriptor);
+    await flush();
+
+    connection.emitRaw(kisControl(descriptor.trId, descriptor.trKey));
+
+    expect(handle.snapshot?.state).toBe("live");
+    advance(5_000);
+    expect(connection.reconnects).toBe(0);
+  });
+
+  it("does not acknowledge a different KIS header control key", async () => {
+    const descriptor = { trId: "H0UNCNT0", trKey: "005930" } as const;
+    const handle = supervisor.subscribe(descriptor);
+    await flush();
+
+    connection.emitRaw(kisControl(descriptor.trId, "000660"));
 
     expect(handle.snapshot?.state).toBe("pending");
     advance(5_000);
