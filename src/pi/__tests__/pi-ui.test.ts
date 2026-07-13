@@ -32,8 +32,22 @@ function createUi() {
   return { window, document: window.document, commands, actionSettings };
 }
 
+function withSafeSnapshotContainers<
+  T extends { preferences: object; diagnostics: object },
+>(snapshot: T): T {
+  return Object.assign(Object.create(null), snapshot, {
+    preferences: Object.assign(Object.create(null), snapshot.preferences),
+    diagnostics: Object.assign(Object.create(null), snapshot.diagnostics),
+  }) as T;
+}
+
+function inPiRealm<T>(window: Window, value: T): T {
+  const parse = window.eval("JSON.parse") as (json: string) => T;
+  return parse(JSON.stringify(value));
+}
+
 function responseSnapshot() {
-  return {
+  return withSafeSnapshotContainers({
     schemaVersion: 2,
     settingsRevision: 4,
     credentialsConfigured: true,
@@ -86,11 +100,11 @@ function responseSnapshot() {
       },
       recentErrors: { events: [], counters: {} },
     },
-  };
+  });
 }
 
 function snapshotAt(revision: number) {
-  return { ...responseSnapshot(), settingsRevision: revision };
+  return withSafeSnapshotContainers({ ...responseSnapshot(), settingsRevision: revision });
 }
 
 function snapshotWithPreferenceChanges(
@@ -98,14 +112,14 @@ function snapshotWithPreferenceChanges(
   preferences: Partial<ReturnType<typeof responseSnapshot>["preferences"]>,
 ) {
   const snapshot = responseSnapshot();
-  return {
+  return withSafeSnapshotContainers({
     ...snapshot,
     settingsRevision,
     preferences: {
       ...snapshot.preferences,
       ...preferences,
     },
-  };
+  });
 }
 
 function snapshotWithRenderPreferences(
@@ -424,15 +438,16 @@ describe("Property Inspector UI", () => {
       detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
     }));
 
+    const ordinarySnapshot = inPiRealm(window, snapshotWithPreferenceChanges(5, {
+      dataMode: "rest-only",
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 900,
+      backupPollIntervalMs: 60_000,
+    }));
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: {
         type: "diagnostics/update",
-        snapshot: snapshotWithPreferenceChanges(5, {
-          dataMode: "rest-only",
-          uiUpdateMode: "throttled",
-          renderIntervalMs: 900,
-          backupPollIntervalMs: 60_000,
-        }),
+        snapshot: ordinarySnapshot,
       },
     }));
 
@@ -447,6 +462,269 @@ describe("Property Inspector UI", () => {
     expect((document.getElementById("backupPollIntervalMs") as unknown as { value: string }).value)
       .toBe("60000");
   });
+
+  it("accepts null-prototype snapshots and preferences", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const remote = snapshotWithPreferenceChanges(5, {
+      dataMode: "rest-only",
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 900,
+      backupPollIntervalMs: 60_000,
+    });
+    const nullPreferences = Object.assign(Object.create(null), remote.preferences);
+    const nullSnapshot = Object.assign(Object.create(null), {
+      ...remote,
+      preferences: nullPreferences,
+    });
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: nullSnapshot },
+    }));
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("rest-only");
+    expect((document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      disabled: boolean;
+    })).toMatchObject({ value: "900", disabled: false });
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 5,
+    });
+  });
+
+  it.each(["diagnostics/update", "settings/update"] as const)(
+    "rejects custom-prototype preferences from %s snapshots",
+    (messageType) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const remote = snapshotWithPreferenceChanges(5, {
+        dataMode: "rest-only",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 900,
+        backupPollIntervalMs: 60_000,
+      });
+      const customPreferences = Object.assign(
+        Object.create({ inheritedPreference: true }),
+        remote.preferences,
+      );
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          type: messageType,
+          snapshot: Object.assign(Object.create(null), remote, {
+            preferences: customPreferences,
+          }),
+        },
+      }));
+
+      expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+        .toBe("automatic");
+      expect((document.getElementById("renderIntervalMs") as unknown as {
+        value: string;
+        disabled: boolean;
+      })).toMatchObject({ value: "700", disabled: true });
+      document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "credentials/clear",
+        settingsRevision: 4,
+      });
+
+      const dataMode = document.getElementById("dataMode") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      dataMode.value = "rest-only";
+      dataMode.dispatchEvent(new window.Event("change"));
+      document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "preferences/save",
+        settingsRevision: 4,
+      });
+    },
+  );
+
+  it.each(["snapshot", "preferences"] as const)(
+    "rejects a structurally cloned Object.prototype on %s",
+    (target) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const remote = snapshotWithPreferenceChanges(5, {
+        dataMode: "rest-only",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 900,
+        backupPollIntervalMs: 60_000,
+      });
+      const fakeObjectPrototype = Object.create(null);
+      Object.defineProperties(
+        fakeObjectPrototype,
+        Object.getOwnPropertyDescriptors(Object.prototype),
+      );
+      const unsafeSnapshot = target === "snapshot"
+        ? Object.assign(Object.create(fakeObjectPrototype), remote)
+        : Object.assign(Object.create(null), remote, {
+            preferences: Object.assign(
+              Object.create(fakeObjectPrototype),
+              remote.preferences,
+            ),
+          });
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "diagnostics/update", snapshot: unsafeSnapshot },
+      }));
+
+      expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+        .toBe("automatic");
+      expect((document.getElementById("renderIntervalMs") as unknown as { value: string }).value)
+        .toBe("700");
+      document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "credentials/clear",
+        settingsRevision: 4,
+      });
+    },
+  );
+
+  it.each(["schemaVersion", "settingsRevision"] as const)(
+    "ignores snapshots with an own %s accessor without executing it",
+    (accessorField) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+      const getter = vi.fn(() => accessorField === "schemaVersion" ? 2 : 6);
+      const remote = snapshotWithPreferenceChanges(6, {
+        dataMode: "rest-only",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 900,
+        backupPollIntervalMs: 60_000,
+      });
+      const unsafeSnapshot = withSafeSnapshotContainers({
+        ...remote,
+        diagnostics: {
+          ...remote.diagnostics,
+          websocket: { ...remote.diagnostics.websocket, state: "closed" },
+        },
+      });
+      Object.defineProperty(unsafeSnapshot, accessorField, {
+        enumerable: true,
+        get: getter,
+      });
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "diagnostics/update", snapshot: unsafeSnapshot },
+      }));
+
+      expect(getter).not.toHaveBeenCalled();
+      expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+        .toBe("automatic");
+      expect(document.getElementById("connectionBadge")?.textContent).toBe("open");
+      expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+      document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "credentials/clear",
+        settingsRevision: 4,
+      });
+      const dataMode = document.getElementById("dataMode") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      dataMode.value = "rest-only";
+      dataMode.dispatchEvent(new window.Event("change"));
+      document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "preferences/save",
+        settingsRevision: 4,
+      });
+    },
+  );
+
+  it("does not apply diagnostics from an unsafe operational acknowledgement snapshot", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+    document.getElementById("refreshDiagnosticsButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+    const safeSnapshot = snapshotAt(5);
+    const unsafeSnapshot = withSafeSnapshotContainers({
+      ...safeSnapshot,
+      diagnostics: {
+        ...safeSnapshot.diagnostics,
+        websocket: { ...safeSnapshot.diagnostics.websocket, state: "closed" },
+      },
+    });
+    const getter = vi.fn(() => 2);
+    Object.defineProperty(unsafeSnapshot, "schemaVersion", {
+      enumerable: true,
+      get: getter,
+    });
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: request.requestId, ok: true, snapshot: unsafeSnapshot },
+    }));
+
+    expect(getter).not.toHaveBeenCalled();
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("open");
+    expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+  });
+
+  it.each(["schemaVersion", "settingsRevision"] as const)(
+    "rejects snapshots with an inherited %s",
+    (inheritedField) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const remote = snapshotWithPreferenceChanges(6, {
+        dataMode: "rest-only",
+        renderIntervalMs: 900,
+      });
+      const ownFields = { ...remote } as Record<string, unknown>;
+      delete ownFields[inheritedField];
+      const inheritedSnapshot = Object.assign(
+        Object.create({
+          [inheritedField]: inheritedField === "schemaVersion" ? 2 : 6,
+        }),
+        ownFields,
+      );
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "diagnostics/update", snapshot: inheritedSnapshot },
+      }));
+
+      expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+        .toBe("automatic");
+      expect((document.getElementById("renderIntervalMs") as unknown as { value: string }).value)
+        .toBe("700");
+      document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "credentials/clear",
+        settingsRevision: 4,
+      });
+      const dataMode = document.getElementById("dataMode") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      dataMode.value = "rest-only";
+      dataMode.dispatchEvent(new window.Event("change"));
+      document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "preferences/save",
+        settingsRevision: 4,
+      });
+    },
+  );
 
   it("keeps dirty inputs and the applied preference revision when diagnostics reveal remote changes", () => {
     const { window, document, commands } = createUi();
@@ -538,9 +816,15 @@ describe("Property Inspector UI", () => {
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: {
         type: "diagnostics/update",
-        snapshot: { ...snapshotAt(5), preferences },
+        snapshot: Object.assign(Object.create(null), snapshotAt(5), { preferences }),
       },
     }));
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 4,
+    });
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
 
     expect(getter).not.toHaveBeenCalled();

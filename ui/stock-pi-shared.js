@@ -32,29 +32,34 @@
     return value !== undefined && value !== null && value !== "";
   }
 
-  function ownDataValue(value, key) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  function plainDataDescriptors(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
     try {
-      var descriptor = Object.getOwnPropertyDescriptor(value, key);
-      return descriptor && "value" in descriptor ? descriptor.value : undefined;
+      var prototype = Object.getPrototypeOf(value);
+      if (prototype !== null && prototype !== Object.prototype) return null;
+      if (Object.getOwnPropertySymbols(value).length > 0) return null;
+      return Object.getOwnPropertyDescriptors(value);
     } catch (_error) {
-      return undefined;
+      return null;
     }
   }
 
+  function enumerableDataDescriptor(descriptors, key) {
+    var descriptor = descriptors && descriptors[key];
+    return descriptor && descriptor.enumerable && "value" in descriptor
+      ? descriptor
+      : null;
+  }
+
   function copyKnownPreferences(value) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    var descriptors = plainDataDescriptors(value);
+    if (!descriptors) return null;
     var copy = Object.create(null);
-    try {
-      if (Object.getOwnPropertySymbols(value).length > 0) return null;
-      for (var index = 0; index < PREFERENCE_FIELDS.length; index += 1) {
-        var field = PREFERENCE_FIELDS[index];
-        var descriptor = Object.getOwnPropertyDescriptor(value, field);
-        if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) return null;
-        copy[field] = descriptor.value;
-      }
-    } catch (_error) {
-      return null;
+    for (var index = 0; index < PREFERENCE_FIELDS.length; index += 1) {
+      var field = PREFERENCE_FIELDS[index];
+      var descriptor = enumerableDataDescriptor(descriptors, field);
+      if (!descriptor) return null;
+      copy[field] = descriptor.value;
     }
     if (
       (copy.dataMode !== "automatic" && copy.dataMode !== "rest-only") ||
@@ -69,6 +74,41 @@
     ) {
       return null;
     }
+    return copy;
+  }
+
+  function copyKnownSnapshot(value) {
+    var descriptors = plainDataDescriptors(value);
+    if (!descriptors) return null;
+    var schemaVersion = enumerableDataDescriptor(descriptors, "schemaVersion");
+    var settingsRevision = enumerableDataDescriptor(descriptors, "settingsRevision");
+    var credentialsConfigured = enumerableDataDescriptor(descriptors, "credentialsConfigured");
+    var preferences = enumerableDataDescriptor(descriptors, "preferences");
+    var diagnostics = enumerableDataDescriptor(descriptors, "diagnostics");
+    var maskedAppKey = descriptors.maskedAppKey === undefined
+      ? null
+      : enumerableDataDescriptor(descriptors, "maskedAppKey");
+    if (
+      !schemaVersion || schemaVersion.value !== 2 ||
+      !settingsRevision || !Number.isSafeInteger(settingsRevision.value) ||
+      settingsRevision.value < 0 ||
+      !credentialsConfigured || typeof credentialsConfigured.value !== "boolean" ||
+      !preferences ||
+      !diagnostics || !plainDataDescriptors(diagnostics.value) ||
+      (descriptors.maskedAppKey !== undefined &&
+        (!maskedAppKey || typeof maskedAppKey.value !== "string"))
+    ) {
+      return null;
+    }
+    var safePreferences = copyKnownPreferences(preferences.value);
+    if (!safePreferences) return null;
+    var copy = Object.create(null);
+    copy.schemaVersion = schemaVersion.value;
+    copy.settingsRevision = settingsRevision.value;
+    copy.credentialsConfigured = credentialsConfigured.value;
+    if (maskedAppKey) copy.maskedAppKey = maskedAppKey.value;
+    copy.preferences = safePreferences;
+    copy.diagnostics = diagnostics.value;
     return copy;
   }
 
@@ -257,12 +297,10 @@
   };
 
   StockPropertyInspector.prototype.applyPreferenceSnapshot = function (
-    snapshot,
+    preferences,
     settingsRevision,
     applyPreferences
   ) {
-    var preferences = copyKnownPreferences(ownDataValue(snapshot, "preferences"));
-    if (!preferences) return;
     if (!applyPreferences) {
       if (preferencesEqual(preferences, this.lastAppliedPreferences)) {
         this.preferencesRevision = Math.max(this.preferencesRevision, settingsRevision);
@@ -312,26 +350,32 @@
   };
 
   StockPropertyInspector.prototype.applySnapshot = function (snapshot, options) {
-    if (!snapshot || snapshot.schemaVersion !== 2) return;
+    var safeSnapshot = copyKnownSnapshot(snapshot);
+    if (!safeSnapshot) return;
     options = options || {};
-    var settingsRevision = snapshot.settingsRevision || 0;
+    var settingsRevision = safeSnapshot.settingsRevision;
     if (settingsRevision < this.settingsRevision) {
-      this.applyDiagnostics(snapshot.diagnostics);
+      this.applyDiagnostics(safeSnapshot.diagnostics);
       return;
     }
     this.settingsRevision = Math.max(this.settingsRevision, settingsRevision);
-    byId("maskedAppKey").textContent = snapshot.maskedAppKey || "설정 안 됨";
-    byId("credentialSummary").textContent = snapshot.credentialsConfigured
+    byId("maskedAppKey").textContent = safeSnapshot.maskedAppKey || "설정 안 됨";
+    byId("credentialSummary").textContent = safeSnapshot.credentialsConfigured
       ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
       : "자격증명을 입력해야 시세를 조회할 수 있습니다.";
     if (options.applyCredentials) byId("appSecret").value = "";
-    this.applyPreferenceSnapshot(snapshot, settingsRevision, options.applyPreferences === true);
-    this.applyDiagnostics(snapshot.diagnostics);
+    this.applyPreferenceSnapshot(
+      safeSnapshot.preferences,
+      settingsRevision,
+      options.applyPreferences === true
+    );
+    this.applyDiagnostics(safeSnapshot.diagnostics);
   };
 
   StockPropertyInspector.prototype.applyRevision = function (snapshot) {
-    if (!snapshot || snapshot.schemaVersion !== 2) return;
-    this.settingsRevision = Math.max(this.settingsRevision, snapshot.settingsRevision || 0);
+    var safeSnapshot = copyKnownSnapshot(snapshot);
+    if (!safeSnapshot) return;
+    this.settingsRevision = Math.max(this.settingsRevision, safeSnapshot.settingsRevision);
   };
 
   StockPropertyInspector.prototype.applyDiagnostics = function (diagnostics) {
@@ -399,8 +443,10 @@
           applyPreferences: pending.preferencesEditVersion === this.preferencesEditVersion,
         });
       } else {
-        this.applyRevision(message.snapshot);
-        this.applyDiagnostics(message.snapshot.diagnostics);
+        this.applySnapshot(message.snapshot, {
+          applyCredentials: false,
+          applyPreferences: false,
+        });
       }
     }
 
