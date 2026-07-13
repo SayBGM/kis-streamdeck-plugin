@@ -682,20 +682,27 @@ describe("Property Inspector UI", () => {
             backupPollIntervalMs: 15_000,
           };
 
+      const newerSnapshot = snapshotWithPreferenceChanges(6, newerPreferences);
+      newerSnapshot.diagnostics.websocket.state = "rev6-latest";
       document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
         detail: {
           type: "diagnostics/update",
-          snapshot: snapshotWithPreferenceChanges(6, newerPreferences),
+          snapshot: newerSnapshot,
         },
       }));
+      const olderAcknowledgement = snapshotWithPreferenceChanges(5, submittedPreferences);
+      olderAcknowledgement.diagnostics.websocket.state = "rev5-stale";
       document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
         detail: {
           requestId: request.requestId,
           ok: true,
-          snapshot: snapshotWithPreferenceChanges(5, submittedPreferences),
+          snapshot: olderAcknowledgement,
         },
       }));
 
+      expect(document.getElementById("connectionBadge")?.textContent).toBe("rev6-latest");
+      expect(document.getElementById("diagnosticsOutput")?.textContent)
+        .toContain('"state": "rev6-latest"');
       expect(dataMode.value).toBe(newerPreferences.dataMode);
       expect(uiUpdateMode.value).toBe(newerPreferences.uiUpdateMode);
       expect(interval).toMatchObject({
@@ -856,6 +863,97 @@ describe("Property Inspector UI", () => {
       type: "preferences/save",
       settingsRevision: 6,
       preferences: { dataMode: "rest-only" },
+    });
+  });
+
+  it("applies only diagnostics from a safe stale ordinary snapshot", () => {
+    const { window, document, commands } = createUi();
+    const current = snapshotWithPreferenceChanges(6, {
+      dataMode: "rest-only",
+      uiUpdateMode: "throttled",
+      renderIntervalMs: 900,
+      backupPollIntervalMs: 60_000,
+    });
+    current.maskedAppKey = "REV6••••KEY";
+    current.diagnostics.websocket.state = "rev6-current";
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: current },
+    }));
+    const stale = snapshotWithPreferenceChanges(5, {
+      dataMode: "automatic",
+      uiUpdateMode: "realtime",
+      renderIntervalMs: 700,
+      backupPollIntervalMs: 30_000,
+    });
+    stale.credentialsConfigured = false;
+    stale.maskedAppKey = "REV5••••KEY";
+    stale.diagnostics.websocket.state = "rev5-stale";
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: stale },
+    }));
+
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("rev5-stale");
+    expect(document.getElementById("diagnosticsOutput")?.textContent)
+      .toContain('"state": "rev5-stale"');
+    expect(document.getElementById("maskedAppKey")?.textContent).toBe("REV6••••KEY");
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("rest-only");
+    expect((document.getElementById("uiUpdateMode") as unknown as { value: string }).value)
+      .toBe("throttled");
+    expect((document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      disabled: boolean;
+    })).toMatchObject({ value: "900", disabled: false });
+    expect((document.getElementById("backupPollIntervalMs") as unknown as { value: string }).value)
+      .toBe("60000");
+
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 6,
+      preferences: {
+        dataMode: "rest-only",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 900,
+        backupPollIntervalMs: 60_000,
+      },
+    });
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 6,
+    });
+  });
+
+  it("rejects an unsafe stale diagnostics snapshot without executing its accessor", () => {
+    const { window, document, commands } = createUi();
+    const current = snapshotWithPreferenceChanges(6, { dataMode: "rest-only" });
+    current.diagnostics.websocket.state = "rev6-current";
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: current },
+    }));
+    const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+    const stale = snapshotAt(5);
+    const getter = vi.fn(() => "rev5-unsafe");
+    Object.defineProperty(stale.diagnostics.websocket, "state", {
+      enumerable: true,
+      get: getter,
+    });
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: stale },
+    }));
+
+    expect(getter).not.toHaveBeenCalled();
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("rev6-current");
+    expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("rest-only");
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 6,
     });
   });
 

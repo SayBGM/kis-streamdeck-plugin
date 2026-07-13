@@ -444,6 +444,9 @@
     options = options || {};
     var settingsRevision = safeSnapshot.settingsRevision;
     if (settingsRevision < this.settingsRevision) {
+      if (options.applyStaleDiagnostics === true) {
+        this.applyDiagnostics(safeSnapshot.diagnostics);
+      }
       return { fresh: false, applied: false };
     }
     this.settingsRevision = Math.max(this.settingsRevision, settingsRevision);
@@ -501,6 +504,7 @@
       if (message.snapshot) this.applySnapshot(message.snapshot, {
         applyCredentials: false,
         applyPreferences: this.preferencesEditVersion === 0,
+        applyStaleDiagnostics: true,
       });
       return;
     }
@@ -508,6 +512,7 @@
       if (message.snapshot) this.applySnapshot(message.snapshot, {
         applyCredentials: this.credentialEditVersion === 0,
         applyPreferences: this.preferencesEditVersion === 0,
+        applyStaleDiagnostics: true,
       });
       return;
     }
