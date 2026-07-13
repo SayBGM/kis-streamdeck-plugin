@@ -149,6 +149,9 @@ describe("PI protocol", () => {
             failures: 0,
           },
           render: {
+            uiUpdateMode: "realtime",
+            configuredIntervalMs: 1_000,
+            effectiveIntervalMs: 50,
             activeTargets: 1,
             queuedTargets: 0,
             submitted: 0,

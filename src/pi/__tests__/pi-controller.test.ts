@@ -528,6 +528,50 @@ describe("PiController", () => {
     harness.controller.destroy();
   });
 
+  it.each([
+    ["realtime", 700, 50],
+    ["throttled", 700, 700],
+  ] as const)(
+    "reports %s render policy diagnostics with configured %dms and effective %dms intervals",
+    async (uiUpdateMode, configuredIntervalMs, effectiveIntervalMs) => {
+      const harness = createHarness({
+        preferences: {
+          dataMode: "automatic",
+          uiUpdateMode,
+          renderIntervalMs: configuredIntervalMs,
+          backupPollIntervalMs: 30_000,
+        },
+      });
+
+      await harness.controller.handleCommand("ctx-1", "domestic", {
+        type: "diagnostics/request",
+        requestId: `diagnostics-${uiUpdateMode}`,
+      });
+
+      const message = lastResponse(harness) as {
+        snapshot?: { diagnostics?: { render?: unknown } };
+      };
+      expect(message.snapshot?.diagnostics?.render).toEqual({
+        uiUpdateMode,
+        configuredIntervalMs,
+        effectiveIntervalMs,
+        activeTargets: 2,
+        queuedTargets: 1,
+        submitted: 10,
+        coalesced: 4,
+        renders: 6,
+        commits: 5,
+        semanticSkips: 1,
+        imageSkips: 1,
+        supersededSkips: 1,
+        staleDrops: 1,
+        failures: 0,
+        cacheEntries: expect.any(Number),
+      });
+      harness.controller.destroy();
+    },
+  );
+
   it("does not execute accessor-backed diagnostic fields", async () => {
     const harness = createHarness();
     const getter = vi.fn(() => "open");

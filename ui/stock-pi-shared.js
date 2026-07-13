@@ -106,8 +106,12 @@
       '<div class="sdpi-item"><div class="sdpi-item-label">데이터 모드</div><div class="sdpi-item-value">',
       '<select id="dataMode"><option value="automatic">자동 (WebSocket 우선)</option><option value="rest-only">REST 전용</option></select>',
       "</div></div>",
-      '<div class="sdpi-item"><div class="sdpi-item-label">화면 갱신 제한</div><div class="sdpi-item-value">',
-      '<select id="renderIntervalMs"><option value="2000">2초</option><option value="5000">5초</option><option value="10000">10초</option></select>',
+      '<div class="sdpi-note">이 설정은 모든 국내/미국 주식 버튼에 전역 적용됩니다.</div>',
+      '<div class="sdpi-item"><div class="sdpi-item-label">화면 반영 방식</div><div class="sdpi-item-value">',
+      '<select id="uiUpdateMode"><option value="realtime">실시간 (50ms 최신값 병합)</option><option value="throttled">스로틀링</option></select>',
+      "</div></div>",
+      '<div class="sdpi-item"><div class="sdpi-item-label">스로틀 간격(ms)</div><div class="sdpi-item-value">',
+      '<input id="renderIntervalMs" type="number" min="500" max="1000" step="100">',
       "</div></div>",
       '<div class="sdpi-item"><div class="sdpi-item-label">백업 폴링</div><div class="sdpi-item-value">',
       '<select id="backupPollIntervalMs"><option value="15000">15초</option><option value="30000">30초</option><option value="60000">60초</option></select>',
@@ -193,6 +197,10 @@
     });
   };
 
+  StockPropertyInspector.prototype.syncRenderIntervalDisabled = function () {
+    byId("renderIntervalMs").disabled = byId("uiUpdateMode").value === "realtime";
+  };
+
   StockPropertyInspector.prototype.actionPayload = function () {
     var payload = { schemaVersion: 2 };
     (this.config.fields || []).forEach(function (field) {
@@ -241,8 +249,10 @@
     if (options.applyCredentials) byId("appSecret").value = "";
     if (options.applyPreferences) {
       byId("dataMode").value = snapshot.preferences.dataMode;
+      byId("uiUpdateMode").value = snapshot.preferences.uiUpdateMode;
       byId("renderIntervalMs").value = String(snapshot.preferences.renderIntervalMs);
       byId("backupPollIntervalMs").value = String(snapshot.preferences.backupPollIntervalMs);
+      this.syncRenderIntervalDisabled();
     }
     this.applyDiagnostics(snapshot.diagnostics);
   };
@@ -389,11 +399,28 @@
       inspector.setStatus("credentialStatusMessage", "자격증명을 지우는 중입니다.", "info");
     });
     byId("savePreferencesButton").addEventListener("click", function () {
+      var intervalValue = byId("renderIntervalMs").value;
+      var renderIntervalMs = Number(intervalValue);
+      if (
+        !intervalValue ||
+        !Number.isInteger(renderIntervalMs) ||
+        renderIntervalMs < 500 ||
+        renderIntervalMs > 1000 ||
+        renderIntervalMs % 100 !== 0
+      ) {
+        inspector.setStatus(
+          "advancedStatusMessage",
+          "스로틀 간격은 500~1000ms 사이의 100ms 단위 정수로 입력하세요.",
+          "error"
+        );
+        return;
+      }
       inspector.sendCommand("preferences/save", {
         settingsRevision: inspector.settingsRevision,
         preferences: {
           dataMode: byId("dataMode").value,
-          renderIntervalMs: Number(byId("renderIntervalMs").value),
+          uiUpdateMode: byId("uiUpdateMode").value,
+          renderIntervalMs: renderIntervalMs,
           backupPollIntervalMs: Number(byId("backupPollIntervalMs").value),
         },
       }, "advanced");
@@ -417,11 +444,19 @@
     byId("appSecret").addEventListener("input", function () {
       inspector.credentialEditVersion += 1;
     });
-    ["dataMode", "renderIntervalMs", "backupPollIntervalMs"].forEach(function (id) {
+    ["dataMode", "backupPollIntervalMs"].forEach(function (id) {
       byId(id).addEventListener("change", function () {
         inspector.preferencesEditVersion += 1;
       });
     });
+    byId("uiUpdateMode").addEventListener("change", function () {
+      inspector.syncRenderIntervalDisabled();
+      inspector.preferencesEditVersion += 1;
+    });
+    byId("renderIntervalMs").addEventListener("input", function () {
+      inspector.preferencesEditVersion += 1;
+    });
+    this.syncRenderIntervalDisabled();
   };
 
   function bootstrap(config) {

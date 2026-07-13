@@ -40,7 +40,8 @@ function responseSnapshot() {
     maskedAppKey: "ABC••••XYZ",
     preferences: {
       dataMode: "automatic",
-      renderIntervalMs: 2_000,
+      uiUpdateMode: "realtime",
+      renderIntervalMs: 700,
       backupPollIntervalMs: 30_000,
     },
     diagnostics: {
@@ -67,6 +68,9 @@ function responseSnapshot() {
         failures: 0,
       },
       render: {
+        uiUpdateMode: "realtime",
+        configuredIntervalMs: 700,
+        effectiveIntervalMs: 50,
         activeTargets: 1,
         queuedTargets: 0,
         submitted: 1,
@@ -87,6 +91,23 @@ function responseSnapshot() {
 
 function snapshotAt(revision: number) {
   return { ...responseSnapshot(), settingsRevision: revision };
+}
+
+function snapshotWithRenderPreferences(
+  uiUpdateMode: "realtime" | "throttled",
+  renderIntervalMs: number,
+  settingsRevision = 4,
+) {
+  const snapshot = responseSnapshot();
+  return {
+    ...snapshot,
+    settingsRevision,
+    preferences: {
+      ...snapshot.preferences,
+      uiUpdateMode,
+      renderIntervalMs,
+    },
+  };
 }
 
 describe("Property Inspector UI", () => {
@@ -122,19 +143,80 @@ describe("Property Inspector UI", () => {
       .toBe(false);
   });
 
-  it("labels the existing render throttle as a screen refresh limit", () => {
+  it("renders global render mode and throttled interval controls", () => {
     const { document } = createUi();
 
-    expect(document.body.textContent).toContain("화면 갱신 제한");
-    expect(document.body.textContent).not.toContain("렌더 간격");
-    const select = document.getElementById("renderIntervalMs") as unknown as {
+    expect(document.body.textContent).toContain("화면 반영 방식");
+    expect(document.body.textContent).toContain("스로틀 간격(ms)");
+    expect(document.body.textContent).toContain("모든 국내/미국 주식 버튼에 전역 적용");
+    const mode = document.getElementById("uiUpdateMode") as unknown as {
       options: ArrayLike<{ value: string }>;
     };
-    expect(Array.from(select.options).map((option) => option.value)).toEqual([
-      "2000",
-      "5000",
-      "10000",
+    expect(Array.from(mode.options).map((option) => ({
+      value: option.value,
+      label: (option as unknown as { textContent: string }).textContent,
+    }))).toEqual([
+      { value: "realtime", label: "실시간 (50ms 최신값 병합)" },
+      { value: "throttled", label: "스로틀링" },
     ]);
+    const interval = document.getElementById("renderIntervalMs");
+    expect(interval?.getAttribute("type")).toBe("number");
+    expect(interval?.getAttribute("min")).toBe("500");
+    expect(interval?.getAttribute("max")).toBe("1000");
+    expect(interval?.getAttribute("step")).toBe("100");
+  });
+
+  it("hydrates render preferences and synchronizes interval disabled state", () => {
+    const { window, document } = createUi();
+    const mode = document.getElementById("uiUpdateMode") as unknown as {
+      value: string;
+    };
+    const interval = document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      disabled: boolean;
+    };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "realtime", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
+    }));
+    expect(mode.value).toBe("realtime");
+    expect(interval.value).toBe("700");
+    expect(interval.disabled).toBe(true);
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "throttled", ok: true, snapshot: snapshotWithRenderPreferences("throttled", 900, 5) },
+    }));
+    expect(mode.value).toBe("throttled");
+    expect(interval.value).toBe("900");
+    expect(interval.disabled).toBe(false);
+  });
+
+  it("preserves the throttled interval while render mode toggles round-trip", () => {
+    const { window, document } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("throttled", 700) },
+    }));
+    const mode = document.getElementById("uiUpdateMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const interval = document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      disabled: boolean;
+      dispatchEvent(event: unknown): boolean;
+    };
+    interval.value = "900";
+    interval.dispatchEvent(new window.Event("input"));
+
+    mode.value = "realtime";
+    mode.dispatchEvent(new window.Event("change"));
+    expect(interval.disabled).toBe(true);
+    expect(interval.value).toBe("900");
+
+    mode.value = "throttled";
+    mode.dispatchEvent(new window.Event("change"));
+    expect(interval.disabled).toBe(false);
+    expect(interval.value).toBe("900");
   });
 
   it("never fills secret inputs and saves action settings with schemaVersion 2", async () => {
@@ -180,7 +262,8 @@ describe("Property Inspector UI", () => {
     });
 
     (document.getElementById("dataMode") as unknown as { value: string }).value = "rest-only";
-    (document.getElementById("renderIntervalMs") as unknown as { value: string }).value = "10000";
+    (document.getElementById("uiUpdateMode") as unknown as { value: string }).value = "throttled";
+    (document.getElementById("renderIntervalMs") as unknown as { value: string }).value = "900";
     (document.getElementById("backupPollIntervalMs") as unknown as { value: string }).value = "60000";
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     expect(commands.at(-1)).toMatchObject({
@@ -188,10 +271,87 @@ describe("Property Inspector UI", () => {
       settingsRevision: 4,
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 10_000,
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 900,
         backupPollIntervalMs: 60_000,
       },
     });
+  });
+
+  it("preserves a valid throttled interval in realtime preference payloads", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
+    }));
+
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      preferences: {
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
+      },
+    });
+  });
+
+  it.each(["", "499", "550", "1100", "700.5"])(
+    "rejects invalid throttled interval %p without sending a command",
+    (invalidValue) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
+      }));
+      const interval = document.getElementById("renderIntervalMs") as unknown as { value: string };
+      interval.value = invalidValue;
+      const commandCount = commands.length;
+
+      document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+
+      expect(commands).toHaveLength(commandCount);
+      expect(document.getElementById("advancedStatusMessage")?.textContent).toContain("스로틀 간격");
+      expect(document.getElementById("advancedStatusMessage")?.className).toContain("error");
+    },
+  );
+
+  it("protects interval input edits from settings pushes", () => {
+    const { window, document } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("throttled", 700) },
+    }));
+    const interval = document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    interval.value = "900";
+    interval.dispatchEvent(new window.Event("input"));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotWithRenderPreferences("throttled", 600, 5) },
+    }));
+
+    expect(interval.value).toBe("900");
+  });
+
+  it("protects render mode changes from settings pushes and keeps disabled state synchronized", () => {
+    const { window, document } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
+    }));
+    const mode = document.getElementById("uiUpdateMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const interval = document.getElementById("renderIntervalMs") as unknown as { disabled: boolean };
+    mode.value = "throttled";
+    mode.dispatchEvent(new window.Event("change"));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotWithRenderPreferences("realtime", 600, 5) },
+    }));
+
+    expect(mode.value).toBe("throttled");
+    expect(interval.disabled).toBe(false);
   });
 
   it("correlates out-of-order acknowledgements to the correct section", () => {

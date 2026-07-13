@@ -6,6 +6,7 @@ import type {
 import {
   isThrottledRenderIntervalMs,
   isUiUpdateMode,
+  type EffectiveRenderIntervalMs,
   type ThrottledRenderIntervalMs,
   type UiUpdateMode,
 } from "../core/ui-update-policy.js";
@@ -81,6 +82,9 @@ export interface PiDiagnosticsSnapshot {
     failures: number;
   };
   render: {
+    uiUpdateMode: UiUpdateMode;
+    configuredIntervalMs: ThrottledRenderIntervalMs;
+    effectiveIntervalMs: EffectiveRenderIntervalMs;
     activeTargets: number;
     queuedTargets: number;
     submitted: number;

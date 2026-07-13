@@ -4,6 +4,7 @@ import type {
   DiagnosticsSnapshot,
 } from "../core/diagnostics-store.js";
 import { KisError, sanitizeMetadata } from "../core/errors.js";
+import { effectiveRenderIntervalMs } from "../core/ui-update-policy.js";
 import {
   CONNECTION_STATES,
   type ConnectionState,
@@ -331,7 +332,7 @@ function safeRest(value: unknown, failures: number): PiDiagnosticsSnapshot["rest
   };
 }
 
-function safeRender(value: unknown): Omit<PiDiagnosticsSnapshot["render"], "cacheEntries"> {
+function safeRender(value: unknown): RenderSchedulerDiagnostics {
   return {
     activeTargets: safeInteger(ownData(value, "activeTargets")),
     queuedTargets: safeInteger(ownData(value, "queuedTargets")),
@@ -589,6 +590,9 @@ export class PiController {
       subscriptions: safeSubscriptions(subscriptions),
       restBackup: safeRest(rest, safeInteger(recentErrors.counters.restFailures)),
       render: {
+        uiUpdateMode: settings.preferences.uiUpdateMode,
+        configuredIntervalMs: settings.preferences.renderIntervalMs,
+        effectiveIntervalMs: effectiveRenderIntervalMs(settings.preferences),
         ...safeRender(render),
         cacheEntries: safeInteger(getStockCardCacheDiagnostics().entries),
       },
