@@ -731,6 +731,12 @@
         message.ok === true ? "요청이 적용되었습니다." : safeMessage,
         message.ok === true ? "success" : "error"
       );
+    } else if (pending.section === "troubleshooting") {
+      this.setStatus(
+        "troubleshootingStatusMessage",
+        message.ok === true ? "요청이 적용되었습니다." : safeMessage,
+        message.ok === true ? "success" : "error"
+      );
     } else if (pending.section === "diagnostics" && message.ok === false) {
       byId("diagnosticsOutput").textContent = safeMessage;
     } else if (pending.section === "settings" && message.ok === false) {
@@ -807,13 +813,13 @@
       }, "advanced");
     });
     byId("retryAuthButton").addEventListener("click", function () {
-      inspector.sendCommand("auth/retry", null, "advanced");
+      inspector.sendCommand("auth/retry", null, "troubleshooting");
     });
     byId("reconnectWsButton").addEventListener("click", function () {
-      inspector.sendCommand("ws/reconnect", null, "advanced");
+      inspector.sendCommand("ws/reconnect", null, "troubleshooting");
     });
     byId("refreshQuoteButton").addEventListener("click", function () {
-      inspector.sendCommand("quote/refresh", null, "advanced");
+      inspector.sendCommand("quote/refresh", null, "troubleshooting");
     });
     byId("refreshDiagnosticsButton").addEventListener("click", function () {
       inspector.sendCommand("diagnostics/request", null, "diagnostics");

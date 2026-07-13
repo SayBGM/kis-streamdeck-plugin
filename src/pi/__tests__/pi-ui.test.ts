@@ -228,27 +228,17 @@ describe("Property Inspector UI", () => {
       "troubleshooting",
     ]);
 
-    const stockDetails = document.querySelector("details[data-section='stock-settings']") as
-      | HTMLDetailsElement
-      | null;
-    const credentialsDetails = document.getElementById("credentialsDetails") as
-      | HTMLDetailsElement
-      | null;
-    const preferencesDetails = document.getElementById("preferencesDetails") as
-      | HTMLDetailsElement
-      | null;
-    const troubleshootingDetails = document.getElementById("troubleshootingDetails") as
-      | HTMLDetailsElement
-      | null;
-    const diagnosticsDetails = document.getElementById("diagnosticsDetails") as
-      | HTMLDetailsElement
-      | null;
+    const stockDetails = document.querySelector("details[data-section='stock-settings']");
+    const credentialsDetails = document.getElementById("credentialsDetails");
+    const preferencesDetails = document.getElementById("preferencesDetails");
+    const troubleshootingDetails = document.getElementById("troubleshootingDetails");
+    const diagnosticsDetails = document.getElementById("diagnosticsDetails");
 
-    expect(stockDetails?.open).toBe(true);
-    expect(credentialsDetails?.open).toBe(false);
-    expect(preferencesDetails?.open).toBe(false);
-    expect(troubleshootingDetails?.open).toBe(false);
-    expect(diagnosticsDetails?.open).toBe(false);
+    expect(stockDetails?.hasAttribute("open")).toBe(true);
+    expect(credentialsDetails?.hasAttribute("open")).toBe(false);
+    expect(preferencesDetails?.hasAttribute("open")).toBe(false);
+    expect(troubleshootingDetails?.hasAttribute("open")).toBe(false);
+    expect(diagnosticsDetails?.hasAttribute("open")).toBe(false);
 
     const disclosures = [
       stockDetails,
@@ -438,6 +428,54 @@ describe("Property Inspector UI", () => {
         backupPollIntervalMs: 60_000,
       },
     });
+  });
+
+  it("routes preference and troubleshooting feedback to their owning sections", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: responseSnapshot() },
+    }));
+
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const preferenceRequest = commands.at(-1) as { requestId: string };
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: preferenceRequest.requestId, ok: true },
+    }));
+
+    const preferenceStatus = document.getElementById("advancedStatusMessage");
+    const troubleshootingStatus = document.getElementById("troubleshootingStatusMessage");
+    expect(preferenceStatus?.textContent).toContain("적용");
+    expect(preferenceStatus?.className).toContain("success");
+    expect(troubleshootingStatus?.textContent).toBe("");
+
+    const operations = [
+      { buttonId: "retryAuthButton", type: "auth/retry", ok: true },
+      { buttonId: "reconnectWsButton", type: "ws/reconnect", ok: false },
+      { buttonId: "refreshQuoteButton", type: "quote/refresh", ok: true },
+    ] as const;
+
+    for (const operation of operations) {
+      document.getElementById(operation.buttonId)?.dispatchEvent(new window.Event("click"));
+      const request = commands.at(-1) as { requestId: string; type: string };
+      expect(request.type).toBe(operation.type);
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: operation.ok
+          ? { requestId: request.requestId, ok: true }
+          : {
+              requestId: request.requestId,
+              ok: false,
+              error: { safeMessage: "WebSocket 재연결에 실패했습니다." },
+            },
+      }));
+
+      expect(troubleshootingStatus?.textContent).toContain(
+        operation.ok ? "적용" : "WebSocket 재연결에 실패했습니다.",
+      );
+      expect(troubleshootingStatus?.className).toContain(operation.ok ? "success" : "error");
+      expect(preferenceStatus?.textContent).toContain("적용");
+      expect(preferenceStatus?.className).toContain("success");
+    }
   });
 
   it("preserves a valid throttled interval in realtime preference payloads", () => {
