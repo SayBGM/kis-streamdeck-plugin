@@ -24,6 +24,22 @@
     return document.getElementById(id);
   }
 
+  function selectedUiUpdateMode() {
+    var selected = document.querySelector('input[name="uiUpdateMode"]:checked');
+    return selected ? selected.value : "realtime";
+  }
+
+  function setSelectedUiUpdateMode(mode) {
+    var radios = document.querySelectorAll('input[name="uiUpdateMode"]');
+    for (var index = 0; index < radios.length; index += 1) {
+      radios[index].checked = radios[index].value === mode;
+    }
+  }
+
+  function syncRenderIntervalVisibility() {
+    byId("renderIntervalField").hidden = selectedUiUpdateMode() === "realtime";
+  }
+
   function escapeHtml(value) {
     return String(value)
       .replace(/&/g, "&amp;")
@@ -337,10 +353,20 @@
       '<select id="dataMode"><option value="automatic">자동 (WebSocket 우선)</option><option value="rest-only">REST 전용</option></select>',
       "</div></div>",
       '<div class="sdpi-note">이 설정은 모든 국내/미국 주식 버튼에 전역 적용됩니다.</div>',
-      '<div class="sdpi-item"><div class="sdpi-item-label">화면 반영 방식</div><div class="sdpi-item-value">',
-      '<select id="uiUpdateMode"><option value="realtime">실시간 (50ms 최신값 병합)</option><option value="throttled">스로틀링</option></select>',
+      '<div class="sdpi-item sdpi-render-mode-item"><div id="uiUpdateModeLabel" class="sdpi-item-label">화면 반영 방식</div><div class="sdpi-item-value">',
+      '<div class="sdpi-segmented" role="radiogroup" aria-labelledby="uiUpdateModeLabel" aria-describedby="uiUpdateModeDescription">',
+      '<label class="sdpi-segmented-option" for="uiUpdateModeRealtime">',
+      '<input class="sdpi-segmented-input" id="uiUpdateModeRealtime" type="radio" name="uiUpdateMode" value="realtime" checked>',
+      '<span class="sdpi-segmented-content"><span class="sdpi-segmented-label">실시간</span><span class="sdpi-segmented-description">50ms 최신값 병합</span></span>',
+      "</label>",
+      '<label class="sdpi-segmented-option" for="uiUpdateModeThrottled">',
+      '<input class="sdpi-segmented-input" id="uiUpdateModeThrottled" type="radio" name="uiUpdateMode" value="throttled">',
+      '<span class="sdpi-segmented-content"><span class="sdpi-segmented-label">스로틀링</span><span class="sdpi-segmented-description">선택한 간격마다 최신값 반영</span></span>',
+      "</label>",
+      "</div>",
+      '<div id="uiUpdateModeDescription" class="sdpi-field-description">화면 반영 주기를 선택합니다.</div>',
       "</div></div>",
-      '<div class="sdpi-item"><div class="sdpi-item-label">스로틀 간격(ms)</div><div class="sdpi-item-value">',
+      '<div id="renderIntervalField" class="sdpi-item"><div class="sdpi-item-label">스로틀 간격(ms)</div><div class="sdpi-item-value">',
       '<input id="renderIntervalMs" type="number" min="500" max="1000" step="100">',
       "</div></div>",
       '<div class="sdpi-item"><div class="sdpi-item-label">백업 폴링</div><div class="sdpi-item-value">',
@@ -457,10 +483,6 @@
     });
   };
 
-  StockPropertyInspector.prototype.syncRenderIntervalDisabled = function () {
-    byId("renderIntervalMs").disabled = byId("uiUpdateMode").value === "realtime";
-  };
-
   StockPropertyInspector.prototype.applyPreferenceSnapshot = function (
     preferences,
     settingsRevision,
@@ -476,10 +498,10 @@
       return;
     }
     byId("dataMode").value = preferences.dataMode;
-    byId("uiUpdateMode").value = preferences.uiUpdateMode;
+    setSelectedUiUpdateMode(preferences.uiUpdateMode);
     byId("renderIntervalMs").value = String(preferences.renderIntervalMs);
     byId("backupPollIntervalMs").value = String(preferences.backupPollIntervalMs);
-    this.syncRenderIntervalDisabled();
+    syncRenderIntervalVisibility();
     this.lastAppliedPreferences = preferences;
     this.preferencesRevision = epochChanged
       ? settingsRevision
@@ -806,7 +828,7 @@
         settingsRevision: inspector.preferencesRevision,
         preferences: {
           dataMode: byId("dataMode").value,
-          uiUpdateMode: byId("uiUpdateMode").value,
+          uiUpdateMode: selectedUiUpdateMode(),
           renderIntervalMs: renderIntervalMs,
           backupPollIntervalMs: Number(byId("backupPollIntervalMs").value),
         },
@@ -836,14 +858,17 @@
         inspector.preferencesEditVersion += 1;
       });
     });
-    byId("uiUpdateMode").addEventListener("change", function () {
-      inspector.syncRenderIntervalDisabled();
-      inspector.preferencesEditVersion += 1;
-    });
+    var uiUpdateModeRadios = document.querySelectorAll('input[name="uiUpdateMode"]');
+    for (var radioIndex = 0; radioIndex < uiUpdateModeRadios.length; radioIndex += 1) {
+      uiUpdateModeRadios[radioIndex].addEventListener("change", function () {
+        syncRenderIntervalVisibility();
+        inspector.preferencesEditVersion += 1;
+      });
+    }
     byId("renderIntervalMs").addEventListener("input", function () {
       inspector.preferencesEditVersion += 1;
     });
-    this.syncRenderIntervalDisabled();
+    syncRenderIntervalVisibility();
   };
 
   function bootstrap(config) {

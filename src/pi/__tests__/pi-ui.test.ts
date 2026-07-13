@@ -33,6 +33,52 @@ function createUi() {
   return { window, document: window.document, commands, actionSettings };
 }
 
+type UiUpdateMode = "realtime" | "throttled";
+
+type UiUpdateModeRadio = {
+  checked: boolean;
+  value: string;
+  dispatchEvent(event: unknown): boolean;
+};
+
+function uiUpdateModeRadio(
+  document: { querySelector(selector: string): unknown },
+  mode: UiUpdateMode,
+): UiUpdateModeRadio {
+  const radio = document.querySelector(
+    `input[name="uiUpdateMode"][value="${mode}"]`,
+  ) as UiUpdateModeRadio | null;
+  if (!radio) throw new Error(`Missing ${mode} uiUpdateMode radio`);
+  return radio;
+}
+
+function selectUiUpdateMode(
+  window: Window,
+  document: { querySelector(selector: string): unknown },
+  mode: UiUpdateMode,
+): void {
+  const radio = uiUpdateModeRadio(document, mode);
+  radio.checked = true;
+  radio.dispatchEvent(new window.Event("change"));
+}
+
+function selectedUiUpdateMode(
+  document: { querySelector(selector: string): unknown },
+): UiUpdateMode | undefined {
+  if (uiUpdateModeRadio(document, "realtime").checked) return "realtime";
+  if (uiUpdateModeRadio(document, "throttled").checked) return "throttled";
+  return undefined;
+}
+
+function elementHidden(
+  document: { getElementById(id: string): unknown },
+  id: string,
+): boolean {
+  const element = document.getElementById(id) as { hidden: boolean } | null;
+  if (!element) throw new Error(`Missing ${id} element`);
+  return element.hidden;
+}
+
 function withSafeSnapshotContainers<
   T extends { preferences: object; diagnostics: object },
 >(snapshot: T): T {
@@ -293,82 +339,98 @@ describe("Property Inspector UI", () => {
     expect(stylesheet).toMatch(
       /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[^}]*\.sdpi-status[^}]*transition-duration:\s*0s/s,
     );
+    expect(stylesheet).toMatch(
+      /\.sdpi-segmented\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s,
+    );
+    expect(stylesheet).toMatch(/\.sdpi-segmented-input:checked\s*\+\s*\.sdpi-segmented-content/);
+    expect(stylesheet).toMatch(/\.sdpi-segmented-input:focus-visible\s*\+\s*\.sdpi-segmented-content/);
+    expect(stylesheet).toMatch(/\.sdpi-item\[hidden\]\s*\{[^}]*display:\s*none\s*!important/s);
   });
 
-  it("renders global render mode and throttled interval controls", () => {
+  it("renders an accessible segmented render mode group and throttled interval control", () => {
     const { document } = createUi();
 
     expect(document.body.textContent).toContain("화면 반영 방식");
     expect(document.body.textContent).toContain("스로틀 간격(ms)");
     expect(document.body.textContent).toContain("모든 국내/미국 주식 버튼에 전역 적용");
-    const mode = document.getElementById("uiUpdateMode") as unknown as {
-      options: ArrayLike<{ value: string }>;
-    };
-    expect(Array.from(mode.options).map((option) => ({
-      value: option.value,
-      label: (option as unknown as { textContent: string }).textContent,
+    const group = document.querySelector('[role="radiogroup"]');
+    expect(group?.getAttribute("aria-labelledby")).toBe("uiUpdateModeLabel");
+    expect(group?.getAttribute("aria-describedby")).toBe("uiUpdateModeDescription");
+    expect(document.getElementById("uiUpdateModeLabel")?.textContent).toContain("화면 반영 방식");
+    expect(document.getElementById("uiUpdateModeDescription")?.textContent?.trim()).toBeTruthy();
+    expect(elementHidden(document, "uiUpdateModeDescription")).toBe(false);
+    const radios = [...document.querySelectorAll('input[name="uiUpdateMode"]')];
+    expect(radios.map((radio) => ({
+      type: radio.getAttribute("type"),
+      value: radio.getAttribute("value"),
     }))).toEqual([
-      { value: "realtime", label: "실시간 (50ms 최신값 병합)" },
-      { value: "throttled", label: "스로틀링" },
+      { type: "radio", value: "realtime" },
+      { type: "radio", value: "throttled" },
     ]);
+    expect(document.querySelector('label[for="uiUpdateModeRealtime"]')?.textContent)
+      .toContain("실시간");
+    expect(document.querySelector('label[for="uiUpdateModeRealtime"]')?.textContent)
+      .toContain("50ms 최신값 병합");
+    expect(document.querySelector('label[for="uiUpdateModeThrottled"]')?.textContent)
+      .toContain("스로틀링");
+    expect(document.querySelector('label[for="uiUpdateModeThrottled"]')?.textContent)
+      .toContain("선택한 간격마다 최신값 반영");
     const interval = document.getElementById("renderIntervalMs");
+    expect(document.getElementById("renderIntervalField")).not.toBeNull();
     expect(interval?.getAttribute("type")).toBe("number");
     expect(interval?.getAttribute("min")).toBe("500");
     expect(interval?.getAttribute("max")).toBe("1000");
     expect(interval?.getAttribute("step")).toBe("100");
   });
 
-  it("hydrates render preferences and synchronizes interval disabled state", () => {
+  it("hydrates render preferences and synchronizes interval visibility", () => {
     const { window, document } = createUi();
-    const mode = document.getElementById("uiUpdateMode") as unknown as {
-      value: string;
-    };
     const interval = document.getElementById("renderIntervalMs") as unknown as {
       value: string;
-      disabled: boolean;
+    };
+    const intervalField = document.getElementById("renderIntervalField") as unknown as {
+      hidden: boolean;
     };
 
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: { requestId: "realtime", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
     }));
-    expect(mode.value).toBe("realtime");
+    expect(uiUpdateModeRadio(document, "realtime").checked).toBe(true);
+    expect(uiUpdateModeRadio(document, "throttled").checked).toBe(false);
     expect(interval.value).toBe("700");
-    expect(interval.disabled).toBe(true);
+    expect(intervalField.hidden).toBe(true);
 
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: { requestId: "throttled", ok: true, snapshot: snapshotWithRenderPreferences("throttled", 900, 5) },
     }));
-    expect(mode.value).toBe("throttled");
+    expect(uiUpdateModeRadio(document, "realtime").checked).toBe(false);
+    expect(uiUpdateModeRadio(document, "throttled").checked).toBe(true);
     expect(interval.value).toBe("900");
-    expect(interval.disabled).toBe(false);
+    expect(intervalField.hidden).toBe(false);
   });
 
-  it("preserves the throttled interval while render mode toggles round-trip", () => {
+  it("preserves the throttled interval through a realtime-throttled-realtime round-trip", () => {
     const { window, document } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
-      detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("throttled", 700) },
+      detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
     }));
-    const mode = document.getElementById("uiUpdateMode") as unknown as {
-      value: string;
-      dispatchEvent(event: unknown): boolean;
-    };
     const interval = document.getElementById("renderIntervalMs") as unknown as {
       value: string;
-      disabled: boolean;
       dispatchEvent(event: unknown): boolean;
     };
+    const intervalField = document.getElementById("renderIntervalField") as unknown as {
+      hidden: boolean;
+    };
+
+    selectUiUpdateMode(window, document, "throttled");
+    expect(intervalField.hidden).toBe(false);
     interval.value = "900";
     interval.dispatchEvent(new window.Event("input"));
 
-    mode.value = "realtime";
-    mode.dispatchEvent(new window.Event("change"));
-    expect(interval.disabled).toBe(true);
+    selectUiUpdateMode(window, document, "realtime");
+    expect(intervalField.hidden).toBe(true);
     expect(interval.value).toBe("900");
-
-    mode.value = "throttled";
-    mode.dispatchEvent(new window.Event("change"));
-    expect(interval.disabled).toBe(false);
-    expect(interval.value).toBe("900");
+    expect(selectedUiUpdateMode(document)).toBe("realtime");
   });
 
   it("never fills secret inputs and saves action settings with schemaVersion 2", async () => {
@@ -414,7 +476,7 @@ describe("Property Inspector UI", () => {
     });
 
     (document.getElementById("dataMode") as unknown as { value: string }).value = "rest-only";
-    (document.getElementById("uiUpdateMode") as unknown as { value: string }).value = "throttled";
+    selectUiUpdateMode(window, document, "throttled");
     (document.getElementById("renderIntervalMs") as unknown as { value: string }).value = "900";
     (document.getElementById("backupPollIntervalMs") as unknown as { value: string }).value = "60000";
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
@@ -503,6 +565,7 @@ describe("Property Inspector UI", () => {
         detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
       }));
       const interval = document.getElementById("renderIntervalMs") as unknown as { value: string };
+      expect(elementHidden(document, "renderIntervalField")).toBe(true);
       interval.value = invalidValue;
       const commandCount = commands.length;
 
@@ -533,25 +596,22 @@ describe("Property Inspector UI", () => {
     expect(interval.value).toBe("900");
   });
 
-  it("protects render mode changes from settings pushes and keeps disabled state synchronized", () => {
+  it("protects render mode changes from settings pushes and keeps visibility synchronized", () => {
     const { window, document } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
     }));
-    const mode = document.getElementById("uiUpdateMode") as unknown as {
-      value: string;
-      dispatchEvent(event: unknown): boolean;
+    const intervalField = document.getElementById("renderIntervalField") as unknown as {
+      hidden: boolean;
     };
-    const interval = document.getElementById("renderIntervalMs") as unknown as { disabled: boolean };
-    mode.value = "throttled";
-    mode.dispatchEvent(new window.Event("change"));
+    selectUiUpdateMode(window, document, "throttled");
 
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: { type: "settings/update", snapshot: snapshotWithRenderPreferences("realtime", 600, 5) },
     }));
 
-    expect(mode.value).toBe("throttled");
-    expect(interval.disabled).toBe(false);
+    expect(selectedUiUpdateMode(document)).toBe("throttled");
+    expect(intervalField.hidden).toBe(false);
   });
 
   it("correlates out-of-order acknowledgements to the correct section", () => {
@@ -591,19 +651,16 @@ describe("Property Inspector UI", () => {
         value: string;
         dispatchEvent(event: unknown): boolean;
       };
-      const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
+      const interval = document.getElementById("renderIntervalMs") as unknown as {
         value: string;
         dispatchEvent(event: unknown): boolean;
       };
-      const interval = document.getElementById("renderIntervalMs") as unknown as {
-        value: string;
-        disabled: boolean;
-        dispatchEvent(event: unknown): boolean;
+      const intervalField = document.getElementById("renderIntervalField") as unknown as {
+        hidden: boolean;
       };
       dataMode.value = "rest-only";
       dataMode.dispatchEvent(new window.Event("change"));
-      uiUpdateMode.value = "throttled";
-      uiUpdateMode.dispatchEvent(new window.Event("change"));
+      selectUiUpdateMode(window, document, "throttled");
       interval.value = "900";
       interval.dispatchEvent(new window.Event("input"));
       document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
@@ -626,8 +683,9 @@ describe("Property Inspector UI", () => {
       }));
 
       expect(dataMode.value).toBe("rest-only");
-      expect(uiUpdateMode.value).toBe("throttled");
-      expect(interval).toMatchObject({ value: "900", disabled: false });
+      expect(selectedUiUpdateMode(document)).toBe("throttled");
+      expect(interval.value).toBe("900");
+      expect(intervalField.hidden).toBe(false);
     },
   );
 
@@ -640,19 +698,16 @@ describe("Property Inspector UI", () => {
       value: string;
       dispatchEvent(event: unknown): boolean;
     };
-    const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
+    const interval = document.getElementById("renderIntervalMs") as unknown as {
       value: string;
       dispatchEvent(event: unknown): boolean;
     };
-    const interval = document.getElementById("renderIntervalMs") as unknown as {
-      value: string;
-      disabled: boolean;
-      dispatchEvent(event: unknown): boolean;
+    const intervalField = document.getElementById("renderIntervalField") as unknown as {
+      hidden: boolean;
     };
     dataMode.value = "rest-only";
     dataMode.dispatchEvent(new window.Event("change"));
-    uiUpdateMode.value = "throttled";
-    uiUpdateMode.dispatchEvent(new window.Event("change"));
+    selectUiUpdateMode(window, document, "throttled");
     interval.value = "900";
     interval.dispatchEvent(new window.Event("input"));
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
@@ -674,8 +729,9 @@ describe("Property Inspector UI", () => {
     }));
 
     expect(dataMode.value).toBe("automatic");
-    expect(uiUpdateMode.value).toBe("realtime");
-    expect(interval).toMatchObject({ value: "700", disabled: true });
+    expect(selectedUiUpdateMode(document)).toBe("realtime");
+    expect(interval.value).toBe("700");
+    expect(intervalField.hidden).toBe(true);
   });
 
   it.each([
@@ -778,14 +834,12 @@ describe("Property Inspector UI", () => {
         value: string;
         dispatchEvent(event: unknown): boolean;
       };
-      const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
+      const interval = document.getElementById("renderIntervalMs") as unknown as {
         value: string;
         dispatchEvent(event: unknown): boolean;
       };
-      const interval = document.getElementById("renderIntervalMs") as unknown as {
-        value: string;
-        disabled: boolean;
-        dispatchEvent(event: unknown): boolean;
+      const intervalField = document.getElementById("renderIntervalField") as unknown as {
+        hidden: boolean;
       };
       const backup = document.getElementById("backupPollIntervalMs") as unknown as {
         value: string;
@@ -793,8 +847,7 @@ describe("Property Inspector UI", () => {
       };
       dataMode.value = "rest-only";
       dataMode.dispatchEvent(new window.Event("change"));
-      uiUpdateMode.value = "throttled";
-      uiUpdateMode.dispatchEvent(new window.Event("change"));
+      selectUiUpdateMode(window, document, "throttled");
       interval.value = "900";
       interval.dispatchEvent(new window.Event("input"));
       backup.value = "60000";
@@ -838,11 +891,9 @@ describe("Property Inspector UI", () => {
       expect(document.getElementById("diagnosticsOutput")?.textContent)
         .toContain('"state": "rev6-latest"');
       expect(dataMode.value).toBe(newerPreferences.dataMode);
-      expect(uiUpdateMode.value).toBe(newerPreferences.uiUpdateMode);
-      expect(interval).toMatchObject({
-        value: String(newerPreferences.renderIntervalMs),
-        disabled: newerPreferences.uiUpdateMode === "realtime",
-      });
+      expect(selectedUiUpdateMode(document)).toBe(newerPreferences.uiUpdateMode);
+      expect(interval.value).toBe(String(newerPreferences.renderIntervalMs));
+      expect(intervalField.hidden).toBe(newerPreferences.uiUpdateMode === "realtime");
       expect(backup.value).toBe(String(newerPreferences.backupPollIntervalMs));
 
       const sameRevisionFollowUp = snapshotWithPreferenceChanges(6, {
@@ -871,12 +922,11 @@ describe("Property Inspector UI", () => {
       value: string;
       dispatchEvent(event: unknown): boolean;
     };
-    const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
-      value: string;
-    };
     const interval = document.getElementById("renderIntervalMs") as unknown as {
       value: string;
-      disabled: boolean;
+    };
+    const intervalField = document.getElementById("renderIntervalField") as unknown as {
+      hidden: boolean;
     };
     dataMode.value = "rest-only";
     dataMode.dispatchEvent(new window.Event("change"));
@@ -902,8 +952,9 @@ describe("Property Inspector UI", () => {
 
     expect(document.getElementById("connectionBadge")?.textContent).toBe("sequence-3-latest");
     expect(dataMode.value).toBe("automatic");
-    expect(uiUpdateMode.value).toBe("throttled");
-    expect(interval).toMatchObject({ value: "800", disabled: false });
+    expect(selectedUiUpdateMode(document)).toBe("throttled");
+    expect(interval.value).toBe("800");
+    expect(intervalField.hidden).toBe(false);
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     expect(commands.at(-1)).toMatchObject({
       type: "preferences/save",
@@ -1128,12 +1179,10 @@ describe("Property Inspector UI", () => {
     expect(document.getElementById("maskedAppKey")?.textContent).toBe("REV6••••KEY");
     expect((document.getElementById("dataMode") as unknown as { value: string }).value)
       .toBe("rest-only");
-    expect((document.getElementById("uiUpdateMode") as unknown as { value: string }).value)
-      .toBe("throttled");
-    expect((document.getElementById("renderIntervalMs") as unknown as {
-      value: string;
-      disabled: boolean;
-    })).toMatchObject({ value: "900", disabled: false });
+    expect(selectedUiUpdateMode(document)).toBe("throttled");
+    expect((document.getElementById("renderIntervalMs") as unknown as { value: string }).value)
+      .toBe("900");
+    expect(elementHidden(document, "renderIntervalField")).toBe(false);
     expect((document.getElementById("backupPollIntervalMs") as unknown as { value: string }).value)
       .toBe("60000");
 
@@ -1351,12 +1400,10 @@ describe("Property Inspector UI", () => {
 
     expect((document.getElementById("dataMode") as unknown as { value: string }).value)
       .toBe("rest-only");
-    expect((document.getElementById("uiUpdateMode") as unknown as { value: string }).value)
-      .toBe("throttled");
-    expect((document.getElementById("renderIntervalMs") as unknown as {
-      value: string;
-      disabled: boolean;
-    })).toMatchObject({ value: "900", disabled: false });
+    expect(selectedUiUpdateMode(document)).toBe("throttled");
+    expect((document.getElementById("renderIntervalMs") as unknown as { value: string }).value)
+      .toBe("900");
+    expect(elementHidden(document, "renderIntervalField")).toBe(false);
     expect((document.getElementById("backupPollIntervalMs") as unknown as { value: string }).value)
       .toBe("60000");
   });
@@ -1384,10 +1431,10 @@ describe("Property Inspector UI", () => {
 
     expect((document.getElementById("dataMode") as unknown as { value: string }).value)
       .toBe("rest-only");
-    expect((document.getElementById("renderIntervalMs") as unknown as {
-      value: string;
-      disabled: boolean;
-    })).toMatchObject({ value: "900", disabled: false });
+    expect(selectedUiUpdateMode(document)).toBe("throttled");
+    expect((document.getElementById("renderIntervalMs") as unknown as { value: string }).value)
+      .toBe("900");
+    expect(elementHidden(document, "renderIntervalField")).toBe(false);
     document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
     expect(commands.at(-1)).toMatchObject({
       type: "credentials/clear",
@@ -1484,10 +1531,10 @@ describe("Property Inspector UI", () => {
 
       expect((document.getElementById("dataMode") as unknown as { value: string }).value)
         .toBe("automatic");
-      expect((document.getElementById("renderIntervalMs") as unknown as {
-        value: string;
-        disabled: boolean;
-      })).toMatchObject({ value: "700", disabled: true });
+      expect(selectedUiUpdateMode(document)).toBe("realtime");
+      expect((document.getElementById("renderIntervalMs") as unknown as { value: string }).value)
+        .toBe("700");
+      expect(elementHidden(document, "renderIntervalField")).toBe(true);
       document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
       expect(commands.at(-1)).toMatchObject({
         type: "credentials/clear",
@@ -2151,14 +2198,12 @@ describe("Property Inspector UI", () => {
       value: string;
       dispatchEvent(event: unknown): boolean;
     };
-    const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
+    const interval = document.getElementById("renderIntervalMs") as unknown as {
       value: string;
       dispatchEvent(event: unknown): boolean;
     };
-    const interval = document.getElementById("renderIntervalMs") as unknown as {
-      value: string;
-      disabled: boolean;
-      dispatchEvent(event: unknown): boolean;
+    const intervalField = document.getElementById("renderIntervalField") as unknown as {
+      hidden: boolean;
     };
     const backup = document.getElementById("backupPollIntervalMs") as unknown as {
       value: string;
@@ -2166,8 +2211,7 @@ describe("Property Inspector UI", () => {
     };
     dataMode.value = "rest-only";
     dataMode.dispatchEvent(new window.Event("change"));
-    uiUpdateMode.value = "throttled";
-    uiUpdateMode.dispatchEvent(new window.Event("change"));
+    selectUiUpdateMode(window, document, "throttled");
     interval.value = "900";
     interval.dispatchEvent(new window.Event("input"));
     backup.value = "60000";
@@ -2178,8 +2222,9 @@ describe("Property Inspector UI", () => {
       detail: { type: "diagnostics/update", snapshot: remoteSnapshot },
     }));
     expect(dataMode.value).toBe("rest-only");
-    expect(uiUpdateMode.value).toBe("throttled");
-    expect(interval).toMatchObject({ value: "900", disabled: false });
+    expect(selectedUiUpdateMode(document)).toBe("throttled");
+    expect(interval.value).toBe("900");
+    expect(intervalField.hidden).toBe(false);
     expect(backup.value).toBe("60000");
 
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
