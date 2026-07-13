@@ -351,12 +351,12 @@
 
   StockPropertyInspector.prototype.applySnapshot = function (snapshot, options) {
     var safeSnapshot = copyKnownSnapshot(snapshot);
-    if (!safeSnapshot) return;
+    if (!safeSnapshot) return false;
     options = options || {};
     var settingsRevision = safeSnapshot.settingsRevision;
     if (settingsRevision < this.settingsRevision) {
       this.applyDiagnostics(safeSnapshot.diagnostics);
-      return;
+      return false;
     }
     this.settingsRevision = Math.max(this.settingsRevision, settingsRevision);
     byId("maskedAppKey").textContent = safeSnapshot.maskedAppKey || "설정 안 됨";
@@ -370,6 +370,7 @@
       options.applyPreferences === true
     );
     this.applyDiagnostics(safeSnapshot.diagnostics);
+    return true;
   };
 
   StockPropertyInspector.prototype.applyRevision = function (snapshot) {
@@ -425,18 +426,22 @@
     if (message.snapshot) {
       if (pending.section === "credentials") {
         var credentialsUnchanged = pending.credentialEditVersion === this.credentialEditVersion;
-        this.applySnapshot(message.snapshot, {
+        var credentialSnapshotApplied = this.applySnapshot(message.snapshot, {
           applyCredentials: credentialsUnchanged && message.ok === true,
           applyPreferences: false,
         });
-        if (credentialsUnchanged && message.ok === true) this.credentialEditVersion = 0;
+        if (credentialsUnchanged && message.ok === true && credentialSnapshotApplied) {
+          this.credentialEditVersion = 0;
+        }
       } else if (pending.section === "advanced" && pending.type === "preferences/save") {
         var preferencesUnchanged = pending.preferencesEditVersion === this.preferencesEditVersion;
-        this.applySnapshot(message.snapshot, {
+        var preferenceSnapshotApplied = this.applySnapshot(message.snapshot, {
           applyCredentials: false,
           applyPreferences: preferencesUnchanged && message.ok === true,
         });
-        if (preferencesUnchanged && message.ok === true) this.preferencesEditVersion = 0;
+        if (preferencesUnchanged && message.ok === true && preferenceSnapshotApplied) {
+          this.preferencesEditVersion = 0;
+        }
       } else if (pending.section === "settings") {
         this.applySnapshot(message.snapshot, {
           applyCredentials: pending.credentialEditVersion === this.credentialEditVersion,

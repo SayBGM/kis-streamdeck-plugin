@@ -46,6 +46,31 @@ function inPiRealm<T>(window: Window, value: T): T {
   return parse(JSON.stringify(value));
 }
 
+function withUnsafePreferencePrototype<T extends ReturnType<typeof responseSnapshot>>(
+  snapshot: T,
+): T {
+  return Object.assign(Object.create(null), snapshot, {
+    preferences: Object.assign(
+      Object.create({ inheritedPreference: true }),
+      snapshot.preferences,
+    ),
+  }) as T;
+}
+
+function withUnsafeSnapshotAccessor<T extends ReturnType<typeof responseSnapshot>>(
+  snapshot: T,
+): T {
+  const unsafeSnapshot = Object.assign(Object.create(null), snapshot) as T;
+  Object.defineProperty(unsafeSnapshot, "schemaVersion", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      throw new Error("unsafe snapshot accessor must not execute");
+    },
+  });
+  return unsafeSnapshot;
+}
+
 function responseSnapshot() {
   return withSafeSnapshotContainers({
     schemaVersion: 2,
@@ -402,6 +427,193 @@ describe("Property Inspector UI", () => {
     expect(document.getElementById("advancedStatusMessage")?.textContent).toContain("적용");
     expect(document.getElementById("credentialStatusMessage")?.textContent).toContain("충돌");
   });
+
+  it.each(["accessor", "custom-prototype", "missing"] as const)(
+    "preserves dirty preferences after a successful %s-snapshot acknowledgement",
+    (snapshotKind) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const dataMode = document.getElementById("dataMode") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      const interval = document.getElementById("renderIntervalMs") as unknown as {
+        value: string;
+        disabled: boolean;
+        dispatchEvent(event: unknown): boolean;
+      };
+      dataMode.value = "rest-only";
+      dataMode.dispatchEvent(new window.Event("change"));
+      uiUpdateMode.value = "throttled";
+      uiUpdateMode.dispatchEvent(new window.Event("change"));
+      interval.value = "900";
+      interval.dispatchEvent(new window.Event("input"));
+      document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+      const request = commands.at(-1) as { requestId: string };
+      const acknowledgement: Record<string, unknown> = {
+        requestId: request.requestId,
+        ok: true,
+      };
+      if (snapshotKind === "accessor") {
+        acknowledgement.snapshot = withUnsafeSnapshotAccessor(snapshotAt(5));
+      } else if (snapshotKind === "custom-prototype") {
+        acknowledgement.snapshot = withUnsafePreferencePrototype(snapshotAt(5));
+      }
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: acknowledgement,
+      }));
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "settings/update", snapshot: snapshotAt(6) },
+      }));
+
+      expect(dataMode.value).toBe("rest-only");
+      expect(uiUpdateMode.value).toBe("throttled");
+      expect(interval).toMatchObject({ value: "900", disabled: false });
+    },
+  );
+
+  it("resets dirty preferences after a successful safe-snapshot acknowledgement", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const interval = document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      disabled: boolean;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    uiUpdateMode.value = "throttled";
+    uiUpdateMode.dispatchEvent(new window.Event("change"));
+    interval.value = "900";
+    interval.dispatchEvent(new window.Event("input"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: true,
+        snapshot: snapshotWithPreferenceChanges(5, {
+          dataMode: "rest-only",
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 900,
+        }),
+      },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(6) },
+    }));
+
+    expect(dataMode.value).toBe("automatic");
+    expect(uiUpdateMode.value).toBe("realtime");
+    expect(interval).toMatchObject({ value: "700", disabled: true });
+  });
+
+  it.each([
+    ["save", "accessor"],
+    ["save", "custom-prototype"],
+    ["save", "missing"],
+    ["clear", "accessor"],
+    ["clear", "custom-prototype"],
+    ["clear", "missing"],
+  ] as const)(
+    "preserves dirty credentials after %s succeeds with a %s snapshot",
+    (commandType, snapshotKind) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const key = document.getElementById("appKey") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      const secret = document.getElementById("appSecret") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      key.value = "LOCALKEY";
+      key.dispatchEvent(new window.Event("input"));
+      secret.value = "local-secret";
+      secret.dispatchEvent(new window.Event("input"));
+      document.getElementById(
+        commandType === "save" ? "saveCredentialsButton" : "clearCredentialsButton",
+      )?.dispatchEvent(new window.Event("click"));
+      const request = commands.at(-1) as { requestId: string };
+      const acknowledgement: Record<string, unknown> = {
+        requestId: request.requestId,
+        ok: true,
+      };
+      if (snapshotKind === "accessor") {
+        acknowledgement.snapshot = withUnsafeSnapshotAccessor(snapshotAt(5));
+      } else if (snapshotKind === "custom-prototype") {
+        acknowledgement.snapshot = withUnsafePreferencePrototype(snapshotAt(5));
+      }
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: acknowledgement,
+      }));
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "settings/update", snapshot: snapshotAt(6) },
+      }));
+
+      expect(key.value).toBe("LOCALKEY");
+      expect(secret.value).toBe("local-secret");
+    },
+  );
+
+  it.each(["save", "clear"] as const)(
+    "resets dirty credentials after %s succeeds with a safe snapshot",
+    (commandType) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const key = document.getElementById("appKey") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      const secret = document.getElementById("appSecret") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      key.value = "LOCALKEY";
+      key.dispatchEvent(new window.Event("input"));
+      secret.value = "local-secret";
+      secret.dispatchEvent(new window.Event("input"));
+      document.getElementById(
+        commandType === "save" ? "saveCredentialsButton" : "clearCredentialsButton",
+      )?.dispatchEvent(new window.Event("click"));
+      const request = commands.at(-1) as { requestId: string };
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: request.requestId, ok: true, snapshot: snapshotAt(5) },
+      }));
+      expect(secret.value).toBe("");
+      secret.value = "stale-without-input-event";
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "settings/update", snapshot: snapshotAt(6) },
+      }));
+
+      expect(secret.value).toBe("");
+    },
+  );
 
   it("preserves dirty secret and preference inputs during diagnostics pushes and stale acks", () => {
     const { window, document, commands } = createUi();
