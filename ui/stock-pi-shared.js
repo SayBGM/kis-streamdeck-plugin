@@ -106,7 +106,7 @@
       '<div class="sdpi-item"><div class="sdpi-item-label">데이터 모드</div><div class="sdpi-item-value">',
       '<select id="dataMode"><option value="automatic">자동 (WebSocket 우선)</option><option value="rest-only">REST 전용</option></select>',
       "</div></div>",
-      '<div class="sdpi-item"><div class="sdpi-item-label">렌더 간격</div><div class="sdpi-item-value">',
+      '<div class="sdpi-item"><div class="sdpi-item-label">화면 갱신 제한</div><div class="sdpi-item-value">',
       '<select id="renderIntervalMs"><option value="2000">2초</option><option value="5000">5초</option><option value="10000">10초</option></select>',
       "</div></div>",
       '<div class="sdpi-item"><div class="sdpi-item-label">백업 폴링</div><div class="sdpi-item-value">',

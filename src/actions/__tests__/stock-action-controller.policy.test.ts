@@ -1400,6 +1400,44 @@ describe("StockActionController settings, market and rendering boundaries", () =
     renderScheduler.destroy();
   });
 
+  it("processes every websocket quote and commits only the latest value per render interval", async () => {
+    const base = makeAdapter();
+    const parseWebSocket = vi.fn(base.parseWebSocket.bind(base));
+    const adapter = { ...base, parseWebSocket };
+    const renderScheduler = new RenderScheduler({
+      now: () => Date.now(),
+      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    });
+    const test = setup({
+      adapterResolver: () => adapter,
+      renderScheduler,
+    });
+    test.settings.resolve();
+    const setImage = vi.fn();
+    await test.controller.appear({
+      actionId: "throttled",
+      settings: { symbol: "005930" },
+      actionPort: { setImage },
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    test.subscriptions.state("live");
+    await vi.advanceTimersByTimeAsync(1_000);
+    setImage.mockClear();
+
+    test.subscriptions.data(70_000);
+    test.subscriptions.data(71_000);
+    test.subscriptions.data(72_000);
+
+    expect(parseWebSocket).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(setImage).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(setImage).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(setImage.mock.calls[0]![0] as string).quote.price).toBe(72_000);
+    renderScheduler.destroy();
+  });
+
   it("recovery timer 등록이 실패하면 recovery 상태에 고정되지 않는다", async () => {
     const test = setup({
       setTimeout: (callback, delayMs) => {

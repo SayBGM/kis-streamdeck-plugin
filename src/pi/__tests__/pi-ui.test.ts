@@ -122,6 +122,19 @@ describe("Property Inspector UI", () => {
       .toBe(false);
   });
 
+  it("labels the existing render throttle as a screen refresh limit", () => {
+    const { document } = createUi();
+
+    expect(document.body.textContent).toContain("화면 갱신 제한");
+    expect(document.body.textContent).not.toContain("렌더 간격");
+    const select = document.getElementById("renderIntervalMs") as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "2000",
+      "5000",
+      "10000",
+    ]);
+  });
+
   it("never fills secret inputs and saves action settings with schemaVersion 2", async () => {
     const { window, document, actionSettings } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
