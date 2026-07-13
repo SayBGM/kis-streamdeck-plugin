@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MarketSnapshot } from "../../core/market-clock.js";
 import { KisError } from "../../core/errors.js";
+import type { EffectiveRenderIntervalMs } from "../../core/ui-update-policy.js";
 import type {
   CanonicalInstrument,
   MarketAdapter,
@@ -282,14 +283,18 @@ class ImmediateScheduler {
   requests: Array<Pick<RenderRequest, "category" | "semanticKey">> = [];
   removals: Array<{ id: string; generation: number }> = [];
 
-  activate(id: string, interval: 2_000 | 5_000 | 10_000): number {
+  activate(id: string, interval: EffectiveRenderIntervalMs): number {
     const generation = ++this.nextGeneration;
     this.active.set(id, generation);
     this.intervals.push(interval);
     return generation;
   }
 
-  updateInterval(id: string, generation: number, interval: 2_000 | 5_000 | 10_000): boolean {
+  updateInterval(
+    id: string,
+    generation: number,
+    interval: EffectiveRenderIntervalMs,
+  ): boolean {
     if (this.active.get(id) !== generation) return false;
     this.intervals.push(interval);
     return true;
@@ -561,7 +566,8 @@ describe("StockActionController automatic policy and lifecycle", () => {
     test.settings.emit({
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 5_000,
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 700,
         backupPollIntervalMs: 15_000,
       },
     });
@@ -577,7 +583,107 @@ describe("StockActionController automatic policy and lifecycle", () => {
 
     expect(test.subscriptions.subscriptions).toHaveLength(subscriptionCount);
     expect(test.rest.requests).toHaveLength(requestCount + 1);
-    expect(test.scheduler.intervals.at(-1)).toBe(5_000);
+    expect(test.scheduler.intervals.at(-1)).toBe(700);
+  });
+
+  it("전역 UI 모드를 session activate와 실행 중 updateInterval에 적용한다", async () => {
+    const test = setup();
+    test.settings.resolve({
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 30_000,
+      },
+    });
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(test.scheduler.intervals).toEqual([50]);
+
+    test.settings.emit({
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 30_000,
+      },
+    });
+    test.settings.emit({
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
+        backupPollIntervalMs: 30_000,
+      },
+    });
+    test.settings.emit({
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 1_000,
+        backupPollIntervalMs: 30_000,
+      },
+    });
+
+    expect(test.scheduler.intervals).toEqual([50, 700, 1_000, 50]);
+    expect(test.subscriptions.subscriptions).toHaveLength(1);
+    expect(test.subscriptions.subscriptions[0]?.released).toBe(false);
+    expect(test.rest.requests).toHaveLength(0);
+  });
+
+  it("realtime 모드는 standalone fatal target도 50ms로 activate한다", async () => {
+    const test = setup();
+    test.settings.resolve({
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 30_000,
+      },
+    });
+
+    await test.controller.appear({
+      actionId: "invalid",
+      settings: {},
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(test.scheduler.intervals).toEqual([50]);
+  });
+
+  it("전역 모드 변경은 모든 활성 session의 render interval만 갱신한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await Promise.all([
+      test.controller.appear({
+        actionId: "a",
+        settings: { symbol: "005930" },
+        actionPort: { setImage: vi.fn() },
+      }),
+      test.controller.appear({
+        actionId: "b",
+        settings: { symbol: "000660" },
+        actionPort: { setImage: vi.fn() },
+      }),
+    ]);
+
+    test.settings.emit({
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 30_000,
+      },
+    });
+
+    expect(test.scheduler.intervals).toEqual([1_000, 1_000, 50, 50]);
+    expect(test.subscriptions.subscriptions).toHaveLength(2);
+    expect(test.subscriptions.subscriptions.every((entry) => !entry.released)).toBe(true);
+    expect(test.rest.requests).toHaveLength(0);
   });
 
   it.each([
@@ -585,15 +691,24 @@ describe("StockActionController automatic policy and lifecycle", () => {
       accessToken: "new-token",
       accessTokenFingerprint: "fingerprint",
       accessTokenVersion: 7,
-    }, 2_000],
-    ["revision", { settingsRevision: 99, arbitraryFutureField: "kept" }, 2_000],
-    ["render", {
+    }, 1_000],
+    ["revision", { settingsRevision: 99, arbitraryFutureField: "kept" }, 1_000],
+    ["realtime-ui", {
       preferences: {
         dataMode: "automatic",
-        renderIntervalMs: 5_000,
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
         backupPollIntervalMs: 30_000,
       },
-    }, 5_000],
+    }, 50],
+    ["throttled-ui", {
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 30_000,
+      },
+    }, 700],
   ] as const)(
     "%s-only global 변경은 realtime policy/subscription/grace를 재시작하지 않는다",
     async (_kind, overrides, expectedInterval) => {
@@ -616,6 +731,40 @@ describe("StockActionController automatic policy and lifecycle", () => {
       expect(test.scheduler.intervals.at(-1)).toBe(expectedInterval);
     },
   );
+
+  it("표시 설정만 바뀌면 closed REST와 policy work를 취소하거나 재시작하지 않는다", async () => {
+    const test = setup();
+    test.clock.current = snapshot("CLOSED", 5_000);
+    test.settings.resolve({
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 30_000,
+      },
+    });
+    await test.controller.appear({
+      actionId: "closed",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+    const request = test.rest.requests[0]!;
+
+    test.settings.emit({
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 1_000,
+        backupPollIntervalMs: 30_000,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(test.scheduler.intervals).toEqual([700, 50]);
+    expect(request.signal?.aborted).toBe(false);
+    expect(test.rest.requests).toHaveLength(1);
+    expect(test.subscriptions.subscriptions).toHaveLength(0);
+  });
 
   it.each(["desired", "stale", "parked", "rejected"] as const)(
     "유효 WS 이후 %s 상태는 즉시 fallback REST를 시작한다",
@@ -643,7 +792,8 @@ describe("StockActionController automatic policy and lifecycle", () => {
       test.settings.resolve({
         preferences: {
           dataMode: "automatic",
-          renderIntervalMs: 2_000,
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 1_000,
           backupPollIntervalMs: 15_000,
         },
       });
@@ -704,7 +854,8 @@ describe("StockActionController automatic policy and lifecycle", () => {
     test.settings.resolve({
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 2_000,
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
         backupPollIntervalMs: 15_000,
       },
     });
@@ -951,14 +1102,15 @@ describe("StockActionController settings, market and rendering boundaries", () =
     test.settings.emit({
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 5_000,
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 700,
         backupPollIntervalMs: 15_000,
       },
     });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(oldSubscription.released).toBe(true);
-    expect(test.scheduler.intervals).toEqual([2_000, 5_000]);
+    expect(test.scheduler.intervals).toEqual([1_000, 700]);
     expect(test.rest.requests.map((request) => request.priority)).toEqual(["initial"]);
   });
 
@@ -967,7 +1119,8 @@ describe("StockActionController settings, market and rendering boundaries", () =
     test.settings.resolve({
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 2_000,
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
         backupPollIntervalMs: 15_000,
       },
     });
@@ -1220,7 +1373,8 @@ describe("StockActionController settings, market and rendering boundaries", () =
     test.settings.emit({
       preferences: {
         dataMode: "rest-only",
-        renderIntervalMs: 10_000,
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 1_000,
         backupPollIntervalMs: 60_000,
       },
     });
@@ -1400,43 +1554,57 @@ describe("StockActionController settings, market and rendering boundaries", () =
     renderScheduler.destroy();
   });
 
-  it("processes every websocket quote and commits only the latest value per render interval", async () => {
-    const base = makeAdapter();
-    const parseWebSocket = vi.fn(base.parseWebSocket.bind(base));
-    const adapter = { ...base, parseWebSocket };
-    const renderScheduler = new RenderScheduler({
-      now: () => Date.now(),
-      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-    });
-    const test = setup({
-      adapterResolver: () => adapter,
-      renderScheduler,
-    });
-    test.settings.resolve();
-    const setImage = vi.fn();
-    await test.controller.appear({
-      actionId: "throttled",
-      settings: { symbol: "005930" },
-      actionPort: { setImage },
-    });
-    await vi.advanceTimersByTimeAsync(2_000);
-    test.subscriptions.state("live");
-    await vi.advanceTimersByTimeAsync(1_000);
-    setImage.mockClear();
+  it.each([
+    ["realtime", "realtime", 1_000, 50],
+    ["700ms throttled", "throttled", 700, 700],
+    ["1000ms throttled", "throttled", 1_000, 1_000],
+  ] as const)(
+    "%s 모드는 모든 websocket quote를 처리하고 구간당 최신값만 commit한다",
+    async (_label, uiUpdateMode, renderIntervalMs, effectiveIntervalMs) => {
+      const base = makeAdapter();
+      const parseWebSocket = vi.fn(base.parseWebSocket.bind(base));
+      const adapter = { ...base, parseWebSocket };
+      const renderScheduler = new RenderScheduler({
+        now: () => Date.now(),
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      });
+      const test = setup({
+        adapterResolver: () => adapter,
+        renderScheduler,
+      });
+      test.settings.resolve({
+        preferences: {
+          dataMode: "automatic",
+          uiUpdateMode,
+          renderIntervalMs,
+          backupPollIntervalMs: 30_000,
+        },
+      });
+      const setImage = vi.fn();
+      await test.controller.appear({
+        actionId: "throttled",
+        settings: { symbol: "005930" },
+        actionPort: { setImage },
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      test.subscriptions.state("live");
+      await vi.advanceTimersByTimeAsync(1_000);
+      setImage.mockClear();
 
-    test.subscriptions.data(70_000);
-    test.subscriptions.data(71_000);
-    test.subscriptions.data(72_000);
+      test.subscriptions.data(70_000);
+      test.subscriptions.data(71_000);
+      test.subscriptions.data(72_000);
 
-    expect(parseWebSocket).toHaveBeenCalledTimes(3);
-    await vi.advanceTimersByTimeAsync(1_999);
-    expect(setImage).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(setImage).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(setImage.mock.calls[0]![0] as string).quote.price).toBe(72_000);
-    renderScheduler.destroy();
-  });
+      expect(parseWebSocket).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(effectiveIntervalMs - 1);
+      expect(setImage).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(setImage).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(setImage.mock.calls[0]![0] as string).quote.price).toBe(72_000);
+      renderScheduler.destroy();
+    },
+  );
 
   it("recovery timer 등록이 실패하면 recovery 상태에 고정되지 않는다", async () => {
     const test = setup({

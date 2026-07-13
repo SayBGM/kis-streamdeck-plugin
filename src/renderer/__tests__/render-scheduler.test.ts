@@ -41,9 +41,60 @@ describe("RenderScheduler", () => {
     vi.useRealTimers();
   });
 
-  it("coalesces 1,000 quote updates over ten seconds to at most five renders", async () => {
+  it("50ms 동안 최신 normal request 하나만 commit한다", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 50);
+    const renders: string[] = [];
+    const commits: string[] = [];
+
+    scheduler.submit(
+      "button",
+      generation,
+      makeRequest("old", "normal", "old-image", renders, commits),
+    );
+    await vi.advanceTimersByTimeAsync(49);
+    scheduler.submit(
+      "button",
+      generation,
+      makeRequest("latest", "normal", "latest-image", renders, commits),
+    );
+
+    expect(commits).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(renders).toEqual(["latest"]);
+    expect(commits).toEqual(["latest-image"]);
+  });
+
+  it.each([700, 1_000] as const)(
+    "%dms 동안 최신 normal request 하나만 commit한다",
+    async (intervalMs) => {
+      const scheduler = new RenderScheduler();
+      const generation = scheduler.activate("button", intervalMs);
+      const renders: string[] = [];
+      const commits: string[] = [];
+
+      scheduler.submit(
+        "button",
+        generation,
+        makeRequest("old", "normal", "old-image", renders, commits),
+      );
+      await vi.advanceTimersByTimeAsync(intervalMs - 1);
+      scheduler.submit(
+        "button",
+        generation,
+        makeRequest("latest", "normal", "latest-image", renders, commits),
+      );
+
+      expect(commits).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(renders).toEqual(["latest"]);
+      expect(commits).toEqual(["latest-image"]);
+    },
+  );
+
+  it("coalesces 1,000 quote updates over ten seconds to ten renders", async () => {
+    const scheduler = new RenderScheduler();
+    const generation = scheduler.activate("button", 1_000);
     const renders: string[] = [];
     const commits: string[] = [];
 
@@ -55,16 +106,16 @@ describe("RenderScheduler", () => {
       );
       await vi.advanceTimersByTimeAsync(10);
     }
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(renders.length).toBeLessThanOrEqual(5);
+    expect(renders).toHaveLength(10);
     expect(commits).toHaveLength(renders.length);
     expect(commits.at(-1)).toBe("image-999");
   });
 
   it("coalesces control-state flapping to at most ten renders in ten seconds", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const renders: string[] = [];
     const commits: string[] = [];
 
@@ -84,7 +135,7 @@ describe("RenderScheduler", () => {
 
   it("flushes manual and fatal requests immediately without changing the normal interval", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 5_000);
+    const generation = scheduler.activate("button", 700);
     const renders: string[] = [];
     const commits: string[] = [];
 
@@ -107,7 +158,7 @@ describe("RenderScheduler", () => {
       generation,
       makeRequest("next", "normal", "next-image", renders, commits),
     );
-    await vi.advanceTimersByTimeAsync(4_999);
+    await vi.advanceTimersByTimeAsync(699);
     expect(commits).toEqual(["manual-image"]);
     await vi.advanceTimersByTimeAsync(1);
     expect(commits).toEqual(["manual-image", "next-image"]);
@@ -115,7 +166,7 @@ describe("RenderScheduler", () => {
 
   it("does not let lower-priority work overwrite immediate work queued during a commit", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     let releaseFirst!: () => void;
     const events: string[] = [];
 
@@ -162,13 +213,13 @@ describe("RenderScheduler", () => {
     await settle();
     expect(events).toEqual(["first:start", "first:end", "urgent-new"]);
 
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(500);
     expect(events).toEqual(["first:start", "first:end", "urgent-new", "normal"]);
   });
 
   it("applies interval changes to the pending last-write-wins request", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 10_000);
+    const generation = scheduler.activate("button", 1_000);
     const renders: string[] = [];
     const commits: string[] = [];
 
@@ -177,14 +228,14 @@ describe("RenderScheduler", () => {
       generation,
       makeRequest("old", "normal", "old-image", renders, commits),
     );
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(scheduler.updateInterval("button", generation, 2_000)).toBe(true);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(scheduler.updateInterval("button", generation, 700)).toBe(true);
     scheduler.submit(
       "button",
       generation,
       makeRequest("new", "normal", "new-image", renders, commits),
     );
-    await vi.advanceTimersByTimeAsync(1_999);
+    await vi.advanceTimersByTimeAsync(699);
     expect(commits).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(commits).toEqual(["new-image"]);
@@ -192,7 +243,7 @@ describe("RenderScheduler", () => {
 
   it("skips both rendering and IPC when the semantic state was committed", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const renders: string[] = [];
     const commits: string[] = [];
 
@@ -216,7 +267,7 @@ describe("RenderScheduler", () => {
 
   it("skips IPC for identical generated images and commits the new semantic state", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const renders: string[] = [];
     const commits: string[] = [];
 
@@ -246,7 +297,7 @@ describe("RenderScheduler", () => {
 
   it("ignores stale async render results after removal and reactivation", async () => {
     const scheduler = new RenderScheduler();
-    const firstGeneration = scheduler.activate("button", 2_000);
+    const firstGeneration = scheduler.activate("button", 500);
     let resolveOld!: (image: string) => void;
     const oldImage = new Promise<string>((resolve) => {
       resolveOld = resolve;
@@ -263,7 +314,7 @@ describe("RenderScheduler", () => {
     });
     await settle();
     expect(scheduler.remove("button", firstGeneration)).toBe(true);
-    const secondGeneration = scheduler.activate("button", 2_000);
+    const secondGeneration = scheduler.activate("button", 500);
     expect(secondGeneration).toBeGreaterThan(firstGeneration);
 
     resolveOld("old-image");
@@ -273,7 +324,7 @@ describe("RenderScheduler", () => {
 
   it("fences old settings work when activating the same target generation", async () => {
     const scheduler = new RenderScheduler();
-    const oldGeneration = scheduler.activate("button", 10_000);
+    const oldGeneration = scheduler.activate("button", 1_000);
     const commits: string[] = [];
     scheduler.submit("button", oldGeneration, {
       category: "normal",
@@ -284,7 +335,7 @@ describe("RenderScheduler", () => {
       },
     });
 
-    const newGeneration = scheduler.activate("button", 2_000);
+    const newGeneration = scheduler.activate("button", 500);
     expect(newGeneration).toBe(oldGeneration + 1);
     expect(
       scheduler.submit("button", oldGeneration, {
@@ -311,7 +362,7 @@ describe("RenderScheduler", () => {
 
   it("serializes commits across target generations while allowing stale late renders to drop", async () => {
     const scheduler = new RenderScheduler();
-    const oldGeneration = scheduler.activate("button", 2_000);
+    const oldGeneration = scheduler.activate("button", 500);
     let releaseOldCommit!: () => void;
     const events: string[] = [];
     scheduler.submit("button", oldGeneration, {
@@ -330,7 +381,7 @@ describe("RenderScheduler", () => {
     expect(events).toEqual(["old:start"]);
 
     expect(scheduler.remove("button", oldGeneration)).toBe(true);
-    const newGeneration = scheduler.activate("button", 2_000);
+    const newGeneration = scheduler.activate("button", 500);
     scheduler.submit("button", newGeneration, {
       category: "immediate",
       semanticKey: "new",
@@ -350,7 +401,7 @@ describe("RenderScheduler", () => {
     expect(events).toEqual(["old:start", "new:render", "old:end", "new:commit"]);
 
     let resolveLateRender!: (image: string) => void;
-    const lateGeneration = scheduler.activate("late", 2_000);
+    const lateGeneration = scheduler.activate("late", 500);
     scheduler.submit("late", lateGeneration, {
       category: "immediate",
       semanticKey: "late-old",
@@ -362,7 +413,7 @@ describe("RenderScheduler", () => {
       },
     });
     await settle();
-    const replacementGeneration = scheduler.activate("late", 2_000);
+    const replacementGeneration = scheduler.activate("late", 500);
     scheduler.submit("late", replacementGeneration, {
       category: "immediate",
       semanticKey: "late-new",
@@ -380,7 +431,7 @@ describe("RenderScheduler", () => {
 
   it("serializes async commits and lets the newest pending request win", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     let resolveCommit!: () => void;
     const events: string[] = [];
 
@@ -439,7 +490,7 @@ describe("RenderScheduler", () => {
 
   it("drops a regular render result superseded while rendering", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     let resolveOldRender!: (image: string) => void;
     const events: string[] = [];
     scheduler.submit("button", generation, {
@@ -453,7 +504,7 @@ describe("RenderScheduler", () => {
         events.push("old:commit");
       },
     });
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(500);
     expect(events).toEqual(["old:render"]);
 
     scheduler.submit("button", generation, {
@@ -471,13 +522,13 @@ describe("RenderScheduler", () => {
     await settle();
     expect(events).toEqual(["old:render"]);
 
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(500);
     expect(events).toEqual(["old:render", "new:render", "new:commit"]);
   });
 
   it("does not let a later regular request supersede an immediate render", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     let resolveImmediate!: (image: string) => void;
     const commits: string[] = [];
     scheduler.submit("button", generation, {
@@ -502,13 +553,13 @@ describe("RenderScheduler", () => {
     resolveImmediate("urgent-image");
     await settle();
     expect(commits).toEqual(["urgent-image"]);
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(500);
     expect(commits).toEqual(["urgent-image", "normal-image"]);
   });
 
   it("schedules a throttled request that arrives during an async commit", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     let resolveCommit!: () => void;
     const commits: string[] = [];
     scheduler.submit("button", generation, {
@@ -531,7 +582,7 @@ describe("RenderScheduler", () => {
     resolveCommit();
     await settle();
 
-    await vi.advanceTimersByTimeAsync(1_999);
+    await vi.advanceTimersByTimeAsync(499);
     expect(commits).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(commits).toEqual(["next-image"]);
@@ -539,7 +590,7 @@ describe("RenderScheduler", () => {
 
   it("isolates render and commit failures so future requests recover", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const commits: string[] = [];
 
     scheduler.submit("button", generation, {
@@ -578,7 +629,7 @@ describe("RenderScheduler", () => {
 
   it("rejects stale generations and becomes inert after destroy", async () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const renders: string[] = [];
     const commits: string[] = [];
 
@@ -597,7 +648,7 @@ describe("RenderScheduler", () => {
         makeRequest("destroyed", "immediate", "destroyed-image", renders, commits),
       ),
     ).toBe(false);
-    expect(() => scheduler.activate("other", 2_000)).toThrow(/destroyed/i);
+    expect(() => scheduler.activate("other", 500)).toThrow(/destroyed/i);
     await vi.runAllTimersAsync();
     expect(commits).toEqual([]);
   });
@@ -614,7 +665,7 @@ describe("RenderScheduler", () => {
       },
       clearTimeout: (handle) => cleared.push(handle as number),
     });
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const renders: string[] = [];
     const commits: string[] = [];
 
@@ -650,7 +701,7 @@ describe("RenderScheduler", () => {
       },
       clearTimeout: () => undefined,
     });
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const commits: string[] = [];
 
     expect(() => scheduler.submit("button", generation, {
@@ -661,7 +712,7 @@ describe("RenderScheduler", () => {
         commits.push(image);
       },
     })).not.toThrow();
-    expect(delays[0]).toBe(2_000);
+    expect(delays[0]).toBe(500);
     callbacks[0]?.();
     await settle();
     expect(commits).toEqual(["safe-image"]);
@@ -674,7 +725,7 @@ describe("RenderScheduler", () => {
         commits.push(image);
       },
     });
-    expect(delays.at(-1)).toBeGreaterThanOrEqual(2_000);
+    expect(delays.at(-1)).toBeGreaterThanOrEqual(500);
   });
 
   it("isolates timer setup and cancellation failures", async () => {
@@ -686,7 +737,7 @@ describe("RenderScheduler", () => {
         throw new Error("clear failed");
       },
     });
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const commits: string[] = [];
     scheduler.submit("button", generation, {
       category: "normal",
@@ -706,7 +757,7 @@ describe("RenderScheduler", () => {
         throw new Error("clear failed");
       },
     });
-    const secondGeneration = schedulerWithBadClear.activate("button", 2_000);
+    const secondGeneration = schedulerWithBadClear.activate("button", 500);
     schedulerWithBadClear.submit("button", secondGeneration, {
       category: "normal",
       semanticKey: "pending",
@@ -719,12 +770,14 @@ describe("RenderScheduler", () => {
 
   it("rejects unsupported intervals and stale interval updates", () => {
     const scheduler = new RenderScheduler();
-    expect(() => scheduler.activate("button", 3_000 as 2_000)).toThrow(RangeError);
-    const generation = scheduler.activate("button", 2_000);
-    expect(scheduler.updateInterval("button", generation + 1, 5_000)).toBe(false);
-    expect(() => scheduler.updateInterval("button", generation, 3_000 as 2_000)).toThrow(
+    expect(() => scheduler.activate("legacy", 2_000 as never)).toThrow(RangeError);
+    expect(() => scheduler.activate("off-step", 550 as never)).toThrow(RangeError);
+    const generation = scheduler.activate("button", 500);
+    expect(scheduler.updateInterval("button", generation + 1, 700)).toBe(false);
+    expect(() => scheduler.updateInterval("button", generation, 2_000 as never)).toThrow(
       RangeError,
     );
+    expect(() => scheduler.updateInterval("button", generation, 550 as never)).toThrow(RangeError);
   });
 
   it("treats an unchanged interval as a no-op", () => {
@@ -735,7 +788,7 @@ describe("RenderScheduler", () => {
         cleared.push(handle);
       },
     });
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     scheduler.submit("button", generation, {
       category: "normal",
       semanticKey: "pending",
@@ -743,21 +796,21 @@ describe("RenderScheduler", () => {
       commit: () => undefined,
     });
 
-    expect(scheduler.updateInterval("button", generation, 2_000)).toBe(true);
+    expect(scheduler.updateInterval("button", generation, 500)).toBe(true);
     expect(cleared).toEqual([]);
   });
 
   it("uses globally monotonic generations without retaining target counters", () => {
     const scheduler = new RenderScheduler();
-    const first = scheduler.activate("one", 2_000);
+    const first = scheduler.activate("one", 500);
     scheduler.remove("one", first);
-    const second = scheduler.activate("two", 2_000);
+    const second = scheduler.activate("two", 500);
     expect(second).toBeGreaterThan(first);
   });
 
   it("rejects accessor-backed and invalid requests without invoking them", () => {
     const scheduler = new RenderScheduler();
-    const generation = scheduler.activate("button", 2_000);
+    const generation = scheduler.activate("button", 500);
     const hostile = Object.create(null) as RenderRequest;
     Object.defineProperty(hostile, "category", {
       enumerable: true,

@@ -1,6 +1,8 @@
-export const RENDER_INTERVALS_MS = [2_000, 5_000, 10_000] as const;
+import {
+  isEffectiveRenderIntervalMs,
+  type EffectiveRenderIntervalMs,
+} from "../core/ui-update-policy.js";
 
-export type RenderIntervalMs = (typeof RENDER_INTERVALS_MS)[number];
 export type RenderCategory = "normal" | "control" | "immediate";
 
 /**
@@ -46,7 +48,7 @@ interface TargetState {
   readonly id: string;
   readonly generation: number;
   readonly lane: TargetLane;
-  normalIntervalMs: RenderIntervalMs;
+  normalIntervalMs: EffectiveRenderIntervalMs;
   pendingImmediate?: ScheduledRequest;
   pendingRegular?: ScheduledRequest;
   timer?: TimerToken;
@@ -75,7 +77,7 @@ const defaultDependencies: RenderSchedulerDependencies = {
 /**
  * Per-button LWW render coordinator.
  *
- * Normal quotes use the configured 2/5/10 second trailing window, control
+ * Normal quotes use the configured realtime/throttled trailing window, control
  * states use a one second trailing window, and manual/fatal requests bypass
  * the wait. A target generation fences async work from disappeared or
  * reconfigured buttons.
@@ -105,7 +107,7 @@ export class RenderScheduler {
   }
 
   /** Activates a target and returns its new lifecycle generation. */
-  activate(targetId: string, normalIntervalMs: RenderIntervalMs): number {
+  activate(targetId: string, normalIntervalMs: EffectiveRenderIntervalMs): number {
     if (this.destroyed) {
       throw new Error("RenderScheduler is destroyed");
     }
@@ -137,7 +139,7 @@ export class RenderScheduler {
   updateInterval(
     targetId: string,
     generation: number,
-    normalIntervalMs: RenderIntervalMs,
+    normalIntervalMs: EffectiveRenderIntervalMs,
   ): boolean {
     this.assertInterval(normalIntervalMs);
     const state = this.current(targetId, generation);
@@ -475,8 +477,8 @@ export class RenderScheduler {
     if (this.lanes.get(lane.id) === lane) this.lanes.delete(lane.id);
   }
 
-  private assertInterval(intervalMs: number): asserts intervalMs is RenderIntervalMs {
-    if (!(RENDER_INTERVALS_MS as readonly number[]).includes(intervalMs)) {
+  private assertInterval(intervalMs: number): asserts intervalMs is EffectiveRenderIntervalMs {
+    if (!isEffectiveRenderIntervalMs(intervalMs)) {
       throw new RangeError(`Unsupported render interval: ${intervalMs}`);
     }
   }

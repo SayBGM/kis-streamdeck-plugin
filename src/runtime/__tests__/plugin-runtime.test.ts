@@ -478,6 +478,47 @@ describe("PluginRuntime", () => {
     await runtime.destroy();
   });
 
+  it("국내와 미국 controller가 동일한 realtime 전역 렌더 간격을 적용한다", async () => {
+    let current: GlobalSettings = {
+      preferences: {
+        dataMode: "automatic",
+        uiUpdateMode: "realtime",
+        renderIntervalMs: 700,
+        backupPollIntervalMs: 15_000,
+      },
+    };
+    const runtime = createPluginRuntime({
+      settingsPersistence: {
+        getGlobalSettings: vi.fn(async () => current),
+        setGlobalSettings: vi.fn(async (settings) => { current = settings; }),
+      },
+    });
+    await runtime.initialize();
+    const activate = vi.spyOn(runtime.services.renderScheduler, "activate");
+
+    await runtime.domesticController.appear({
+      actionId: "domestic",
+      settings: {
+        schemaVersion: 2,
+        stockCode: "005930",
+        instrumentType: "stock",
+        stockName: "삼성전자",
+      },
+      actionPort: { setImage: vi.fn() },
+    });
+    await runtime.overseasController.appear({
+      actionId: "overseas",
+      settings: { schemaVersion: 2, ticker: "AAPL", exchange: "NAS", stockName: "Apple" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    expect(activate.mock.calls.map(([targetId, intervalMs]) => [targetId, intervalMs])).toEqual([
+      ["domestic", 50],
+      ["overseas", 50],
+    ]);
+    await runtime.destroy();
+  });
+
   it("migrates legacy settings and discards an unfingerprinted persisted token on bootstrap", async () => {
     let current: GlobalSettings = {
       appKey: " app-key ",

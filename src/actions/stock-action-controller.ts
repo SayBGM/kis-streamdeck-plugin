@@ -1,5 +1,9 @@
 import { isOverseasDayTradingAt, type MarketSnapshot } from "../core/market-clock.js";
 import { KisError, type KisErrorCode } from "../core/errors.js";
+import {
+  effectiveRenderIntervalMs,
+  type EffectiveRenderIntervalMs,
+} from "../core/ui-update-policy.js";
 import type {
   CanonicalInstrument,
   KisWebSocketDescriptor,
@@ -14,7 +18,7 @@ import type {
   SubscriptionSnapshot,
 } from "../kis/subscription-supervisor.js";
 import type { RestQuoteRequest } from "../kis/rest-coordinator.js";
-import type { RenderCategory, RenderIntervalMs, RenderRequest } from "../renderer/render-scheduler.js";
+import type { RenderCategory, RenderRequest } from "../renderer/render-scheduler.js";
 import type { SettingsSnapshot } from "../settings/settings-repository.js";
 import type { GlobalPreferencesV2 } from "../settings/schema.js";
 import type { Market, MarketSession } from "../types/index.js";
@@ -92,8 +96,12 @@ export interface StockActionRestPort {
 }
 
 export interface StockActionRenderSchedulerPort {
-  activate(targetId: string, intervalMs: RenderIntervalMs): number;
-  updateInterval(targetId: string, generation: number, intervalMs: RenderIntervalMs): boolean;
+  activate(targetId: string, intervalMs: EffectiveRenderIntervalMs): number;
+  updateInterval(
+    targetId: string,
+    generation: number,
+    intervalMs: EffectiveRenderIntervalMs,
+  ): boolean;
   submit(targetId: string, generation: number, request: RenderRequest): boolean;
   remove(targetId: string, generation: number): boolean;
 }
@@ -318,6 +326,7 @@ function clonePreferences(snapshot: SettingsSnapshot): GlobalPreferencesV2 {
   return Object.freeze({
     ...snapshot.settings.preferences,
     dataMode: snapshot.settings.preferences.dataMode,
+    uiUpdateMode: snapshot.settings.preferences.uiUpdateMode,
     renderIntervalMs: snapshot.settings.preferences.renderIntervalMs,
     backupPollIntervalMs: snapshot.settings.preferences.backupPollIntervalMs,
   });
@@ -520,7 +529,7 @@ export class StockActionController<Settings> {
     const clock = this.clocks[adapter.market];
     const renderGeneration = this.renderScheduler.activate(
       input.actionId,
-      preferences.renderIntervalMs,
+      effectiveRenderIntervalMs(preferences),
     );
     const session: ActionSession<Settings> = {
       actionId: input.actionId,
@@ -571,7 +580,7 @@ export class StockActionController<Settings> {
     if (this.records.get(input.actionId)?.epoch !== epoch) return;
     const generation = this.renderScheduler.activate(
       input.actionId,
-      global.settings.preferences.renderIntervalMs,
+      effectiveRenderIntervalMs(global.settings.preferences),
     );
     this.fatalRenderGenerations.set(input.actionId, generation);
     const view: StockActionView = Object.freeze({
@@ -604,7 +613,7 @@ export class StockActionController<Settings> {
       this.renderScheduler.updateInterval(
         session.actionId,
         session.renderGeneration,
-        session.preferences.renderIntervalMs,
+        effectiveRenderIntervalMs(session.preferences),
       );
       if (session.policySettingsSignature === nextPolicySignature) continue;
       session.policySettingsSignature = nextPolicySignature;
