@@ -35,10 +35,16 @@ function createUi() {
 function withSafeSnapshotContainers<
   T extends { preferences: object; diagnostics: object },
 >(snapshot: T): T {
-  return Object.assign(Object.create(null), snapshot, {
-    preferences: Object.assign(Object.create(null), snapshot.preferences),
-    diagnostics: Object.assign(Object.create(null), snapshot.diagnostics),
-  }) as T;
+  const cloneData = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(cloneData);
+    if (value && typeof value === "object") {
+      const copy = Object.create(null) as Record<string, unknown>;
+      for (const [key, nested] of Object.entries(value)) copy[key] = cloneData(nested);
+      return copy;
+    }
+    return value;
+  };
+  return cloneData(snapshot) as T;
 }
 
 function inPiRealm<T>(window: Window, value: T): T {
@@ -123,7 +129,6 @@ function responseSnapshot() {
         failures: 0,
         cacheEntries: 1,
       },
-      recentErrors: { events: [], counters: {} },
     },
   });
 }
@@ -155,6 +160,19 @@ function snapshotWithRenderPreferences(
   return snapshotWithPreferenceChanges(settingsRevision, {
     uiUpdateMode,
     renderIntervalMs,
+  });
+}
+
+function snapshotWithCredentialChanges(
+  settingsRevision: number,
+  credentialsConfigured: boolean,
+  maskedAppKey: string,
+) {
+  return withSafeSnapshotContainers({
+    ...responseSnapshot(),
+    settingsRevision,
+    credentialsConfigured,
+    maskedAppKey,
   });
 }
 
@@ -615,6 +633,232 @@ describe("Property Inspector UI", () => {
     },
   );
 
+  it.each(["same-submitted", "remote-later-diff"] as const)(
+    "reconciles preferences from a newer %s snapshot after an older success acknowledgement",
+    (newerSnapshotKind) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const dataMode = document.getElementById("dataMode") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      const uiUpdateMode = document.getElementById("uiUpdateMode") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      const interval = document.getElementById("renderIntervalMs") as unknown as {
+        value: string;
+        disabled: boolean;
+        dispatchEvent(event: unknown): boolean;
+      };
+      const backup = document.getElementById("backupPollIntervalMs") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      dataMode.value = "rest-only";
+      dataMode.dispatchEvent(new window.Event("change"));
+      uiUpdateMode.value = "throttled";
+      uiUpdateMode.dispatchEvent(new window.Event("change"));
+      interval.value = "900";
+      interval.dispatchEvent(new window.Event("input"));
+      backup.value = "60000";
+      backup.dispatchEvent(new window.Event("change"));
+      document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+      const request = commands.at(-1) as { requestId: string };
+      const submittedPreferences = {
+        dataMode: "rest-only" as const,
+        uiUpdateMode: "throttled" as const,
+        renderIntervalMs: 900,
+        backupPollIntervalMs: 60_000,
+      };
+      const newerPreferences = newerSnapshotKind === "same-submitted"
+        ? submittedPreferences
+        : {
+            dataMode: "automatic" as const,
+            uiUpdateMode: "realtime" as const,
+            renderIntervalMs: 800,
+            backupPollIntervalMs: 15_000,
+          };
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          type: "diagnostics/update",
+          snapshot: snapshotWithPreferenceChanges(6, newerPreferences),
+        },
+      }));
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          requestId: request.requestId,
+          ok: true,
+          snapshot: snapshotWithPreferenceChanges(5, submittedPreferences),
+        },
+      }));
+
+      expect(dataMode.value).toBe(newerPreferences.dataMode);
+      expect(uiUpdateMode.value).toBe(newerPreferences.uiUpdateMode);
+      expect(interval).toMatchObject({
+        value: String(newerPreferences.renderIntervalMs),
+        disabled: newerPreferences.uiUpdateMode === "realtime",
+      });
+      expect(backup.value).toBe(String(newerPreferences.backupPollIntervalMs));
+
+      const sameRevisionFollowUp = snapshotWithPreferenceChanges(6, {
+        ...newerPreferences,
+        backupPollIntervalMs: 30_000,
+      });
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "settings/update", snapshot: sameRevisionFollowUp },
+      }));
+      expect(backup.value).toBe("30000");
+      document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "preferences/save",
+        settingsRevision: 6,
+        preferences: { backupPollIntervalMs: 30_000 },
+      });
+    },
+  );
+
+  it("reconciles credentials from a newer snapshot after an older success acknowledgement", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const key = document.getElementById("appKey") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const secret = document.getElementById("appSecret") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    key.value = "LOCALKEY";
+    key.dispatchEvent(new window.Event("input"));
+    secret.value = "local-secret";
+    secret.dispatchEvent(new window.Event("input"));
+    document.getElementById("saveCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "diagnostics/update",
+        snapshot: snapshotWithCredentialChanges(6, true, "REV6••••KEY"),
+      },
+    }));
+    expect(secret.value).toBe("local-secret");
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: true,
+        snapshot: snapshotWithCredentialChanges(5, true, "REV5••••KEY"),
+      },
+    }));
+
+    expect(secret.value).toBe("");
+    expect(document.getElementById("maskedAppKey")?.textContent).toBe("REV6••••KEY");
+    secret.value = "stale-without-input-event";
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(6, true, "REV6••••KEY"),
+      },
+    }));
+    expect(secret.value).toBe("");
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 6,
+    });
+  });
+
+  it("keeps a pending preference request after an unsafe acknowledgement and accepts a later safe one", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+    const statusBefore = document.getElementById("advancedStatusMessage")?.textContent;
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: true,
+        snapshot: withUnsafeSnapshotAccessor(snapshotAt(5)),
+      },
+    }));
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toBe(statusBefore);
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: true,
+        snapshot: snapshotWithPreferenceChanges(5, { dataMode: "rest-only" }),
+      },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithPreferenceChanges(6, { dataMode: "automatic" }),
+      },
+    }));
+
+    expect(dataMode.value).toBe("automatic");
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 6,
+    });
+  });
+
+  it("does not reset dirty preferences when a safe success acknowledgement mismatches the submission", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: true,
+        snapshot: snapshotWithPreferenceChanges(5, {
+          dataMode: "automatic",
+          uiUpdateMode: "throttled",
+          renderIntervalMs: 800,
+        }),
+      },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithPreferenceChanges(6, { dataMode: "automatic" }),
+      },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "preferences/save",
+      settingsRevision: 6,
+      preferences: { dataMode: "rest-only" },
+    });
+  });
+
   it("preserves dirty secret and preference inputs during diagnostics pushes and stale acks", () => {
     const { window, document, commands } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
@@ -855,6 +1099,254 @@ describe("Property Inspector UI", () => {
       document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
       expect(commands.at(-1)).toMatchObject({
         type: "preferences/save",
+        settingsRevision: 4,
+      });
+    },
+  );
+
+  it.each(["snapshot", "preferences"] as const)(
+    "rejects an unexpected accessor on the %s without executing it",
+    (target) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+      const remote = snapshotWithPreferenceChanges(6, {
+        dataMode: "rest-only",
+        uiUpdateMode: "throttled",
+        renderIntervalMs: 900,
+      });
+      remote.diagnostics.websocket.state = "closed";
+      const getter = vi.fn(() => "unexpected");
+      Object.defineProperty(target === "snapshot" ? remote : remote.preferences, "unexpected", {
+        enumerable: true,
+        get: getter,
+      });
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "diagnostics/update", snapshot: remote },
+      }));
+
+      expect(getter).not.toHaveBeenCalled();
+      expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+        .toBe("automatic");
+      expect(document.getElementById("connectionBadge")?.textContent).toBe("open");
+      expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+      document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "credentials/clear",
+        settingsRevision: 4,
+      });
+    },
+  );
+
+  it.each(["websocket", "websocket.state"] as const)(
+    "rejects a diagnostics %s accessor without executing it",
+    (target) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+      const remote = snapshotWithPreferenceChanges(6, { dataMode: "rest-only" });
+      const originalWebsocket = remote.diagnostics.websocket;
+      const getter = vi.fn(() => target === "websocket"
+        ? Object.assign(Object.create(null), originalWebsocket, { state: "closed" })
+        : "closed");
+      if (target === "websocket") {
+        Object.defineProperty(remote.diagnostics, "websocket", {
+          enumerable: true,
+          get: getter,
+        });
+      } else {
+        Object.defineProperty(remote.diagnostics.websocket, "state", {
+          enumerable: true,
+          get: getter,
+        });
+      }
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "diagnostics/update", snapshot: remote },
+      }));
+
+      expect(getter).not.toHaveBeenCalled();
+      expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+        .toBe("automatic");
+      expect(document.getElementById("connectionBadge")?.textContent).toBe("open");
+      expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+      document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "credentials/clear",
+        settingsRevision: 4,
+      });
+    },
+  );
+
+  it("does not accept a missing schemaVersion through Object.prototype pollution", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+    const remote = snapshotWithPreferenceChanges(6, { dataMode: "rest-only" }) as Record<
+      string,
+      unknown
+    >;
+    delete remote.schemaVersion;
+    const objectPrototype = window.eval("Object.prototype") as object;
+    Object.defineProperty(objectPrototype, "schemaVersion", {
+      configurable: true,
+      value: { enumerable: true, value: 2 },
+    });
+
+    try {
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "diagnostics/update", snapshot: remote },
+      }));
+    } finally {
+      delete (objectPrototype as Record<string, unknown>).schemaVersion;
+    }
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("automatic");
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("open");
+    expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 4,
+    });
+  });
+
+  it("rejects cyclic diagnostics without changing the applied state", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+    const remote = snapshotWithPreferenceChanges(6, { dataMode: "rest-only" });
+    (remote.diagnostics as Record<string, unknown>).cycle = remote.diagnostics;
+
+    expect(() => {
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "diagnostics/update", snapshot: remote },
+      }));
+    }).not.toThrow();
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("automatic");
+    expect(document.getElementById("connectionBadge")?.textContent).toBe("open");
+    expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 4,
+    });
+  });
+
+  it("accepts PI-realm data arrays and clones them into diagnostics", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const remote = inPiRealm(window, snapshotWithPreferenceChanges(5, {
+      dataMode: "rest-only",
+    }));
+    (remote.diagnostics as Record<string, unknown>).samples = window.eval(
+      '[1, {"ok": true}, null]',
+    );
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: remote },
+    }));
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("rest-only");
+    expect(document.getElementById("diagnosticsOutput")?.textContent).toContain('"samples"');
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 5,
+    });
+  });
+
+  it.each([
+    "symbol",
+    "non-enumerable",
+    "undefined",
+    "non-finite",
+    "foreign-array",
+    "custom-prototype",
+  ] as const)("rejects a diagnostics graph containing %s data", (unsafeKind) => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+    const remote = snapshotWithPreferenceChanges(6, { dataMode: "rest-only" });
+    const diagnostics = remote.diagnostics as Record<PropertyKey, unknown>;
+    if (unsafeKind === "symbol") {
+      diagnostics[Symbol("unsafe")] = "value";
+    } else if (unsafeKind === "non-enumerable") {
+      Object.defineProperty(diagnostics, "hidden", { value: true });
+    } else if (unsafeKind === "undefined") {
+      diagnostics.unsafe = undefined;
+    } else if (unsafeKind === "non-finite") {
+      diagnostics.unsafe = Number.POSITIVE_INFINITY;
+    } else if (unsafeKind === "foreign-array") {
+      diagnostics.unsafe = [1, 2, 3];
+    } else {
+      diagnostics.unsafe = Object.assign(Object.create({ inherited: true }), { value: true });
+    }
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: remote },
+    }));
+
+    expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+      .toBe("automatic");
+    expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.at(-1)).toMatchObject({
+      type: "credentials/clear",
+      settingsRevision: 4,
+    });
+  });
+
+  it.each(["named-data", "accessor-index", "non-enumerable-index"] as const)(
+    "rejects a PI-realm array with a %s descriptor",
+    (unsafeKind) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+      }));
+      const diagnosticsBefore = document.getElementById("diagnosticsOutput")?.textContent;
+      const remote = inPiRealm(window, snapshotWithPreferenceChanges(6, {
+        dataMode: "rest-only",
+      }));
+      const values = window.eval("[1, 2]") as unknown[];
+      const getter = vi.fn(() => 1);
+      if (unsafeKind === "named-data") {
+        Object.defineProperty(values, "extra", { enumerable: true, value: 3 });
+      } else if (unsafeKind === "accessor-index") {
+        Object.defineProperty(values, "0", { enumerable: true, get: getter });
+      } else {
+        Object.defineProperty(values, "0", { enumerable: false, value: 1 });
+      }
+      (remote.diagnostics as Record<string, unknown>).samples = values;
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: { type: "diagnostics/update", snapshot: remote },
+      }));
+
+      expect(getter).not.toHaveBeenCalled();
+      expect((document.getElementById("dataMode") as unknown as { value: string }).value)
+        .toBe("automatic");
+      expect(document.getElementById("diagnosticsOutput")?.textContent).toBe(diagnosticsBefore);
+      document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands.at(-1)).toMatchObject({
+        type: "credentials/clear",
         settingsRevision: 4,
       });
     },

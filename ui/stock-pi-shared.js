@@ -9,6 +9,7 @@
     "backupPollIntervalMs",
   ];
   var requestSequence = 0;
+  var UNSAFE_DATA = {};
 
   function byId(id) {
     return document.getElementById(id);
@@ -32,34 +33,103 @@
     return value !== undefined && value !== null && value !== "";
   }
 
-  function plainDataDescriptors(value) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-    try {
-      var prototype = Object.getPrototypeOf(value);
-      if (prototype !== null && prototype !== Object.prototype) return null;
-      if (Object.getOwnPropertySymbols(value).length > 0) return null;
-      return Object.getOwnPropertyDescriptors(value);
-    } catch (_error) {
-      return null;
-    }
+  function hasOwn(value, key) {
+    return Object.prototype.hasOwnProperty.call(value, key);
   }
 
-  function enumerableDataDescriptor(descriptors, key) {
-    var descriptor = descriptors && descriptors[key];
-    return descriptor && descriptor.enumerable && "value" in descriptor
-      ? descriptor
-      : null;
+  function safeDataClone(value, ancestors) {
+    if (value === null || typeof value === "string" || typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "number") return Number.isFinite(value) ? value : UNSAFE_DATA;
+    if (typeof value !== "object") return UNSAFE_DATA;
+    if (ancestors.indexOf(value) >= 0) return UNSAFE_DATA;
+
+    var isArray = Array.isArray(value);
+    var prototype;
+    var descriptors;
+    try {
+      prototype = Object.getPrototypeOf(value);
+      if (
+        (isArray && prototype !== Array.prototype) ||
+        (!isArray && prototype !== null && prototype !== Object.prototype) ||
+        Object.getOwnPropertySymbols(value).length > 0
+      ) {
+        return UNSAFE_DATA;
+      }
+      descriptors = Object.entries(Object.getOwnPropertyDescriptors(value));
+    } catch (_error) {
+      return UNSAFE_DATA;
+    }
+
+    var nextAncestors = ancestors.concat([value]);
+    if (isArray) {
+      var lengthDescriptor = null;
+      for (var descriptorIndex = 0; descriptorIndex < descriptors.length; descriptorIndex += 1) {
+        if (descriptors[descriptorIndex][0] === "length") {
+          lengthDescriptor = descriptors[descriptorIndex][1];
+          break;
+        }
+      }
+      if (
+        !lengthDescriptor ||
+        lengthDescriptor.enumerable ||
+        !hasOwn(lengthDescriptor, "value") ||
+        !Number.isSafeInteger(lengthDescriptor.value) ||
+        lengthDescriptor.value < 0
+      ) {
+        return UNSAFE_DATA;
+      }
+      var arrayCopy = new Array(lengthDescriptor.value);
+      for (var arrayIndex = 0; arrayIndex < descriptors.length; arrayIndex += 1) {
+        var arrayEntry = descriptors[arrayIndex];
+        var arrayKey = arrayEntry[0];
+        var arrayDescriptor = arrayEntry[1];
+        if (arrayKey === "length") continue;
+        if (
+          !/^(0|[1-9][0-9]*)$/.test(arrayKey) ||
+          !arrayDescriptor.enumerable ||
+          !hasOwn(arrayDescriptor, "value")
+        ) {
+          return UNSAFE_DATA;
+        }
+        var numericIndex = Number(arrayKey);
+        if (
+          !Number.isSafeInteger(numericIndex) ||
+          numericIndex < 0 ||
+          numericIndex >= lengthDescriptor.value ||
+          numericIndex >= 4294967295
+        ) {
+          return UNSAFE_DATA;
+        }
+        var arrayValue = safeDataClone(arrayDescriptor.value, nextAncestors);
+        if (arrayValue === UNSAFE_DATA) return UNSAFE_DATA;
+        arrayCopy[numericIndex] = arrayValue;
+      }
+      return arrayCopy;
+    }
+
+    var objectCopy = Object.create(null);
+    for (var objectIndex = 0; objectIndex < descriptors.length; objectIndex += 1) {
+      var objectEntry = descriptors[objectIndex];
+      var objectDescriptor = objectEntry[1];
+      if (!objectDescriptor.enumerable || !hasOwn(objectDescriptor, "value")) {
+        return UNSAFE_DATA;
+      }
+      var objectValue = safeDataClone(objectDescriptor.value, nextAncestors);
+      if (objectValue === UNSAFE_DATA) return UNSAFE_DATA;
+      objectCopy[objectEntry[0]] = objectValue;
+    }
+    return objectCopy;
   }
 
   function copyKnownPreferences(value) {
-    var descriptors = plainDataDescriptors(value);
-    if (!descriptors) return null;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     var copy = Object.create(null);
     for (var index = 0; index < PREFERENCE_FIELDS.length; index += 1) {
       var field = PREFERENCE_FIELDS[index];
-      var descriptor = enumerableDataDescriptor(descriptors, field);
-      if (!descriptor) return null;
-      copy[field] = descriptor.value;
+      if (!hasOwn(value, field)) return null;
+      copy[field] = value[field];
     }
     if (
       (copy.dataMode !== "automatic" && copy.dataMode !== "rest-only") ||
@@ -78,37 +148,42 @@
   }
 
   function copyKnownSnapshot(value) {
-    var descriptors = plainDataDescriptors(value);
-    if (!descriptors) return null;
-    var schemaVersion = enumerableDataDescriptor(descriptors, "schemaVersion");
-    var settingsRevision = enumerableDataDescriptor(descriptors, "settingsRevision");
-    var credentialsConfigured = enumerableDataDescriptor(descriptors, "credentialsConfigured");
-    var preferences = enumerableDataDescriptor(descriptors, "preferences");
-    var diagnostics = enumerableDataDescriptor(descriptors, "diagnostics");
-    var maskedAppKey = descriptors.maskedAppKey === undefined
-      ? null
-      : enumerableDataDescriptor(descriptors, "maskedAppKey");
+    var safeValue;
+    try {
+      safeValue = safeDataClone(value, []);
+    } catch (_error) {
+      return null;
+    }
     if (
-      !schemaVersion || schemaVersion.value !== 2 ||
-      !settingsRevision || !Number.isSafeInteger(settingsRevision.value) ||
-      settingsRevision.value < 0 ||
-      !credentialsConfigured || typeof credentialsConfigured.value !== "boolean" ||
-      !preferences ||
-      !diagnostics || !plainDataDescriptors(diagnostics.value) ||
-      (descriptors.maskedAppKey !== undefined &&
-        (!maskedAppKey || typeof maskedAppKey.value !== "string"))
+      safeValue === UNSAFE_DATA ||
+      !safeValue ||
+      typeof safeValue !== "object" ||
+      Array.isArray(safeValue) ||
+      !hasOwn(safeValue, "schemaVersion") ||
+      safeValue.schemaVersion !== 2 ||
+      !hasOwn(safeValue, "settingsRevision") ||
+      !Number.isSafeInteger(safeValue.settingsRevision) ||
+      safeValue.settingsRevision < 0 ||
+      !hasOwn(safeValue, "credentialsConfigured") ||
+      typeof safeValue.credentialsConfigured !== "boolean" ||
+      !hasOwn(safeValue, "preferences") ||
+      !hasOwn(safeValue, "diagnostics") ||
+      !safeValue.diagnostics ||
+      typeof safeValue.diagnostics !== "object" ||
+      Array.isArray(safeValue.diagnostics) ||
+      (hasOwn(safeValue, "maskedAppKey") && typeof safeValue.maskedAppKey !== "string")
     ) {
       return null;
     }
-    var safePreferences = copyKnownPreferences(preferences.value);
+    var safePreferences = copyKnownPreferences(safeValue.preferences);
     if (!safePreferences) return null;
     var copy = Object.create(null);
-    copy.schemaVersion = schemaVersion.value;
-    copy.settingsRevision = settingsRevision.value;
-    copy.credentialsConfigured = credentialsConfigured.value;
-    if (maskedAppKey) copy.maskedAppKey = maskedAppKey.value;
+    copy.schemaVersion = safeValue.schemaVersion;
+    copy.settingsRevision = safeValue.settingsRevision;
+    copy.credentialsConfigured = safeValue.credentialsConfigured;
+    if (hasOwn(safeValue, "maskedAppKey")) copy.maskedAppKey = safeValue.maskedAppKey;
     copy.preferences = safePreferences;
-    copy.diagnostics = diagnostics.value;
+    copy.diagnostics = safeValue.diagnostics;
     return copy;
   }
 
@@ -235,6 +310,7 @@
     this.actionSaveTimer = null;
     this.pendingRequests = Object.create(null);
     this.latestRequestBySection = Object.create(null);
+    this.latestSafeSnapshot = null;
     this.credentialEditVersion = 0;
     this.preferencesEditVersion = 0;
   }
@@ -252,6 +328,9 @@
       section: section,
       credentialEditVersion: this.credentialEditVersion,
       preferencesEditVersion: this.preferencesEditVersion,
+      submittedPreferences: type === "preferences/save"
+        ? copyKnownPreferences(fields.preferences)
+        : null,
     };
     this.latestRequestBySection[section] = requestId;
     sendToPlugin(payload);
@@ -349,14 +428,23 @@
     }, ACTION_SAVE_DEBOUNCE_MS);
   };
 
-  StockPropertyInspector.prototype.applySnapshot = function (snapshot, options) {
+  StockPropertyInspector.prototype.inspectSnapshot = function (snapshot) {
     var safeSnapshot = copyKnownSnapshot(snapshot);
-    if (!safeSnapshot) return false;
+    if (!safeSnapshot) return { safe: false, snapshot: null };
+    if (
+      !this.latestSafeSnapshot ||
+      safeSnapshot.settingsRevision >= this.latestSafeSnapshot.settingsRevision
+    ) {
+      this.latestSafeSnapshot = safeSnapshot;
+    }
+    return { safe: true, snapshot: safeSnapshot };
+  };
+
+  StockPropertyInspector.prototype.applySafeSnapshot = function (safeSnapshot, options) {
     options = options || {};
     var settingsRevision = safeSnapshot.settingsRevision;
     if (settingsRevision < this.settingsRevision) {
-      this.applyDiagnostics(safeSnapshot.diagnostics);
-      return false;
+      return { fresh: false, applied: false };
     }
     this.settingsRevision = Math.max(this.settingsRevision, settingsRevision);
     byId("maskedAppKey").textContent = safeSnapshot.maskedAppKey || "설정 안 됨";
@@ -370,13 +458,26 @@
       options.applyPreferences === true
     );
     this.applyDiagnostics(safeSnapshot.diagnostics);
-    return true;
+    return { fresh: true, applied: true };
   };
 
-  StockPropertyInspector.prototype.applyRevision = function (snapshot) {
-    var safeSnapshot = copyKnownSnapshot(snapshot);
-    if (!safeSnapshot) return;
-    this.settingsRevision = Math.max(this.settingsRevision, safeSnapshot.settingsRevision);
+  StockPropertyInspector.prototype.applySnapshot = function (snapshot, options) {
+    var inspected = this.inspectSnapshot(snapshot);
+    if (!inspected.safe) {
+      return { safe: false, fresh: false, applied: false, snapshot: null };
+    }
+    var result = this.applySafeSnapshot(inspected.snapshot, options);
+    return {
+      safe: true,
+      fresh: result.fresh,
+      applied: result.applied,
+      snapshot: inspected.snapshot,
+    };
+  };
+
+  StockPropertyInspector.prototype.applyLatestSafeSnapshot = function (options) {
+    if (!this.latestSafeSnapshot) return { fresh: false, applied: false };
+    return this.applySafeSnapshot(this.latestSafeSnapshot, options);
   };
 
   StockPropertyInspector.prototype.applyDiagnostics = function (diagnostics) {
@@ -419,36 +520,65 @@
       });
       return;
     }
+    var hasSnapshot = hasOwn(message, "snapshot");
+    var inspectedSnapshot = null;
+    if (hasSnapshot) {
+      inspectedSnapshot = this.inspectSnapshot(message.snapshot);
+      if (!inspectedSnapshot.safe) return;
+    }
     delete this.pendingRequests[message.requestId];
-    if (message.snapshot) this.applyRevision(message.snapshot);
     if (this.latestRequestBySection[pending.section] !== message.requestId) return;
 
-    if (message.snapshot) {
+    if (hasSnapshot) {
+      var safeSnapshot = inspectedSnapshot.snapshot;
       if (pending.section === "credentials") {
         var credentialsUnchanged = pending.credentialEditVersion === this.credentialEditVersion;
-        var credentialSnapshotApplied = this.applySnapshot(message.snapshot, {
-          applyCredentials: credentialsUnchanged && message.ok === true,
+        var credentialCanReset = credentialsUnchanged && message.ok === true;
+        var credentialResult = this.applySafeSnapshot(safeSnapshot, {
+          applyCredentials: credentialCanReset,
           applyPreferences: false,
         });
-        if (credentialsUnchanged && message.ok === true && credentialSnapshotApplied) {
-          this.credentialEditVersion = 0;
+        if (credentialCanReset) {
+          if (credentialResult.applied) {
+            this.credentialEditVersion = 0;
+          } else {
+            var latestCredentialResult = this.applyLatestSafeSnapshot({
+              applyCredentials: true,
+              applyPreferences: false,
+            });
+            if (latestCredentialResult.applied) this.credentialEditVersion = 0;
+          }
         }
       } else if (pending.section === "advanced" && pending.type === "preferences/save") {
         var preferencesUnchanged = pending.preferencesEditVersion === this.preferencesEditVersion;
-        var preferenceSnapshotApplied = this.applySnapshot(message.snapshot, {
+        var submittedPreferencesMatch = preferencesEqual(
+          pending.submittedPreferences,
+          safeSnapshot.preferences
+        );
+        var preferencesCanReset =
+          preferencesUnchanged && message.ok === true && submittedPreferencesMatch;
+        var preferenceResult = this.applySafeSnapshot(safeSnapshot, {
           applyCredentials: false,
-          applyPreferences: preferencesUnchanged && message.ok === true,
+          applyPreferences: preferencesCanReset,
         });
-        if (preferencesUnchanged && message.ok === true && preferenceSnapshotApplied) {
-          this.preferencesEditVersion = 0;
+        if (preferencesCanReset) {
+          if (preferenceResult.applied) {
+            this.preferencesEditVersion = 0;
+          } else {
+            var latestPreferenceResult = this.applyLatestSafeSnapshot({
+              applyCredentials: false,
+              applyPreferences: true,
+            });
+            if (latestPreferenceResult.applied) this.preferencesEditVersion = 0;
+          }
         }
       } else if (pending.section === "settings") {
-        this.applySnapshot(message.snapshot, {
+        this.applySafeSnapshot(safeSnapshot, {
           applyCredentials: pending.credentialEditVersion === this.credentialEditVersion,
           applyPreferences: pending.preferencesEditVersion === this.preferencesEditVersion,
         });
       } else {
-        this.applySnapshot(message.snapshot, {
+        this.applySafeSnapshot(safeSnapshot, {
           applyCredentials: false,
           applyPreferences: false,
         });
