@@ -127,7 +127,9 @@ describe("Property Inspector UI", () => {
 
     expect(document.body.textContent).toContain("화면 갱신 제한");
     expect(document.body.textContent).not.toContain("렌더 간격");
-    const select = document.getElementById("renderIntervalMs") as HTMLSelectElement;
+    const select = document.getElementById("renderIntervalMs") as unknown as {
+      options: ArrayLike<{ value: string }>;
+    };
     expect(Array.from(select.options).map((option) => option.value)).toEqual([
       "2000",
       "5000",
