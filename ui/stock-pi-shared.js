@@ -663,7 +663,6 @@
       ? settingsRevision
       : Math.max(this.settingsRevision, settingsRevision);
     this.lastAuthoritativePreferences = safeSnapshot.preferences;
-    this.initializeCredentialsDisclosure(safeSnapshot.credentialsConfigured);
     byId("maskedAppKey").textContent = safeSnapshot.maskedAppKey || "설정 안 됨";
     byId("credentialSummary").textContent = safeSnapshot.credentialsConfigured
       ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
@@ -725,11 +724,18 @@
       return;
     }
     if (message.type === "settings/update") {
-      if (message.snapshot) this.applySnapshot(message.snapshot, {
-        applyCredentials: this.credentialEditVersion === 0,
-        applyPreferences: this.preferenceControlsCanHydrate(),
-        applyStaleDiagnostics: true,
-      });
+      if (message.snapshot) {
+        var settingsUpdateResult = this.applySnapshot(message.snapshot, {
+          applyCredentials: this.credentialEditVersion === 0,
+          applyPreferences: this.preferenceControlsCanHydrate(),
+          applyStaleDiagnostics: true,
+        });
+        if (settingsUpdateResult.applied) {
+          this.initializeCredentialsDisclosure(
+            settingsUpdateResult.snapshot.credentialsConfigured
+          );
+        }
+      }
       return;
     }
 
@@ -800,10 +806,13 @@
           }
         }
       } else if (pending.section === "settings") {
-        this.applySafeSnapshot(safeSnapshot, {
+        var settingsResponseResult = this.applySafeSnapshot(safeSnapshot, {
           applyCredentials: pending.credentialEditVersion === this.credentialEditVersion,
           applyPreferences: this.preferenceControlsCanHydrate(),
         });
+        if (settingsResponseResult.applied && pending.type === "settings/request") {
+          this.initializeCredentialsDisclosure(safeSnapshot.credentialsConfigured);
+        }
       } else {
         this.applySafeSnapshot(safeSnapshot, {
           applyCredentials: false,

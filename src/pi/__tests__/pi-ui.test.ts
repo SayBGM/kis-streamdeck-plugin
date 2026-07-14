@@ -446,6 +446,146 @@ describe("Property Inspector UI", () => {
     expect(credentialsDetails.open).toBe(false);
   });
 
+  it("waits for an accepted settings update before initializing credential onboarding", () => {
+    const { window, document } = createUi();
+    const credentialsDetails = document.getElementById(
+      "credentialsDetails",
+    ) as unknown as DetailsElement;
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "diagnostics/update",
+        snapshot: snapshotWithCredentialChanges(4, false, ""),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(false);
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(5, true, "SAFE••••KEY", 5),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(false);
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(6, false, "", 6),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(false);
+  });
+
+  it.each(["pending troubleshooting", "unknown"] as const)(
+    "does not initialize credential onboarding from a %s response",
+    (responseKind) => {
+      const { window, document, commands } = createUi();
+      const credentialsDetails = document.getElementById(
+        "credentialsDetails",
+      ) as unknown as DetailsElement;
+      let requestId = "unknown-request";
+      if (responseKind === "pending troubleshooting") {
+        document.getElementById("retryAuthButton")?.dispatchEvent(new window.Event("click"));
+        requestId = (commands.at(-1) as { requestId: string }).requestId;
+      }
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          requestId,
+          ok: true,
+          snapshot: snapshotWithCredentialChanges(4, false, ""),
+        },
+      }));
+      expect(credentialsDetails.open).toBe(false);
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          type: "settings/update",
+          snapshot: snapshotWithCredentialChanges(5, true, "SAFE••••KEY", 5),
+        },
+      }));
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          type: "settings/update",
+          snapshot: snapshotWithCredentialChanges(6, false, "", 6),
+        },
+      }));
+      expect(credentialsDetails.open).toBe(false);
+    },
+  );
+
+  it.each(["superseded", "stale", "retired"] as const)(
+    "does not initialize credential onboarding from a %s pre-settings snapshot",
+    (boundary) => {
+      const { window, document } = createUi();
+      const credentialsDetails = document.getElementById(
+        "credentialsDetails",
+      ) as unknown as DetailsElement;
+      if (boundary === "retired") {
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "diagnostics/update",
+            snapshot: snapshotWithCredentialChanges(6, false, "", 100, "epoch-a"),
+          },
+        }));
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "diagnostics/update",
+            snapshot: snapshotWithCredentialChanges(4, false, "", 1, "epoch-b"),
+          },
+        }));
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "settings/update",
+            snapshot: snapshotWithCredentialChanges(7, false, "", 101, "epoch-a"),
+          },
+        }));
+        expect(credentialsDetails.open).toBe(false);
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "settings/update",
+            snapshot: snapshotWithCredentialChanges(5, true, "SAFE••••KEY", 2, "epoch-b"),
+          },
+        }));
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "settings/update",
+            snapshot: snapshotWithCredentialChanges(6, false, "", 3, "epoch-b"),
+          },
+        }));
+      } else {
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "diagnostics/update",
+            snapshot: snapshotWithCredentialChanges(6, false, "", 10),
+          },
+        }));
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "settings/update",
+            snapshot: boundary === "superseded"
+              ? snapshotWithCredentialChanges(6, false, "", 9)
+              : snapshotWithCredentialChanges(5, false, "", 11),
+          },
+        }));
+        expect(credentialsDetails.open).toBe(false);
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "settings/update",
+            snapshot: snapshotWithCredentialChanges(7, true, "SAFE••••KEY", 12),
+          },
+        }));
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: {
+            type: "settings/update",
+            snapshot: snapshotWithCredentialChanges(8, false, "", 13),
+          },
+        }));
+      }
+
+      expect(credentialsDetails.open).toBe(false);
+    },
+  );
+
   it("requests diagnostics once on first open and once per manual refresh", () => {
     const { window, document, commands } = createUi();
     const diagnosticsDetails = document.getElementById(
