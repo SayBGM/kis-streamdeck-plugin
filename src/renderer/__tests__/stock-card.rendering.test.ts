@@ -76,12 +76,18 @@ function expectNoQuoteStatus(svg: string): void {
   window.close();
 }
 
-function expectLegacyChangeBaseline(svg: string): void {
+function expectStackedChangeLayout(svg: string): void {
   const window = new Window();
   const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
 
-  expect(document.querySelector('text[x="12"][font-size="14"]')?.getAttribute("y")).toBe("116");
-  expect(document.querySelector('text[x="132"][font-size="14"]')?.getAttribute("y")).toBe("116");
+  const change = document.querySelector('[data-role="quote-change"]');
+  const rate = document.querySelector('[data-role="quote-rate"]');
+  expect(change?.getAttribute("x")).toBe("72");
+  expect(change?.getAttribute("y")).toBe("108");
+  expect(change?.getAttribute("text-anchor")).toBe("middle");
+  expect(rate?.getAttribute("x")).toBe("72");
+  expect(rate?.getAttribute("y")).toBe("128");
+  expect(rate?.getAttribute("text-anchor")).toBe("middle");
   window.close();
 }
 
@@ -102,7 +108,7 @@ describe("stock-card rendering", () => {
     expect(svg).toContain("$182.52");
     expect(svg).toContain("0.68%");
     expectNoQuoteStatus(svg);
-    expectLegacyChangeBaseline(svg);
+    expectStackedChangeLayout(svg);
     expect(svg).toContain("정규");
   });
 
@@ -125,10 +131,10 @@ describe("stock-card rendering", () => {
       changeRate: -0.68,
       sign: "fall",
     }, "overseas"), "image/svg+xml");
-    const domesticChange = domestic.querySelector('text[x="12"][y="116"]');
-    const domesticRate = domestic.querySelector('text[x="132"][y="116"]');
-    const overseasChange = overseas.querySelector('text[x="12"][y="116"]');
-    const overseasRate = overseas.querySelector('text[x="132"][y="116"]');
+    const domesticChange = domestic.querySelector('[data-role="quote-change"]');
+    const domesticRate = domestic.querySelector('[data-role="quote-rate"]');
+    const overseasChange = overseas.querySelector('[data-role="quote-change"]');
+    const overseasRate = overseas.querySelector('[data-role="quote-rate"]');
 
     expect(domesticChange?.textContent).toBe("▲ 1,200");
     expect(domesticRate?.textContent).toBe("0.68%");
@@ -136,8 +142,12 @@ describe("stock-card rendering", () => {
     expect(overseasRate?.textContent).toBe("0.68%");
     expect(domesticChange?.textContent).not.toMatch(/[+$-]/);
     expect(overseasChange?.textContent).not.toMatch(/[+$-]/);
-    expect(domesticChange?.getAttribute("text-anchor")).toBeNull();
-    expect(overseasRate?.getAttribute("text-anchor")).toBe("end");
+    expect(domesticChange?.getAttribute("text-anchor")).toBe("middle");
+    expect(overseasRate?.getAttribute("text-anchor")).toBe("middle");
+    expect(domesticChange?.getAttribute("fill")).toBe("#ff1744");
+    expect(domesticRate?.getAttribute("fill")).toBe("#ff1744");
+    expect(overseasChange?.getAttribute("fill")).toBe("#2979ff");
+    expect(overseasRate?.getAttribute("fill")).toBe("#2979ff");
 
     domesticWindow.close();
     overseasWindow.close();
@@ -168,7 +178,7 @@ describe("stock-card rendering", () => {
 
     expectConnectionTitle(svg, color);
     expectNoQuoteStatus(svg);
-    expectLegacyChangeBaseline(svg);
+    expectStackedChangeLayout(svg);
     expect(svg).toContain("AAPL");
     expect(svg).toContain("$182.52");
     expect(svg).toContain("0.68%");

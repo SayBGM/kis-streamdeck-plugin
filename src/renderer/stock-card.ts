@@ -21,9 +21,11 @@ const CARD_SIZE = 144;
 const BG_COLOR = "#1a1a2e";
 const BG_RADIUS = 12;
 
-const COLOR_RISE = "#00c853"; // 상승 (초록)
-const COLOR_FALL = "#ff1744"; // 하락 (빨강)
-const COLOR_FLAT = "#9e9e9e"; // 보합 (회색)
+const COLOR_QUOTE_RISE = "#ff1744"; // 상승 (한국 관례: 빨강)
+const COLOR_QUOTE_FALL = "#2979ff"; // 하락 (한국 관례: 파랑)
+const COLOR_QUOTE_FLAT = "#9e9e9e"; // 보합 (회색)
+const COLOR_SUCCESS = "#00c853";
+const COLOR_DANGER = "#ff1744";
 const COLOR_TEXT = "#ffffff"; // 기본 텍스트
 const COLOR_SESSION_REG = "#00c853"; // 정규장 (초록)
 const COLOR_SESSION_OTHER = "#ff9800"; // 프리/에프터 (주황)
@@ -193,22 +195,11 @@ function formatActionChange(
   return `${arrow} ${prefix}${amount}`;
 }
 
-function formatActionRate(rate: number, sign: QuoteSample["sign"]): string {
-  if (sign === "flat") return "0.00%";
-  return `${sign === "rise" ? "+" : "-"}${Math.abs(rate).toFixed(2)}%`;
-}
-
 function getMetricFontSize(text: string): number {
   if (text.length <= 9) return 14;
   if (text.length <= 12) return 12;
   if (text.length <= 16) return 10;
   return 8;
-}
-
-function getMetricWidthAttributes(text: string): string {
-  return text.length >= 8
-    ? ' textLength="58" lengthAdjust="spacingAndGlyphs"'
-    : "";
 }
 
 function matchesSign(value: number, sign: QuoteSample["sign"]): boolean {
@@ -391,7 +382,7 @@ function renderConnectionTitle(displayName: string, fontSize: number, color: str
 function renderInvalidStockActionView(): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
-  <text x="72" y="64" font-family="Arial, Helvetica, sans-serif" font-size="30" fill="${COLOR_FALL}" text-anchor="middle">!</text>
+  <text x="72" y="64" font-family="Arial, Helvetica, sans-serif" font-size="30" fill="${COLOR_DANGER}" text-anchor="middle">!</text>
   <text x="72" y="94" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_TEXT}" text-anchor="middle">표시 오류</text>
   <text x="72" y="114" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_MUTED}" text-anchor="middle">화면 데이터를 확인하세요</text>
 </svg>`;
@@ -417,7 +408,7 @@ function renderStockActionError(view: SafeStockActionView): string {
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
   ${renderSessionPill(getSessionBadgeLabel(view.session), sessionColor)}
   ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor("BROKEN"))}
-  <text x="72" y="68" font-family="Arial, Helvetica, sans-serif" font-size="28" fill="${COLOR_FALL}" text-anchor="middle">${errorCopy.icon}</text>
+  <text x="72" y="68" font-family="Arial, Helvetica, sans-serif" font-size="28" fill="${COLOR_DANGER}" text-anchor="middle">${errorCopy.icon}</text>
   <text x="72" y="96" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_TEXT}" text-anchor="middle">${errorCopy.label}</text>
   <text x="72" y="116" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_MUTED}" text-anchor="middle">${errorCopy.hint}</text>
 </svg>`;
@@ -446,8 +437,8 @@ function renderStockActionRecovery(view: SafeStockActionView): string {
   ${renderSessionPill(getSessionBadgeLabel(view.session), getSessionColor(view.session))}
   ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor("LIVE"))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#9ad1a7">연결 상태</text>
-  <text x="72" y="80" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="${COLOR_RISE}" text-anchor="middle">✓</text>
-  <text x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="15" fill="${COLOR_RISE}" text-anchor="middle">연결 회복</text>
+  <text x="72" y="80" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="${COLOR_SUCCESS}" text-anchor="middle">✓</text>
+  <text x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="15" fill="${COLOR_SUCCESS}" text-anchor="middle">연결 회복</text>
 </svg>`;
 }
 
@@ -456,7 +447,7 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   const displayName = truncateName(view.instrument.name, 8);
   const priceText = formatPrice(quote.price, view.instrument.market);
   const changeText = formatActionChange(quote.change, quote.sign, view.instrument.market);
-  const rateText = formatActionRate(quote.changeRate, quote.sign);
+  const rateText = formatChangeRate(quote.changeRate);
   const changeColor = getSignColor(quote.sign);
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
@@ -465,8 +456,8 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor(view.connection))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${escapeXml(truncateName(view.instrument.symbol.toUpperCase(), 10))}</text>
   <text x="72" y="82" font-family="Arial, Helvetica, sans-serif" font-size="${getPriceFontSize(priceText)}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceText)}</text>
-  <text data-role="quote-change" x="12" y="116" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(changeText)}" font-weight="bold" fill="${changeColor}" text-anchor="start"${getMetricWidthAttributes(changeText)}>${escapeXml(changeText)}</text>
-  <text data-role="quote-rate" x="132" y="116" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(rateText)}" font-weight="bold" fill="${changeColor}" text-anchor="end"${getMetricWidthAttributes(rateText)}>${escapeXml(rateText)}</text>
+  <text data-role="quote-change" x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(changeText)}" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(changeText)}</text>
+  <text data-role="quote-rate" x="72" y="128" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(rateText)}" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(rateText)}</text>
 </svg>`;
 }
 
@@ -544,7 +535,7 @@ export function renderErrorCard(errorType: ErrorType): string {
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
-  <text x="72" y="62" font-family="Arial, Helvetica, sans-serif" font-size="36" fill="${COLOR_FALL}" text-anchor="middle">${icon}</text>
+  <text x="72" y="62" font-family="Arial, Helvetica, sans-serif" font-size="36" fill="${COLOR_DANGER}" text-anchor="middle">${icon}</text>
   <text x="72" y="94" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(label)}</text>
   <text x="72" y="114" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_MUTED}" text-anchor="middle">Property Inspector를 확인하세요</text>
  </svg>`;
@@ -562,8 +553,8 @@ export function renderRecoveryCard(name: string): string {
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="#1b4332"/>
   ${renderConnectionTitle(displayName, nameFontSize, getConnectionTitleColor("LIVE"))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#9ad1a7">실시간 복구</text>
-  <text x="72" y="72" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="${COLOR_RISE}" text-anchor="middle">✓</text>
-  <text x="72" y="102" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${COLOR_RISE}" text-anchor="middle">연결 회복</text>
+  <text x="72" y="72" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="${COLOR_SUCCESS}" text-anchor="middle">✓</text>
+  <text x="72" y="102" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${COLOR_SUCCESS}" text-anchor="middle">연결 회복</text>
 </svg>`;
 }
 
@@ -618,7 +609,8 @@ export function renderSetupCard(message: string): string {
  * │ 종목명          장상태│
  * │                      │
  * │      현재가          │
- * │ ▲ 1,200      0.69%  │
+ * │      ▲ 1,200        │
+ * │       0.69%          │
  * └──────────────────────┘
  */
 export function renderStockCard(
@@ -654,11 +646,11 @@ export function renderStockCard(
   <!-- 현재가 (중앙) -->
   <text x="72" y="78" font-family="Arial, Helvetica, sans-serif" font-size="${priceFontSize}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceStr)}</text>
 
-  <!-- 변동량 + 화살표 (좌측 하단) -->
-  <text x="12" y="116" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}">${escapeXml(changeStr)}</text>
+  <!-- 변동량 + 화살표 (하단 첫째 행) -->
+  <text data-role="quote-change" x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(changeStr)}" fill="${changeColor}" text-anchor="middle">${escapeXml(changeStr)}</text>
 
-  <!-- 변동률 (우측 하단) -->
-  <text x="132" y="116" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="${changeColor}" text-anchor="end">${escapeXml(rateStr)}</text>
+  <!-- 변동률 (하단 둘째 행) -->
+  <text data-role="quote-rate" x="72" y="128" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(rateStr)}" fill="${changeColor}" text-anchor="middle">${escapeXml(rateStr)}</text>
 </svg>`;
 }
 
@@ -667,11 +659,11 @@ export function renderStockCard(
 function getSignColor(sign: string): string {
   switch (sign) {
     case "rise":
-      return COLOR_RISE;
+      return COLOR_QUOTE_RISE;
     case "fall":
-      return COLOR_FALL;
+      return COLOR_QUOTE_FALL;
     default:
-      return COLOR_FLAT;
+      return COLOR_QUOTE_FLAT;
   }
 }
 
