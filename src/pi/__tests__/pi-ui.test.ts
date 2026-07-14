@@ -316,6 +316,8 @@ describe("Property Inspector UI", () => {
     }
 
     expect(stockDetails?.querySelector("summary .sdpi-scope")?.textContent).toContain("현재 버튼만");
+    expect(credentialsDetails?.querySelector("summary .sdpi-summary-title")?.textContent)
+      .toBe("KIS 계정");
     expect(credentialsDetails?.querySelector("summary .sdpi-scope")?.textContent)
       .toContain("모든 버튼 공통");
     expect(credentialsDetails?.querySelector("summary .sdpi-summary-meta")?.textContent?.trim())

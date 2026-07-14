@@ -330,7 +330,7 @@
 
       '<details id="credentialsDetails" class="sdpi-group sdpi-disclosure" data-section="credentials">',
       "<summary>",
-      '<span class="sdpi-summary-copy"><span class="sdpi-summary-title">KIS API 자격증명</span>',
+      '<span class="sdpi-summary-copy"><span class="sdpi-summary-title">KIS 계정</span>',
       '<span class="sdpi-summary-meta">저장 상태 확인 중</span></span>',
       '<span class="sdpi-scope">모든 버튼 공통</span>',
       '<span class="sdpi-disclosure-icon" aria-hidden="true"></span>',

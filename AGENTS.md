@@ -63,7 +63,7 @@ Stream Deck App
 - WS 재연결: 지수 백오프 5초→10초→20초…최대 60초 (±10% 지터).
 - 모든 WS 시세 tick은 처리하고 `RenderScheduler`가 UI 경계에서 버튼별 LWW를 적용. 전역 `uiUpdateMode`의 실시간 모드는 50ms, 스로틀링 모드는 500~1000ms(100ms 단위)를 일반 시세 화면에 사용하며, 제어 상태는 1초·수동/치명 오류는 즉시 반영.
 - 실행 중 UI 모드 변경은 활성 국내·미국 타깃의 렌더 간격만 갱신하며 WebSocket 재연결·재구독 또는 REST 정책 재시작을 유발하지 않음.
-- canonical `Quote.change`는 가격·등락률로 역산하지 않고 국내·해외 WS/REST의 API-native 전일 대비 등락폭을 전달. KIS sign code가 `change`와 `changeRate` 부호의 단일 출처이며 REST coordinator와 renderer 안전 경계가 필수 키·유한값·부호 일관성을 검증.
+- canonical `Quote.change`는 가격·등락률로 역산하지 않고 국내·해외 WS/REST의 API-native 전일 대비 등락폭을 전달. KIS sign code가 `change`와 `changeRate` 부호의 단일 출처. REST coordinator는 canonical Quote의 exact-key 구조·유한값·요청 문맥 일치를 검증하고, renderer 안전 경계는 값의 범위와 `change`/`changeRate`-`sign` 부호 일관성을 추가 검증.
 - `StockActionController`의 가시 semantic key에는 `change`가 포함되어 등락폭만 바뀐 tick도 렌더 요청에서 누락되지 않음.
 - SVG LRU 캐시 키는 `ticker|name|price|change|rate|sign|state|stale` 조합.
 - 미국주식 `trKey`는 시간대에 따라 주간(`R`접두사) / 야간(`D`접두사)이 다름 (`isOverseasDayTrading()`).
