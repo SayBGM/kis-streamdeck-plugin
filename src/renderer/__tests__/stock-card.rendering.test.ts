@@ -106,6 +106,43 @@ describe("stock-card rendering", () => {
     expect(svg).toContain("정규");
   });
 
+  it("preserves the exact legacy change and rate formatter contract", () => {
+    const domesticWindow = new Window();
+    const overseasWindow = new Window();
+    const domestic = new domesticWindow.DOMParser().parseFromString(renderStockCard({
+      ticker: "005930",
+      name: "삼성전자",
+      price: 72_100,
+      change: 1_200,
+      changeRate: 0.68,
+      sign: "rise",
+    }, "domestic"), "image/svg+xml");
+    const overseas = new overseasWindow.DOMParser().parseFromString(renderStockCard({
+      ticker: "AAPL",
+      name: "Apple",
+      price: 182.52,
+      change: -0.5,
+      changeRate: -0.68,
+      sign: "fall",
+    }, "overseas"), "image/svg+xml");
+    const domesticChange = domestic.querySelector('text[x="12"][y="116"]');
+    const domesticRate = domestic.querySelector('text[x="132"][y="116"]');
+    const overseasChange = overseas.querySelector('text[x="12"][y="116"]');
+    const overseasRate = overseas.querySelector('text[x="132"][y="116"]');
+
+    expect(domesticChange?.textContent).toBe("▲ 1,200");
+    expect(domesticRate?.textContent).toBe("0.68%");
+    expect(overseasChange?.textContent).toBe("▼ 0.50");
+    expect(overseasRate?.textContent).toBe("0.68%");
+    expect(domesticChange?.textContent).not.toMatch(/[+$-]/);
+    expect(overseasChange?.textContent).not.toMatch(/[+$-]/);
+    expect(domesticChange?.getAttribute("text-anchor")).toBeNull();
+    expect(overseasRate?.getAttribute("text-anchor")).toBe("end");
+
+    domesticWindow.close();
+    overseasWindow.close();
+  });
+
   it.each<{
     connectionState: StreamConnectionState | null | undefined;
     isStale?: boolean;

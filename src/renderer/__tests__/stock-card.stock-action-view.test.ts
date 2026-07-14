@@ -16,7 +16,7 @@ function view(overrides: Partial<StockActionView> = {}): StockActionView {
     quote: {
       symbol: "005930",
       price: 72_100,
-      change: 1_250,
+      change: 1_200,
       changeRate: 1.25,
       sign: "rise",
       source: "websocket",
@@ -86,33 +86,70 @@ function expectNoQuoteStatus(svg: string): void {
   window.close();
 }
 
-function expectQuoteRateBaseline(svg: string, rateText: string): void {
+function metricSnapshot(
+  svg: string,
+  role: "quote-change" | "quote-rate",
+): {
+  readonly text: string | null;
+  readonly x: string | null;
+  readonly y: string | null;
+  readonly anchor: string | null;
+  readonly fontSize: string | null;
+  readonly textLength: string | null;
+  readonly lengthAdjust: string | null;
+} {
   const window = new Window();
   const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
-  const rate = Array.from(document.querySelectorAll("text"))
-    .find((node) => node.textContent === rateText);
+  const node = document.querySelector(`[data-role="${role}"]`);
+  const snapshot = {
+    text: node?.textContent ?? null,
+    x: node?.getAttribute("x") ?? null,
+    y: node?.getAttribute("y") ?? null,
+    anchor: node?.getAttribute("text-anchor") ?? null,
+    fontSize: node?.getAttribute("font-size") ?? null,
+    textLength: node?.getAttribute("textLength") ?? null,
+    lengthAdjust: node?.getAttribute("lengthAdjust") ?? null,
+  };
 
-  expect(rate?.getAttribute("y")).toBe("116");
   window.close();
+  return snapshot;
 }
 
 describe("renderStockActionView", () => {
-  it("uses the injected session and renders the compact domestic quote layout", () => {
+  it("renders domestic rise change and rate in separate bounded columns", () => {
     const svg = renderStockActionView(view({ session: "PRE" }));
+    const change = metricSnapshot(svg, "quote-change");
+    const rate = metricSnapshot(svg, "quote-rate");
 
     expectValidSvg(svg);
     expect(svg).toContain("삼성전자");
     expect(svg).toContain("프리");
     expect(svg).not.toContain("정규");
     expect(svg).toContain("72,100");
-    expect(svg).toContain("▲ +1.25%");
+    expect(change).toEqual({
+      text: "▲ +1,200",
+      x: "12",
+      y: "116",
+      anchor: "start",
+      fontSize: "14",
+      textLength: "58",
+      lengthAdjust: "spacingAndGlyphs",
+    });
+    expect(rate).toEqual({
+      text: "+1.25%",
+      x: "132",
+      y: "116",
+      anchor: "end",
+      fontSize: "14",
+      textLength: null,
+      lengthAdjust: null,
+    });
+    expect(rate.text).not.toMatch(/[▲▼]/);
     expectNoQuoteStatus(svg);
-    expectQuoteRateBaseline(svg, "▲ +1.25%");
     expectConnectionTitle(svg, "#00c853");
-    expect(svg).not.toContain("1,250");
   });
 
-  it("formats overseas prices to two decimals and renders a signed fall rate", () => {
+  it("formats overseas fall change and rate without repeating the arrow", () => {
     const svg = renderStockActionView(view({
       instrument: { symbol: "AAPL", name: "Apple", market: "overseas" },
       session: "AFT",
@@ -128,15 +165,75 @@ describe("renderStockActionView", () => {
       },
       connection: "BACKUP",
     }));
+    const change = metricSnapshot(svg, "quote-change");
+    const rate = metricSnapshot(svg, "quote-rate");
 
     expectValidSvg(svg);
     expect(svg).toContain("$182.50");
-    expect(svg).toContain("▼ -0.68%");
+    expect(change.text).toBe("▼ -$1.25");
+    expect(change.x).toBe("12");
+    expect(change.y).toBe("116");
+    expect(change.anchor).toBe("start");
+    expect(rate.text).toBe("-0.68%");
+    expect(rate.x).toBe("132");
+    expect(rate.y).toBe("116");
+    expect(rate.anchor).toBe("end");
+    expect(rate.text).not.toMatch(/[▲▼]/);
     expect(svg).toContain("애프터");
     expectNoQuoteStatus(svg);
     expectConnectionTitle(svg, "#7dd3fc");
     expect(svg).not.toContain("#ffd54f");
   });
+
+  it.each([
+    { market: "domestic" as const, symbol: "005930", change: "0" },
+    { market: "overseas" as const, symbol: "AAPL", change: "$0.00" },
+  ])("renders $market flat metrics without an arrow", ({ market, symbol, change }) => {
+    const svg = renderStockActionView(view({
+      instrument: { symbol, name: "Flat", market },
+      quote: {
+        symbol,
+        price: market === "domestic" ? 72_100 : 182.5,
+        change: 0,
+        changeRate: 0,
+        sign: "flat",
+        source: "websocket",
+        receivedAt: 100,
+        sessionEpoch: 10,
+      },
+    }));
+
+    expect(metricSnapshot(svg, "quote-change").text).toBe(change);
+    expect(metricSnapshot(svg, "quote-rate").text).toBe("0.00%");
+    expect(metricSnapshot(svg, "quote-change").text).not.toMatch(/[▲▼+-]/);
+    expect(metricSnapshot(svg, "quote-rate").text).not.toMatch(/[▲▼+-]/);
+  });
+
+  it.each([
+    { amount: 1, text: "▲ +1", fontSize: "14", constrained: false },
+    { amount: 1_200, text: "▲ +1,200", fontSize: "14", constrained: true },
+    { amount: 123_456, text: "▲ +123,456", fontSize: "12", constrained: true },
+    { amount: 123_456_789, text: "▲ +123,456,789", fontSize: "10", constrained: true },
+    {
+      amount: 1_000_000_000_000_000,
+      text: "▲ +1,000,000,000,000,000",
+      fontSize: "8",
+      constrained: true,
+    },
+  ])(
+    "uses the exact metric width contract for $text",
+    ({ amount, text, fontSize, constrained }) => {
+      const svg = renderStockActionView(view({
+        quote: { ...view().quote!, change: amount },
+      }));
+      const change = metricSnapshot(svg, "quote-change");
+
+      expect(change.text).toBe(text);
+      expect(change.fontSize).toBe(fontSize);
+      expect(change.textLength).toBe(constrained ? "58" : null);
+      expect(change.lengthAdjust).toBe(constrained ? "spacingAndGlyphs" : null);
+    },
+  );
 
   it("is deterministic when only non-visible quote metadata changes", () => {
     const first = view();
@@ -166,7 +263,8 @@ describe("renderStockActionView", () => {
     expectValidSvg(svg);
     expectNoQuoteStatus(svg);
     expectConnectionTitle(svg, color);
-    expectQuoteRateBaseline(svg, "▲ +1.25%");
+    expect(metricSnapshot(svg, "quote-change").y).toBe("116");
+    expect(metricSnapshot(svg, "quote-rate").y).toBe("116");
     expect(svg).toContain("72,100");
   });
 
@@ -221,7 +319,7 @@ describe("renderStockActionView", () => {
     expectValidSvg(svg);
     expect(svg).toContain("연결 오류");
     expect(svg).not.toContain("72,100");
-    expect(svg).not.toContain("▲ +1.25%");
+    expect(svg).not.toContain("▲ +1,200");
     expectConnectionTitle(svg, "#ff1744");
   });
 
@@ -260,13 +358,25 @@ describe("renderStockActionView", () => {
     { price: 1, change: Number.NaN, changeRate: 0 },
     { price: 1, change: Number.POSITIVE_INFINITY, changeRate: 0 },
     { price: 1, change: 1_000_000_000_000_001, changeRate: 0 },
-  ])("renders a safe display error for invalid bounded quote values: %j", ({ price, change, changeRate }) => {
+    { price: 1, change: -1, changeRate: 1.25, sign: "rise" as const },
+    { price: 1, change: 1, changeRate: -1.25, sign: "fall" as const },
+    { price: 1, change: 1, changeRate: -1.25, sign: "rise" as const },
+    { price: 1, change: -1, changeRate: 1.25, sign: "fall" as const },
+    { price: 1, change: 1, changeRate: 0, sign: "flat" as const },
+    { price: 1, change: 0, changeRate: 1, sign: "flat" as const },
+  ])("renders a safe display error for invalid bounded or contradictory quote values: %j", ({
+    price,
+    change,
+    changeRate,
+    sign,
+  }) => {
     const svg = renderStockActionView(view({
       quote: {
         ...view().quote!,
         price,
         ...(change === undefined ? {} : { change }),
         changeRate,
+        ...(sign === undefined ? {} : { sign }),
       },
     }));
 

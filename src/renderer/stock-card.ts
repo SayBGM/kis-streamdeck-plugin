@@ -178,6 +178,45 @@ function formatChangeRate(rate: number): string {
   return `${Math.abs(rate).toFixed(2)}%`;
 }
 
+function formatActionChange(
+  change: number,
+  sign: QuoteSample["sign"],
+  market: Market,
+): string {
+  if (sign === "flat") return market === "domestic" ? "0" : "$0.00";
+
+  const arrow = sign === "rise" ? ARROW_UP : ARROW_DOWN;
+  const prefix = sign === "rise" ? "+" : "-";
+  const amount = market === "domestic"
+    ? KR_INT_FORMAT.format(Math.abs(change))
+    : `$${Math.abs(change).toFixed(2)}`;
+  return `${arrow} ${prefix}${amount}`;
+}
+
+function formatActionRate(rate: number, sign: QuoteSample["sign"]): string {
+  if (sign === "flat") return "0.00%";
+  return `${sign === "rise" ? "+" : "-"}${Math.abs(rate).toFixed(2)}%`;
+}
+
+function getMetricFontSize(text: string): number {
+  if (text.length <= 9) return 14;
+  if (text.length <= 12) return 12;
+  if (text.length <= 16) return 10;
+  return 8;
+}
+
+function getMetricWidthAttributes(text: string): string {
+  return text.length >= 8
+    ? ' textLength="58" lengthAdjust="spacingAndGlyphs"'
+    : "";
+}
+
+function matchesSign(value: number, sign: QuoteSample["sign"]): boolean {
+  if (sign === "rise") return value >= 0;
+  if (sign === "fall") return value <= 0;
+  return value === 0;
+}
+
 interface SafeStockActionView {
   readonly instrument: {
     readonly symbol: string;
@@ -292,6 +331,8 @@ function snapshotStockActionView(input: unknown): SafeStockActionView | undefine
       !Number.isFinite(quoteSource.changeRate) ||
       Math.abs(quoteSource.changeRate) > MAX_ABSOLUTE_CHANGE_RATE ||
       (quoteSource.sign !== "rise" && quoteSource.sign !== "fall" && quoteSource.sign !== "flat") ||
+      !matchesSign(quoteSource.change, quoteSource.sign as QuoteSample["sign"]) ||
+      !matchesSign(quoteSource.changeRate, quoteSource.sign as QuoteSample["sign"]) ||
       (quoteSource.source !== "websocket" && quoteSource.source !== "rest") ||
       !isSafeTimestamp(quoteSource.receivedAt) ||
       !isSafeTimestamp(quoteSource.sessionEpoch)
@@ -325,13 +366,6 @@ function snapshotStockActionView(input: unknown): SafeStockActionView | undefine
     recovery: source.recovery,
     ...(error ? { error } : {}),
   });
-}
-
-function formatSignedChangeRate(rate: number, sign: QuoteSample["sign"]): string {
-  const amount = Math.abs(rate).toFixed(2);
-  if (sign === "rise") return `${ARROW_UP} +${amount}%`;
-  if (sign === "fall") return `${ARROW_DOWN} -${amount}%`;
-  return `${amount}%`;
 }
 
 function getConnectionTitleColor(
@@ -421,7 +455,8 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   const quote = view.quote!;
   const displayName = truncateName(view.instrument.name, 8);
   const priceText = formatPrice(quote.price, view.instrument.market);
-  const rateText = formatSignedChangeRate(quote.changeRate, quote.sign);
+  const changeText = formatActionChange(quote.change, quote.sign, view.instrument.market);
+  const rateText = formatActionRate(quote.changeRate, quote.sign);
   const changeColor = getSignColor(quote.sign);
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
@@ -430,7 +465,8 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor(view.connection))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${escapeXml(truncateName(view.instrument.symbol.toUpperCase(), 10))}</text>
   <text x="72" y="82" font-family="Arial, Helvetica, sans-serif" font-size="${getPriceFontSize(priceText)}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceText)}</text>
-  <text x="72" y="116" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(rateText)}</text>
+  <text data-role="quote-change" x="12" y="116" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(changeText)}" font-weight="bold" fill="${changeColor}" text-anchor="start"${getMetricWidthAttributes(changeText)}>${escapeXml(changeText)}</text>
+  <text data-role="quote-rate" x="132" y="116" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(rateText)}" font-weight="bold" fill="${changeColor}" text-anchor="end"${getMetricWidthAttributes(rateText)}>${escapeXml(rateText)}</text>
 </svg>`;
 }
 
