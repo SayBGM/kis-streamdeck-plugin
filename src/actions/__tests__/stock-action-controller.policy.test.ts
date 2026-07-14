@@ -48,6 +48,7 @@ function quote(source: QuoteSample["source"], price: number, receivedAt = Date.n
   return Object.freeze({
     symbol: "005930",
     price,
+    change: 1_000,
     changeRate: 1.25,
     sign: "rise" as const,
     source,

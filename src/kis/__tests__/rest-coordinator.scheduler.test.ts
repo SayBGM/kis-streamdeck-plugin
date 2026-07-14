@@ -78,7 +78,7 @@ function successfulResponse(price = "1000"): unknown {
     status: 200,
     json: async () => ({
       rt_cd: "0",
-      output: { stck_prpr: price, prdy_vrss_sign: "3", prdy_ctrt: "0" },
+      output: { stck_prpr: price, prdy_vrss_sign: "3", prdy_vrss: "0", prdy_ctrt: "0" },
     }),
   };
 }
@@ -305,7 +305,7 @@ describe("RestCoordinator scheduler", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     jsonResolvers[1]({
       rt_cd: "0",
-      output: { stck_prpr: "2000", prdy_vrss_sign: "3", prdy_ctrt: "0" },
+      output: { stck_prpr: "2000", prdy_vrss_sign: "3", prdy_vrss: "0", prdy_ctrt: "0" },
     });
     await expect(Promise.all([current, joined])).resolves.toEqual([
       expect.objectContaining({ price: 2_000 }),

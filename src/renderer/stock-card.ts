@@ -54,6 +54,7 @@ const MAX_INSTRUMENT_NAME_LENGTH = 64;
 const MAX_SYMBOL_LENGTH = 32;
 const MAX_ERROR_MESSAGE_LENGTH = 512;
 const MAX_PRICE = 1_000_000_000_000_000;
+const MAX_ABSOLUTE_CHANGE = MAX_PRICE;
 const MAX_ABSOLUTE_CHANGE_RATE = 100_000;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F]/;
 
@@ -72,6 +73,7 @@ const INSTRUMENT_KEYS = new Set(["symbol", "name", "market"]);
 const QUOTE_KEYS = new Set([
   "symbol",
   "price",
+  "change",
   "changeRate",
   "sign",
   "source",
@@ -283,6 +285,9 @@ function snapshotStockActionView(input: unknown): SafeStockActionView | undefine
       !Number.isFinite(quoteSource.price) ||
       quoteSource.price < 0 ||
       quoteSource.price > MAX_PRICE ||
+      typeof quoteSource.change !== "number" ||
+      !Number.isFinite(quoteSource.change) ||
+      Math.abs(quoteSource.change) > MAX_ABSOLUTE_CHANGE ||
       typeof quoteSource.changeRate !== "number" ||
       !Number.isFinite(quoteSource.changeRate) ||
       Math.abs(quoteSource.changeRate) > MAX_ABSOLUTE_CHANGE_RATE ||
@@ -295,6 +300,7 @@ function snapshotStockActionView(input: unknown): SafeStockActionView | undefine
     quote = Object.freeze({
       symbol: quoteSource.symbol,
       price: quoteSource.price,
+      change: quoteSource.change,
       changeRate: quoteSource.changeRate,
       sign: quoteSource.sign,
       source: quoteSource.source,

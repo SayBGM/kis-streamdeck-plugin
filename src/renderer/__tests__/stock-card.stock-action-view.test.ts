@@ -16,6 +16,7 @@ function view(overrides: Partial<StockActionView> = {}): StockActionView {
     quote: {
       symbol: "005930",
       price: 72_100,
+      change: 1_250,
       changeRate: 1.25,
       sign: "rise",
       source: "websocket",
@@ -118,6 +119,7 @@ describe("renderStockActionView", () => {
       quote: {
         symbol: "AAPL",
         price: 182.5,
+        change: -1.25,
         changeRate: -0.68,
         sign: "fall",
         source: "rest",
@@ -233,6 +235,7 @@ describe("renderStockActionView", () => {
       quote: {
         symbol: "A&<1",
         price: 1.25,
+        change: 0,
         changeRate: 0,
         sign: "flat",
         source: "websocket",
@@ -254,11 +257,15 @@ describe("renderStockActionView", () => {
     { price: 1_000_000_000_000_001, changeRate: 0 },
     { price: 1, changeRate: Number.POSITIVE_INFINITY },
     { price: 1, changeRate: 100_001 },
-  ])("renders a safe display error for invalid bounded quote values: %j", ({ price, changeRate }) => {
+    { price: 1, change: Number.NaN, changeRate: 0 },
+    { price: 1, change: Number.POSITIVE_INFINITY, changeRate: 0 },
+    { price: 1, change: 1_000_000_000_000_001, changeRate: 0 },
+  ])("renders a safe display error for invalid bounded quote values: %j", ({ price, change, changeRate }) => {
     const svg = renderStockActionView(view({
       quote: {
         ...view().quote!,
         price,
+        ...(change === undefined ? {} : { change }),
         changeRate,
       },
     }));
@@ -268,6 +275,29 @@ describe("renderStockActionView", () => {
     expect(svg).not.toContain("NaN");
     expect(svg).not.toContain("Infinity");
     expectNoConnectionTitle(svg);
+  });
+
+  it("requires native change as an enumerable data property without invoking accessors", () => {
+    const { change: _change, ...quoteWithoutChange } = view().quote!;
+    let getterCalls = 0;
+    const accessorQuote = Object.defineProperty({ ...quoteWithoutChange }, "change", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return 1_250;
+      },
+    });
+
+    const missingSvg = renderStockActionView(view({
+      quote: quoteWithoutChange as StockActionView["quote"],
+    }));
+    const accessorSvg = renderStockActionView(view({
+      quote: accessorQuote as StockActionView["quote"],
+    }));
+
+    expect(missingSvg).toContain("표시 오류");
+    expect(accessorSvg).toContain("표시 오류");
+    expect(getterCalls).toBe(0);
   });
 
   it("never executes accessors and safely rejects hostile proxies", () => {

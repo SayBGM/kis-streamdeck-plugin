@@ -299,6 +299,7 @@ function validateQuoteSample(
     const keys = [
       "symbol",
       "price",
+      "change",
       "changeRate",
       "sign",
       "source",
@@ -315,6 +316,7 @@ function validateQuoteSample(
     if (
       values.symbol !== expectedSymbol ||
       typeof values.price !== "number" || !Number.isFinite(values.price) || values.price <= 0 ||
+      typeof values.change !== "number" || !Number.isFinite(values.change) ||
       typeof values.changeRate !== "number" || !Number.isFinite(values.changeRate) ||
       (values.sign !== "rise" && values.sign !== "fall" && values.sign !== "flat") ||
       values.source !== "rest" ||
@@ -324,6 +326,7 @@ function validateQuoteSample(
     return Object.freeze({
       symbol: values.symbol,
       price: values.price,
+      change: values.change,
       changeRate: values.changeRate,
       sign: values.sign,
       source: "rest",

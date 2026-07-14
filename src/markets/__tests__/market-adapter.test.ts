@@ -91,6 +91,7 @@ describe("domestic market adapters", () => {
     expect(quote).toEqual({
       symbol: "005930",
       price: 71_200,
+      change: -1_200,
       changeRate: -1.66,
       sign: "fall",
       source: "websocket",
@@ -106,7 +107,8 @@ describe("domestic market adapters", () => {
         output: {
           stck_prpr: "71200",
           prdy_vrss_sign: "2",
-          prdy_ctrt: "1.66",
+          prdy_vrss: "1200",
+          prdy_ctrt: "-1.66",
         },
       },
       instrument,
@@ -115,6 +117,7 @@ describe("domestic market adapters", () => {
 
     expect(quote.source).toBe("rest");
     expect(quote.price).toBe(71_200);
+    expect(quote.change).toBe(1_200);
     expect(quote.changeRate).toBe(1.66);
     expect(quote.sign).toBe("rise");
   });
@@ -170,21 +173,48 @@ describe("overseas market adapter", () => {
     )).toMatchObject({
       symbol: "AAPL",
       price: 209.5,
+      change: 1.5,
       changeRate: 0.72,
       sign: "rise",
       source: "websocket",
     });
     expect(overseasStockAdapter.parseRest(
-      { output: { last: "209.50", sign: "5", rate: "-0.72" } },
+      { output: { last: "209.50", sign: "5", diff: "+1.50", rate: "+0.72" } },
       instrument,
       context,
     )).toMatchObject({
       symbol: "AAPL",
       price: 209.5,
+      change: -1.5,
       changeRate: -0.72,
       sign: "fall",
       source: "rest",
     });
+  });
+
+  it("normalizes non-zero change and rate to zero for a flat sign", () => {
+    const domesticInstrument = domesticStockAdapter.toInstrument({ stockCode: "005930" });
+    const overseasInstrument = overseasStockAdapter.toInstrument({ ticker: "AAPL", exchange: "NAS" });
+    const domestic = domesticFields();
+    domestic[3] = "3";
+    const overseas = overseasFields();
+    overseas[12] = "3";
+
+    expect(domesticStockAdapter.parseWebSocket(domestic, domesticInstrument, context))
+      .toMatchObject({ change: 0, changeRate: 0, sign: "flat" });
+    expect(domesticStockAdapter.parseRest({
+      output: {
+        stck_prpr: "71200",
+        prdy_vrss_sign: "3",
+        prdy_vrss: "1200",
+        prdy_ctrt: "1.66",
+      },
+    }, domesticInstrument, context)).toMatchObject({ change: 0, changeRate: 0, sign: "flat" });
+    expect(overseasStockAdapter.parseWebSocket(overseas, overseasInstrument, context))
+      .toMatchObject({ change: 0, changeRate: 0, sign: "flat" });
+    expect(overseasStockAdapter.parseRest({
+      output: { last: "209.50", sign: "3", diff: "1.50", rate: "0.72" },
+    }, overseasInstrument, context)).toMatchObject({ change: 0, changeRate: 0, sign: "flat" });
   });
 });
 
@@ -225,10 +255,10 @@ describe("market adapter validation", () => {
       overseas, overseasInstrument, context,
     )).toThrowError(expectKisError("PROTOCOL"));
     expect(() => domesticStockAdapter.parseRest({
-      output: { stck_prpr: price, prdy_vrss_sign: "3", prdy_ctrt: "0" },
+      output: { stck_prpr: price, prdy_vrss_sign: "3", prdy_vrss: "0", prdy_ctrt: "0" },
     }, domesticInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
     expect(() => overseasStockAdapter.parseRest({
-      output: { last: price, sign: "3", rate: "0" },
+      output: { last: price, sign: "3", diff: "0", rate: "0" },
     }, overseasInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
   });
 
@@ -247,12 +277,42 @@ describe("market adapter validation", () => {
       overseas, overseasInstrument, context,
     )).toThrowError(expectKisError("PROTOCOL"));
     expect(() => domesticStockAdapter.parseRest({
-      output: { stck_prpr: "1", prdy_vrss_sign: signCode, prdy_ctrt: "0" },
+      output: { stck_prpr: "1", prdy_vrss_sign: signCode, prdy_vrss: "0", prdy_ctrt: "0" },
     }, domesticInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
     expect(() => overseasStockAdapter.parseRest({
-      output: { last: "1", sign: signCode, rate: "0" },
+      output: { last: "1", sign: signCode, diff: "0", rate: "0" },
     }, overseasInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
   });
+
+  it.each([undefined, null, "NaN", "Infinity", "1e3", "0x10", "12px"])(
+    "rejects malformed native change values across domestic and overseas WS/REST: %j",
+    (invalidChange) => {
+      const domesticInstrument = domesticStockAdapter.toInstrument({ stockCode: "005930" });
+      const overseasInstrument = overseasStockAdapter.toInstrument({ ticker: "AAPL", exchange: "NAS" });
+      const domestic = domesticFields() as unknown[];
+      domestic[4] = invalidChange;
+      const overseas = overseasFields() as unknown[];
+      overseas[13] = invalidChange;
+
+      expect(() => domesticStockAdapter.parseWebSocket(
+        domestic as string[], domesticInstrument, context,
+      )).toThrowError(expectKisError("PROTOCOL"));
+      expect(() => domesticStockAdapter.parseRest({
+        output: {
+          stck_prpr: "71200",
+          prdy_vrss_sign: "2",
+          prdy_vrss: invalidChange,
+          prdy_ctrt: "1.66",
+        },
+      }, domesticInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
+      expect(() => overseasStockAdapter.parseWebSocket(
+        overseas as string[], overseasInstrument, context,
+      )).toThrowError(expectKisError("PROTOCOL"));
+      expect(() => overseasStockAdapter.parseRest({
+        output: { last: "209.50", sign: "2", diff: invalidChange, rate: "0.72" },
+      }, overseasInstrument, context)).toThrowError(expectKisError("PROTOCOL"));
+    },
+  );
 
   it.each([
     () => domesticStockAdapter.parseWebSocket([], domesticStockAdapter.toInstrument({ stockCode: "005930" }), context),

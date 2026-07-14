@@ -130,6 +130,7 @@ function successfulResponse(price = "71200"): unknown {
       output: {
         stck_prpr: price,
         prdy_vrss_sign: "2",
+        prdy_vrss: "1200",
         prdy_ctrt: "1.25",
       },
     }),
@@ -172,6 +173,7 @@ function customQuote(
   return {
     symbol: instrument.symbol,
     price,
+    change: 0,
     changeRate: 0,
     sign: "flat",
     source: "rest",
@@ -255,6 +257,7 @@ describe("RestCoordinator HTTP boundary", () => {
     await expect(request(coordinator)).resolves.toEqual({
       symbol: "005930",
       price: 71_200,
+      change: 1_200,
       changeRate: 1.25,
       sign: "rise",
       source: "rest",
@@ -468,7 +471,7 @@ describe("RestCoordinator HTTP boundary", () => {
     now = openSnapshot.nextTransitionAt;
     resolveJson({
       rt_cd: "0",
-      output: { stck_prpr: "71000", prdy_vrss_sign: "3", prdy_ctrt: "0" },
+      output: { stck_prpr: "71000", prdy_vrss_sign: "3", prdy_vrss: "0", prdy_ctrt: "0" },
     });
 
     await expect(pending).rejects.toMatchObject({
@@ -494,7 +497,7 @@ describe("RestCoordinator HTTP boundary", () => {
     await flush();
     resolveJson({
       rt_cd: "0",
-      output: { stck_prpr: "71000", prdy_vrss_sign: "3", prdy_ctrt: "0" },
+      output: { stck_prpr: "71000", prdy_vrss_sign: "3", prdy_vrss: "0", prdy_ctrt: "0" },
     });
     queueMicrotask(() => { now = closedSnapshot.nextTransitionAt; });
 
@@ -553,7 +556,7 @@ describe("RestCoordinator HTTP boundary", () => {
     await expect(pending).rejects.toMatchObject({ code: "NETWORK", scope: "rest" });
     resolveJson({
       rt_cd: "0",
-      output: { stck_prpr: "99999", prdy_vrss_sign: "3", prdy_ctrt: "0" },
+      output: { stck_prpr: "99999", prdy_vrss_sign: "3", prdy_vrss: "0", prdy_ctrt: "0" },
     });
     await flush();
     fetch.mockResolvedValue(successfulResponse("70000"));
@@ -612,9 +615,60 @@ describe("RestCoordinator cache policy", () => {
     const first = await coordinator.requestQuote(input);
     expect(Object.isFrozen(first)).toBe(true);
     (mutableQuote as { price: number }).price = 1;
+    (mutableQuote as { change: number }).change = 999;
     const cached = await coordinator.requestQuote(input);
-    expect(cached).toMatchObject({ symbol: "SAFE", price: 71_000 });
+    expect(cached).toMatchObject({ symbol: "SAFE", price: 71_000, change: 0 });
     expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("rejects missing, non-finite, accessor, and extra native change fields", async () => {
+    let getterCalls = 0;
+    const invalidAdapters = [
+      customAdapter("missing-change", (_payload, instrumentValue, context) => {
+        const { change: _change, ...quoteWithoutChange } =
+          customQuote(instrumentValue, context, 71_000);
+        return quoteWithoutChange as QuoteSample;
+      }),
+      customAdapter("nan-change", (_payload, instrumentValue, context) => ({
+        ...customQuote(instrumentValue, context, 71_000),
+        change: Number.NaN,
+      })),
+      customAdapter("infinite-change", (_payload, instrumentValue, context) => ({
+        ...customQuote(instrumentValue, context, 71_000),
+        change: Number.POSITIVE_INFINITY,
+      })),
+      customAdapter("accessor-change", (_payload, instrumentValue, context) => {
+        const quote = customQuote(instrumentValue, context, 71_000);
+        Object.defineProperty(quote, "change", {
+          enumerable: true,
+          get: () => {
+            getterCalls += 1;
+            return 0;
+          },
+        });
+        return quote;
+      }),
+      customAdapter("extra-change-key", (_payload, instrumentValue, context) => ({
+        ...customQuote(instrumentValue, context, 71_000),
+        extra: "unsafe",
+      })),
+    ];
+
+    for (const adapter of invalidAdapters) {
+      const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+      const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
+        now: () => openNow,
+      });
+
+      await expect(coordinator.requestQuote({
+        adapter,
+        instrument: customInstrument(adapter.id, "SAFE"),
+        marketSnapshot: openSnapshot,
+        priority: "initial",
+      })).rejects.toMatchObject({ code: "PROTOCOL", scope: "rest" });
+    }
+
+    expect(getterCalls).toBe(0);
   });
 
   it("rejects accessor or context-mismatched adapter quotes at the coordinator boundary", async () => {

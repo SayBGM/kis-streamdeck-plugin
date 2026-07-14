@@ -29,6 +29,7 @@ export interface CanonicalInstrument {
 export interface Quote {
   readonly symbol: string;
   readonly price: number;
+  readonly change: number;
   readonly changeRate: number;
   readonly sign: PriceSign;
   readonly source: QuoteSource;
@@ -208,15 +209,16 @@ function signFromCode(value: unknown, scope: KisErrorScope): PriceSign {
   return "flat";
 }
 
-function signedRate(rate: number, sign: PriceSign): number {
-  if (sign === "fall") return -Math.abs(rate);
-  if (sign === "rise") return Math.abs(rate);
+function signedValue(value: number, sign: PriceSign): number {
+  if (sign === "fall") return -Math.abs(value);
+  if (sign === "rise") return Math.abs(value);
   return 0;
 }
 
 function quote(
   instrument: CanonicalInstrument,
   price: number,
+  change: number,
   rate: number,
   sign: PriceSign,
   source: QuoteSource,
@@ -234,7 +236,8 @@ function quote(
   return Object.freeze({
     symbol: instrument.symbol,
     price,
-    changeRate: signedRate(rate, sign),
+    change: signedValue(change, sign),
+    changeRate: signedValue(rate, sign),
     sign,
     source,
     receivedAt,
@@ -357,10 +360,12 @@ class DomesticMarketAdapter implements MarketAdapter<DomesticAdapterSettings> {
     }
     const price = parseKisDecimal(arrayValue(fields, 2, "websocket"), "websocket", true);
     const sign = signFromCode(arrayValue(fields, 3, "websocket"), "websocket");
+    const change = parseKisDecimal(arrayValue(fields, 4, "websocket"), "websocket");
     const rate = parseKisDecimal(arrayValue(fields, 5, "websocket"), "websocket");
     return quote(
       validated,
       price,
+      change,
       rate,
       sign,
       "websocket",
@@ -384,8 +389,9 @@ class DomesticMarketAdapter implements MarketAdapter<DomesticAdapterSettings> {
       recordValue(output, "prdy_vrss_sign", "rest"),
       "rest",
     );
+    const change = parseKisDecimal(recordValue(output, "prdy_vrss", "rest"), "rest");
     const rate = parseKisDecimal(recordValue(output, "prdy_ctrt", "rest"), "rest");
-    return quote(validated, price, rate, sign, "rest", context);
+    return quote(validated, price, change, rate, sign, "rest", context);
   }
 }
 
@@ -469,10 +475,12 @@ export const overseasStockAdapter: MarketAdapter<OverseasAdapterSettings> = {
       true,
     );
     const sign = signFromCode(arrayValue(fields, 12, "websocket"), "websocket");
+    const change = parseKisDecimal(arrayValue(fields, 13, "websocket"), "websocket");
     const rate = parseKisDecimal(arrayValue(fields, 14, "websocket"), "websocket");
     return quote(
       validated,
       price,
+      change,
       rate,
       sign,
       "websocket",
@@ -489,7 +497,8 @@ export const overseasStockAdapter: MarketAdapter<OverseasAdapterSettings> = {
       true,
     );
     const sign = signFromCode(recordValue(output, "sign", "rest"), "rest");
+    const change = parseKisDecimal(recordValue(output, "diff", "rest"), "rest");
     const rate = parseKisDecimal(recordValue(output, "rate", "rest"), "rest");
-    return quote(validated, price, rate, sign, "rest", context);
+    return quote(validated, price, change, rate, sign, "rest", context);
   },
 };
