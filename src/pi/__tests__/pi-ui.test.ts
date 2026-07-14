@@ -651,6 +651,159 @@ describe("Property Inspector UI", () => {
     expect(document.getElementById("advancedStatusMessage")?.className).toContain("error");
   });
 
+  it("persisted preference result clears a conflict when authoritative preferences match the controls", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const button = document.getElementById("savePreferencesButton") as unknown as {
+      disabled: boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: false,
+        error: { safeMessage: "최신 설정과 충돌했습니다." },
+        snapshot: snapshotWithPreferenceChanges(5, { dataMode: "rest-only" }),
+      },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    expect(button.disabled).toBe(true);
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toBe("저장됨");
+    expect(document.getElementById("advancedStatusMessage")?.className).toContain("success");
+    expect(document.getElementById("advancedStatusMessage")?.textContent).not.toContain("충돌");
+  });
+
+  it("persisted preference result keeps a conflict when authoritative preferences differ from the controls", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const button = document.getElementById("savePreferencesButton") as unknown as {
+      disabled: boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: false,
+        error: { safeMessage: "최신 설정과 충돌했습니다." },
+        snapshot: snapshotWithPreferenceChanges(5, { dataMode: "automatic" }),
+      },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    expect(button.disabled).toBe(false);
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("최신 설정과 충돌했습니다.");
+    expect(document.getElementById("advancedStatusMessage")?.className).toContain("error");
+  });
+
+  it("persisted preference result survives an unrelated accepted diagnostics snapshot", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4, 4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const button = document.getElementById("savePreferencesButton") as unknown as {
+      disabled: boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: false,
+        error: { safeMessage: "환경설정을 저장하지 못했습니다." },
+      },
+    }));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "diagnostics/update", snapshot: snapshotAt(4, 5) },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    expect(button.disabled).toBe(false);
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("환경설정을 저장하지 못했습니다.");
+    expect(document.getElementById("advancedStatusMessage")?.className).toContain("error");
+
+    const backup = document.getElementById("backupPollIntervalMs") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    backup.value = "60000";
+    backup.dispatchEvent(new window.Event("change"));
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("저장하지 않은 변경사항");
+    expect(document.getElementById("advancedStatusMessage")?.className).toContain("info");
+  });
+
+  it.each(["realtime", "throttled"] as const)(
+    "persisted preference result keeps a local interval error while the field is %s",
+    (uiUpdateMode) => {
+      const { window, document, commands } = createUi();
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          requestId: "initial",
+          ok: true,
+          snapshot: snapshotWithRenderPreferences(uiUpdateMode, 700, 4, 4),
+        },
+      }));
+      const interval = document.getElementById("renderIntervalMs") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      const button = document.getElementById("savePreferencesButton") as unknown as {
+        disabled: boolean;
+      };
+      interval.value = "550";
+      interval.dispatchEvent(new window.Event("input"));
+      const commandCount = commands.length;
+      document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+      expect(commands).toHaveLength(commandCount);
+      const validationMessage = document.getElementById("advancedStatusMessage")?.textContent;
+      expect(validationMessage).toContain("스로틀 간격");
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          type: "diagnostics/update",
+          snapshot: snapshotWithRenderPreferences(uiUpdateMode, 700, 4, 5),
+        },
+      }));
+
+      expect(interval.value).toBe("550");
+      expect(elementHidden(document, "renderIntervalField")).toBe(uiUpdateMode === "realtime");
+      expect(button.disabled).toBe(false);
+      expect(document.getElementById("advancedStatusMessage")?.textContent)
+        .toBe(validationMessage);
+      expect(document.getElementById("advancedStatusMessage")?.className).toContain("error");
+    },
+  );
+
   it("preference save state follows every accepted authoritative baseline without hydrating dirty controls", () => {
     const { window, document } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {

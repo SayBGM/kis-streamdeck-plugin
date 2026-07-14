@@ -436,6 +436,7 @@
     this.credentialEditVersion = 0;
     this.preferencesEditVersion = 0;
     this.preferenceSaveRequestId = null;
+    this.preferenceSaveResult = null;
   }
 
   StockPropertyInspector.prototype.sendCommand = function (type, fields, section) {
@@ -486,21 +487,21 @@
   };
 
   StockPropertyInspector.prototype.syncPreferenceSaveState = function (resultStatus) {
+    if (arguments.length > 0) this.preferenceSaveResult = resultStatus || null;
     var pending = this.preferenceSavePending();
     var dirty = this.preferencesDirty();
     var button = byId("savePreferencesButton");
     button.disabled = pending || !this.lastAuthoritativePreferences || !dirty;
 
-    if (resultStatus && resultStatus.message) {
-      this.setStatus(
-        "advancedStatusMessage",
-        resultStatus.message,
-        resultStatus.kind || "info"
-      );
-      return;
-    }
+    if (!pending && !dirty) this.preferenceSaveResult = null;
     if (pending) {
       this.setStatus("advancedStatusMessage", "저장하는 중입니다.", "info");
+    } else if (this.preferenceSaveResult && this.preferenceSaveResult.message) {
+      this.setStatus(
+        "advancedStatusMessage",
+        this.preferenceSaveResult.message,
+        this.preferenceSaveResult.kind || "info"
+      );
     } else if (dirty) {
       this.setStatus("advancedStatusMessage", "저장하지 않은 변경사항", "info");
     } else {
@@ -902,6 +903,7 @@
         });
         return;
       }
+      inspector.preferenceSaveResult = null;
       inspector.sendCommand("preferences/save", {
         settingsRevision: inspector.preferencesRevision,
         preferences: safePreferences,
@@ -930,6 +932,7 @@
     ["dataMode", "backupPollIntervalMs"].forEach(function (id) {
       byId(id).addEventListener("change", function () {
         inspector.preferencesEditVersion += 1;
+        inspector.preferenceSaveResult = null;
         inspector.syncPreferenceSaveState();
       });
     });
@@ -937,12 +940,14 @@
     for (var radioIndex = 0; radioIndex < uiUpdateModeRadios.length; radioIndex += 1) {
       uiUpdateModeRadios[radioIndex].addEventListener("change", function () {
         inspector.preferencesEditVersion += 1;
+        inspector.preferenceSaveResult = null;
         syncRenderIntervalVisibility();
         inspector.syncPreferenceSaveState();
       });
     }
     byId("renderIntervalMs").addEventListener("input", function () {
       inspector.preferencesEditVersion += 1;
+      inspector.preferenceSaveResult = null;
       inspector.syncPreferenceSaveState();
     });
     syncRenderIntervalVisibility();
