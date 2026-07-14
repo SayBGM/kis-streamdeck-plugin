@@ -235,6 +235,26 @@ describe("renderStockActionView", () => {
     },
   );
 
+  it("applies the metric width contract independently to short and long rates", () => {
+    const shortRate = metricSnapshot(renderStockActionView(view()), "quote-rate");
+    const longRate = metricSnapshot(renderStockActionView(view({
+      quote: {
+        ...view().quote!,
+        change: 1,
+        changeRate: 100_000,
+      },
+    })), "quote-rate");
+
+    expect(shortRate.text).toBe("+1.25%");
+    expect(shortRate.fontSize).toBe("14");
+    expect(shortRate.textLength).toBeNull();
+    expect(shortRate.lengthAdjust).toBeNull();
+    expect(longRate.text).toBe("+100000.00%");
+    expect(longRate.fontSize).toBe("12");
+    expect(longRate.textLength).toBe("58");
+    expect(longRate.lengthAdjust).toBe("spacingAndGlyphs");
+  });
+
   it("is deterministic when only non-visible quote metadata changes", () => {
     const first = view();
     const second = view({
