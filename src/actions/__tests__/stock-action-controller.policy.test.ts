@@ -44,11 +44,16 @@ function snapshot(
   });
 }
 
-function quote(source: QuoteSample["source"], price: number, receivedAt = Date.now()): QuoteSample {
+function quote(
+  source: QuoteSample["source"],
+  price: number,
+  receivedAt = Date.now(),
+  change = 1_000,
+): QuoteSample {
   return Object.freeze({
     symbol: "005930",
     price,
-    change: 1_000,
+    change,
     changeRate: 1.25,
     sign: "rise" as const,
     source,
@@ -179,8 +184,11 @@ class FakeSubscriptions {
     void active.observer.onState?.({ state });
   }
 
-  data(price: number): void {
-    void this.active()?.observer.onData?.({ fields: [String(price)], receivedAt: Date.now() });
+  data(price: number, change = 1_000): void {
+    void this.active()?.observer.onData?.({
+      fields: [String(price), String(change)],
+      receivedAt: Date.now(),
+    });
   }
 
   private active() {
@@ -337,7 +345,7 @@ function makeAdapter(id = "stock"): MarketAdapter<TestSettings> {
       return { trId: id === "etf" ? "ETF_WS" : "STOCK_WS", trKey: instrument.symbol };
     },
     parseWebSocket(fields, _instrument, context) {
-      return quote("websocket", Number(fields[0]), context.receivedAt);
+      return quote("websocket", Number(fields[0]), context.receivedAt, Number(fields[1]));
     },
     parseRest(_payload, _instrument, context) {
       return quote("rest", 1, context.receivedAt);
@@ -1485,6 +1493,24 @@ describe("StockActionController settings, market and rendering boundaries", () =
     expect(Object.isFrozen(test.images.at(-1))).toBe(true);
     expect(Object.isFrozen(test.images.at(-1)?.instrument)).toBe(true);
     expect(Object.isFrozen(test.images.at(-1)?.quote)).toBe(true);
+  });
+
+  it("가격·등락률·부호가 같아도 등락폭만 바뀌면 새 semantic key를 제출한다", async () => {
+    const test = setup();
+    test.settings.resolve();
+    await test.controller.appear({
+      actionId: "a",
+      settings: { symbol: "005930" },
+      actionPort: { setImage: vi.fn() },
+    });
+
+    test.subscriptions.data(70_000, 1_000);
+    test.subscriptions.data(70_000, 1_100);
+    await vi.advanceTimersByTimeAsync(0);
+    const normal = test.scheduler.requests.filter((request) => request.category === "normal");
+
+    expect(normal).toHaveLength(2);
+    expect(normal.at(-2)?.semanticKey).not.toBe(normal.at(-1)?.semanticKey);
   });
 
   it("BACKUP에서 유효 WS로 회복하면 recovery hold 후 LIVE 일반 view로 돌아간다", async () => {

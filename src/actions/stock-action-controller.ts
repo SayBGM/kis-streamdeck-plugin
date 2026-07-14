@@ -357,6 +357,7 @@ function semanticKey(view: StockActionView): string {
     view.instrument.market,
     view.session,
     view.quote?.price ?? null,
+    view.quote?.change ?? null,
     view.quote?.changeRate ?? null,
     view.quote?.sign ?? null,
     view.connection,
