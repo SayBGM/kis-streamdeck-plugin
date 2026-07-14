@@ -437,6 +437,10 @@
     this.preferencesEditVersion = 0;
     this.preferenceSaveRequestId = null;
     this.preferenceSaveResult = null;
+    this.credentialsDisclosureInitialized = false;
+    this.credentialsDisclosureTouched = false;
+    this.credentialsDisclosureProgrammaticOpen = null;
+    this.diagnosticsRequestedOnOpen = false;
   }
 
   StockPropertyInspector.prototype.sendCommand = function (type, fields, section) {
@@ -604,6 +608,19 @@
     }
   };
 
+  StockPropertyInspector.prototype.initializeCredentialsDisclosure = function (
+    credentialsConfigured
+  ) {
+    if (this.credentialsDisclosureInitialized) return;
+    this.credentialsDisclosureInitialized = true;
+    if (this.credentialsDisclosureTouched) return;
+    var details = byId("credentialsDetails");
+    var shouldOpen = !credentialsConfigured;
+    if (details.open === shouldOpen) return;
+    this.credentialsDisclosureProgrammaticOpen = shouldOpen;
+    details.open = shouldOpen;
+  };
+
   StockPropertyInspector.prototype.inspectSnapshot = function (snapshot) {
     var safeSnapshot = copyKnownSnapshot(snapshot);
     if (!safeSnapshot) return { safe: false, snapshot: null };
@@ -646,6 +663,7 @@
       ? settingsRevision
       : Math.max(this.settingsRevision, settingsRevision);
     this.lastAuthoritativePreferences = safeSnapshot.preferences;
+    this.initializeCredentialsDisclosure(safeSnapshot.credentialsConfigured);
     byId("maskedAppKey").textContent = safeSnapshot.maskedAppKey || "설정 안 됨";
     byId("credentialSummary").textContent = safeSnapshot.credentialsConfigured
       ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
@@ -868,6 +886,9 @@
       inspector.setStatus("credentialStatusMessage", "자격증명을 저장하는 중입니다.", "info");
     });
     byId("clearCredentialsButton").addEventListener("click", function () {
+      if (!window.confirm(
+        "자격증명을 지우면 모든 국내/미국 주식 버튼의 KIS 연결이 끊기고 공통 자격증명 설정이 제거되어 시세 조회가 중단됩니다. 계속할까요?"
+      )) return;
       inspector.sendCommand(
         "credentials/clear",
         { settingsRevision: inspector.settingsRevision },
@@ -920,6 +941,23 @@
       inspector.sendCommand("quote/refresh", null, "troubleshooting");
     });
     byId("refreshDiagnosticsButton").addEventListener("click", function () {
+      inspector.sendCommand("diagnostics/request", null, "diagnostics");
+    });
+
+    byId("credentialsDetails").addEventListener("toggle", function () {
+      if (
+        inspector.credentialsDisclosureProgrammaticOpen !== null &&
+        this.open === inspector.credentialsDisclosureProgrammaticOpen
+      ) {
+        inspector.credentialsDisclosureProgrammaticOpen = null;
+        return;
+      }
+      inspector.credentialsDisclosureProgrammaticOpen = null;
+      inspector.credentialsDisclosureTouched = true;
+    });
+    byId("diagnosticsDetails").addEventListener("toggle", function () {
+      if (!this.open || inspector.diagnosticsRequestedOnOpen) return;
+      inspector.diagnosticsRequestedOnOpen = true;
       inspector.sendCommand("diagnostics/request", null, "diagnostics");
     });
 

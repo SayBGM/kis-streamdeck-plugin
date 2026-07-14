@@ -15,7 +15,9 @@ function createUi() {
   window.document.body.innerHTML = '<div id="piRoot"></div>';
   const commands: unknown[] = [];
   const actionSettings: unknown[] = [];
+  const confirm = vi.fn((_message: string) => true);
   Object.assign(window, {
+    confirm,
     sendToPlugin: vi.fn((command: unknown) => commands.push(command)),
     setSettings: vi.fn((settings: unknown) => actionSettings.push(settings)),
   });
@@ -30,10 +32,16 @@ function createUi() {
       { id: "stockName", label: "종목명", serialize: (value: string) => value.trim() },
     ],
   });
-  return { window, document: window.document, commands, actionSettings };
+  return { window, document: window.document, commands, actionSettings, confirm };
 }
 
 type UiUpdateMode = "realtime" | "throttled";
+
+type DetailsElement = {
+  open: boolean;
+  dispatchEvent(event: unknown): boolean;
+  closest(selector: string): { getAttribute(name: string): string | null } | null;
+};
 
 type UiUpdateModeRadio = {
   checked: boolean;
@@ -313,6 +321,169 @@ describe("Property Inspector UI", () => {
       .toContain("재연결");
     expect(diagnosticsDetails?.querySelector("summary .sdpi-summary-meta")?.textContent)
       .toContain("필요할 때만");
+  });
+
+  it.each([
+    ["settings request response", "response", false, true],
+    ["unsolicited settings update", "update", false, true],
+    ["settings request response", "response", true, false],
+    ["unsolicited settings update", "update", true, false],
+  ] as const)(
+    "initializes credential onboarding from the first accepted %s",
+    (_label, delivery, credentialsConfigured, expectedOpen) => {
+      const { window, document, commands } = createUi();
+      const credentialsDetails = document.getElementById(
+        "credentialsDetails",
+      ) as unknown as DetailsElement;
+      const snapshot = snapshotWithCredentialChanges(
+        4,
+        credentialsConfigured,
+        credentialsConfigured ? "ABC••••XYZ" : "",
+      );
+
+      if (delivery === "response") {
+        document.dispatchEvent(new window.CustomEvent("piDidConnect"));
+        const request = commands.at(-1) as { requestId: string };
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: { requestId: request.requestId, ok: true, snapshot },
+        }));
+      } else {
+        document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+          detail: { type: "settings/update", snapshot },
+        }));
+      }
+
+      expect(credentialsDetails.open).toBe(expectedOpen);
+    },
+  );
+
+  it.each([true, false])(
+    "respects a user-selected credential disclosure state before the first snapshot (%s)",
+    (expectedOpen) => {
+      const { window, document } = createUi();
+      const credentialsDetails = document.getElementById(
+        "credentialsDetails",
+      ) as unknown as DetailsElement;
+      credentialsDetails.open = true;
+      credentialsDetails.dispatchEvent(new window.Event("toggle"));
+      if (!expectedOpen) {
+        credentialsDetails.open = false;
+        credentialsDetails.dispatchEvent(new window.Event("toggle"));
+      }
+
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          type: "settings/update",
+          snapshot: snapshotWithCredentialChanges(4, false, ""),
+        },
+      }));
+
+      expect(credentialsDetails.open).toBe(expectedOpen);
+    },
+  );
+
+  it("does not override credential disclosure choices after onboarding initialization", () => {
+    const { window, document } = createUi();
+    const credentialsDetails = document.getElementById(
+      "credentialsDetails",
+    ) as unknown as DetailsElement;
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(4, false, ""),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(true);
+
+    credentialsDetails.open = false;
+    credentialsDetails.dispatchEvent(new window.Event("toggle"));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(5, false, "", 5),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(false);
+
+    credentialsDetails.open = true;
+    credentialsDetails.dispatchEvent(new window.Event("toggle"));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(6, true, "NEW••••KEY", 6),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(true);
+  });
+
+  it("initializes credential onboarding only from an accepted safe snapshot", () => {
+    const { window, document } = createUi();
+    const credentialsDetails = document.getElementById(
+      "credentialsDetails",
+    ) as unknown as DetailsElement;
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: withUnsafeSnapshotAccessor(snapshotWithCredentialChanges(4, false, "")),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(false);
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(5, true, "SAFE••••KEY", 5),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(false);
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(4, false, "", 6),
+      },
+    }));
+    expect(credentialsDetails.open).toBe(false);
+  });
+
+  it("requests diagnostics once on first open and once per manual refresh", () => {
+    const { window, document, commands } = createUi();
+    const diagnosticsDetails = document.getElementById(
+      "diagnosticsDetails",
+    ) as unknown as DetailsElement;
+    expect(diagnosticsDetails.closest("[data-section]")?.getAttribute("data-section"))
+      .toBe("troubleshooting");
+
+    diagnosticsDetails.open = true;
+    diagnosticsDetails.dispatchEvent(new window.Event("toggle"));
+    diagnosticsDetails.dispatchEvent(new window.Event("toggle"));
+    expect(commands.filter((command) => (
+      command as { type?: string }
+    ).type === "diagnostics/request")).toHaveLength(1);
+    const firstRequest = commands.at(-1) as { requestId: string };
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: firstRequest.requestId,
+        ok: false,
+        error: { safeMessage: "진단 요청에 실패했습니다." },
+      },
+    }));
+    expect(document.getElementById("diagnosticsOutput")?.textContent)
+      .toBe("진단 요청에 실패했습니다.");
+
+    diagnosticsDetails.open = false;
+    diagnosticsDetails.dispatchEvent(new window.Event("toggle"));
+    diagnosticsDetails.open = true;
+    diagnosticsDetails.dispatchEvent(new window.Event("toggle"));
+    expect(commands.filter((command) => (
+      command as { type?: string }
+    ).type === "diagnostics/request")).toHaveLength(1);
+
+    document.getElementById("refreshDiagnosticsButton")?.dispatchEvent(new window.Event("click"));
+    document.getElementById("refreshDiagnosticsButton")?.dispatchEvent(new window.Event("click"));
+    expect(commands.filter((command) => (
+      command as { type?: string }
+    ).type === "diagnostics/request")).toHaveLength(3);
   });
 
   it("styles the connection strip and accordion affordances accessibly", () => {
@@ -958,6 +1129,58 @@ describe("Property Inspector UI", () => {
     });
   });
 
+  it("cancels credential clearing without sending or mutating account state", () => {
+    const { window, document, commands, confirm } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(4) },
+    }));
+    document.getElementById("saveCredentialsButton")?.dispatchEvent(new window.Event("click"));
+    const key = document.getElementById("appKey") as unknown as { value: string };
+    const secret = document.getElementById("appSecret") as unknown as { value: string };
+    const status = document.getElementById("credentialStatusMessage");
+    key.value = "LOCALKEY";
+    secret.value = "local-secret";
+    const statusBefore = status?.textContent;
+    confirm.mockReturnValue(false);
+
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    const confirmationCopy = confirm.mock.calls[0]?.[0];
+    expect(confirmationCopy).toMatch(/모든.*국내.*미국.*주식 버튼/);
+    expect(confirmationCopy).toMatch(/연결/);
+    expect(confirmationCopy).toMatch(/설정/);
+    expect(commands.filter((command) => (
+      command as { type?: string }
+    ).type === "credentials/clear")).toHaveLength(0);
+    expect(status?.textContent).toBe(statusBefore);
+    expect(key.value).toBe("LOCALKEY");
+    expect(secret.value).toBe("local-secret");
+  });
+
+  it("confirms and sends one revision-fenced credential clear command", () => {
+    const { window, document, commands, confirm } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(6) },
+    }));
+    expect(confirm).not.toHaveBeenCalled();
+
+    document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    const clearCommands = commands.filter((command) => (
+      command as { type?: string }
+    ).type === "credentials/clear");
+    expect(clearCommands).toHaveLength(1);
+    expect(clearCommands[0]).toMatchObject({
+      type: "credentials/clear",
+      requestId: expect.any(String),
+      settingsRevision: 6,
+    });
+    expect(document.getElementById("credentialStatusMessage")?.textContent)
+      .toBe("자격증명을 지우는 중입니다.");
+  });
+
   it("routes preference and troubleshooting feedback to their owning sections", () => {
     const { window, document, commands } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
@@ -993,7 +1216,10 @@ describe("Property Inspector UI", () => {
     ] as const;
 
     for (const operation of operations) {
-      document.getElementById(operation.buttonId)?.dispatchEvent(new window.Event("click"));
+      const operationButton = document.getElementById(operation.buttonId);
+      expect(operationButton?.closest("[data-section]")?.getAttribute("data-section"))
+        .toBe("troubleshooting");
+      operationButton?.dispatchEvent(new window.Event("click"));
       const request = commands.at(-1) as { requestId: string; type: string };
       expect(request.type).toBe(operation.type);
 
