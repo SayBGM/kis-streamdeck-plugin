@@ -76,18 +76,18 @@ function expectNoQuoteStatus(svg: string): void {
   window.close();
 }
 
-function expectStackedChangeLayout(svg: string): void {
+function expectEdgeAlignedChangeLayout(svg: string): void {
   const window = new Window();
   const document = new window.DOMParser().parseFromString(svg, "image/svg+xml");
 
   const change = document.querySelector('[data-role="quote-change"]');
   const rate = document.querySelector('[data-role="quote-rate"]');
-  expect(change?.getAttribute("x")).toBe("72");
-  expect(change?.getAttribute("y")).toBe("108");
-  expect(change?.getAttribute("text-anchor")).toBe("middle");
-  expect(rate?.getAttribute("x")).toBe("72");
-  expect(rate?.getAttribute("y")).toBe("128");
-  expect(rate?.getAttribute("text-anchor")).toBe("middle");
+  expect(change?.getAttribute("x")).toBe("12");
+  expect(change?.getAttribute("y")).toBe("116");
+  expect(change?.getAttribute("text-anchor")).toBe("start");
+  expect(rate?.getAttribute("x")).toBe("132");
+  expect(rate?.getAttribute("y")).toBe("116");
+  expect(rate?.getAttribute("text-anchor")).toBe("end");
   window.close();
 }
 
@@ -108,7 +108,7 @@ describe("stock-card rendering", () => {
     expect(svg).toContain("$182.52");
     expect(svg).toContain("0.68%");
     expectNoQuoteStatus(svg);
-    expectStackedChangeLayout(svg);
+    expectEdgeAlignedChangeLayout(svg);
     expect(svg).toContain("정규");
   });
 
@@ -142,8 +142,8 @@ describe("stock-card rendering", () => {
     expect(overseasRate?.textContent).toBe("0.68%");
     expect(domesticChange?.textContent).not.toMatch(/[+$-]/);
     expect(overseasChange?.textContent).not.toMatch(/[+$-]/);
-    expect(domesticChange?.getAttribute("text-anchor")).toBe("middle");
-    expect(overseasRate?.getAttribute("text-anchor")).toBe("middle");
+    expect(domesticChange?.getAttribute("text-anchor")).toBe("start");
+    expect(overseasRate?.getAttribute("text-anchor")).toBe("end");
     expect(domesticChange?.getAttribute("fill")).toBe("#ff1744");
     expect(domesticRate?.getAttribute("fill")).toBe("#ff1744");
     expect(overseasChange?.getAttribute("fill")).toBe("#2979ff");
@@ -178,7 +178,7 @@ describe("stock-card rendering", () => {
 
     expectConnectionTitle(svg, color);
     expectNoQuoteStatus(svg);
-    expectStackedChangeLayout(svg);
+    expectEdgeAlignedChangeLayout(svg);
     expect(svg).toContain("AAPL");
     expect(svg).toContain("$182.52");
     expect(svg).toContain("0.68%");

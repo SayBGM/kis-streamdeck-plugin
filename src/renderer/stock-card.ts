@@ -46,6 +46,13 @@ const CONNECTION_TITLE_DOT_Y = 22;
 const CONNECTION_TITLE_DOT_RADIUS = 3;
 const CONNECTION_TITLE_TEXT_X = 12;
 const CONNECTION_TITLE_TEXT_Y = 28;
+const QUOTE_METRIC_LEFT_X = 12;
+const QUOTE_METRIC_RIGHT_X = 132;
+const QUOTE_METRIC_Y = 116;
+const QUOTE_METRIC_ROW_WIDTH = QUOTE_METRIC_RIGHT_X - QUOTE_METRIC_LEFT_X;
+const QUOTE_METRIC_GAP = 6;
+const QUOTE_METRIC_MIN_FONT_SIZE = 8;
+const QUOTE_METRIC_WIDTH_SAFETY_FACTOR = 1.05;
 
 const ARROW_UP = "\u25B2"; // ▲
 const ARROW_DOWN = "\u25BC"; // ▼
@@ -200,6 +207,98 @@ function getMetricFontSize(text: string): number {
   if (text.length <= 12) return 12;
   if (text.length <= 16) return 10;
   return 8;
+}
+
+interface MetricTextLayout {
+  readonly fontSize: number;
+  readonly textLength?: number;
+}
+
+interface MetricRowLayout {
+  readonly change: MetricTextLayout;
+  readonly rate: MetricTextLayout;
+}
+
+function getMetricCharacterWidthFactor(character: string): number {
+  if (character >= "0" && character <= "9") return 0.56;
+  switch (character) {
+    case " ":
+    case ",":
+    case ".":
+      return 0.28;
+    case "-":
+      return 0.33;
+    case "$":
+      return 0.56;
+    case "+":
+      return 0.58;
+    case "▲":
+    case "▼":
+      return 0.75;
+    case "%":
+      return 0.89;
+    default:
+      return 0.8;
+  }
+}
+
+function estimateMetricWidth(text: string, fontSize: number): number {
+  const emWidth = Array.from(text).reduce(
+    (total, character) => total + getMetricCharacterWidthFactor(character),
+    0,
+  );
+  return emWidth * fontSize * QUOTE_METRIC_WIDTH_SAFETY_FACTOR;
+}
+
+function getMetricRowLayout(changeText: string, rateText: string): MetricRowLayout {
+  const availableWidth = QUOTE_METRIC_ROW_WIDTH - QUOTE_METRIC_GAP;
+  const initialChangeFontSize = getMetricFontSize(changeText);
+  const initialRateFontSize = getMetricFontSize(rateText);
+  const initialChangeWidth = estimateMetricWidth(changeText, initialChangeFontSize);
+  const initialRateWidth = estimateMetricWidth(rateText, initialRateFontSize);
+  const initialTotalWidth = initialChangeWidth + initialRateWidth;
+
+  if (initialTotalWidth <= availableWidth) {
+    return {
+      change: { fontSize: initialChangeFontSize },
+      rate: { fontSize: initialRateFontSize },
+    };
+  }
+
+  const fontScale = availableWidth / initialTotalWidth;
+  const changeFontSize = Math.max(
+    QUOTE_METRIC_MIN_FONT_SIZE,
+    Math.floor(initialChangeFontSize * fontScale),
+  );
+  const rateFontSize = Math.max(
+    QUOTE_METRIC_MIN_FONT_SIZE,
+    Math.floor(initialRateFontSize * fontScale),
+  );
+  const changeWidth = estimateMetricWidth(changeText, changeFontSize);
+  const rateWidth = estimateMetricWidth(rateText, rateFontSize);
+  const totalWidth = changeWidth + rateWidth;
+
+  if (totalWidth <= availableWidth) {
+    return {
+      change: { fontSize: changeFontSize },
+      rate: { fontSize: rateFontSize },
+    };
+  }
+
+  const changeTextLength = Math.min(
+    availableWidth - 1,
+    Math.max(1, Math.floor((changeWidth / totalWidth) * availableWidth)),
+  );
+  return {
+    change: { fontSize: changeFontSize, textLength: changeTextLength },
+    rate: { fontSize: rateFontSize, textLength: availableWidth - changeTextLength },
+  };
+}
+
+function renderMetricWidthAttributes(layout: MetricTextLayout): string {
+  return layout.textLength === undefined
+    ? ""
+    : ` textLength="${layout.textLength}" lengthAdjust="spacingAndGlyphs"`;
 }
 
 function matchesSign(value: number, sign: QuoteSample["sign"]): boolean {
@@ -449,6 +548,7 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   const changeText = formatActionChange(quote.change, quote.sign, view.instrument.market);
   const rateText = formatChangeRate(quote.changeRate);
   const changeColor = getSignColor(quote.sign);
+  const metricLayout = getMetricRowLayout(changeText, rateText);
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_SIZE}" height="${CARD_SIZE}" viewBox="0 0 ${CARD_SIZE} ${CARD_SIZE}">
   <rect width="${CARD_SIZE}" height="${CARD_SIZE}" rx="${BG_RADIUS}" fill="${BG_COLOR}"/>
@@ -456,8 +556,8 @@ function renderStockActionQuote(view: SafeStockActionView): string {
   ${renderConnectionTitle(displayName, getNameFontSize(displayName), getConnectionTitleColor(view.connection))}
   <text x="12" y="44" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="${COLOR_TEXT_SUBTLE}">${escapeXml(truncateName(view.instrument.symbol.toUpperCase(), 10))}</text>
   <text x="72" y="82" font-family="Arial, Helvetica, sans-serif" font-size="${getPriceFontSize(priceText)}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceText)}</text>
-  <text data-role="quote-change" x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(changeText)}" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(changeText)}</text>
-  <text data-role="quote-rate" x="72" y="128" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(rateText)}" font-weight="bold" fill="${changeColor}" text-anchor="middle">${escapeXml(rateText)}</text>
+  <text data-role="quote-change" x="${QUOTE_METRIC_LEFT_X}" y="${QUOTE_METRIC_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${metricLayout.change.fontSize}" font-weight="bold" fill="${changeColor}" text-anchor="start"${renderMetricWidthAttributes(metricLayout.change)}>${escapeXml(changeText)}</text>
+  <text data-role="quote-rate" x="${QUOTE_METRIC_RIGHT_X}" y="${QUOTE_METRIC_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${metricLayout.rate.fontSize}" font-weight="bold" fill="${changeColor}" text-anchor="end"${renderMetricWidthAttributes(metricLayout.rate)}>${escapeXml(rateText)}</text>
 </svg>`;
 }
 
@@ -609,8 +709,7 @@ export function renderSetupCard(message: string): string {
  * │ 종목명          장상태│
  * │                      │
  * │      현재가          │
- * │      ▲ 1,200        │
- * │       0.69%          │
+ * │ ▲ 1,200       0.69% │
  * └──────────────────────┘
  */
 export function renderStockCard(
@@ -630,6 +729,7 @@ export function renderStockCard(
   const changeStr = formatChangeWithArrow(data.change, data.sign, market);
   const rateStr = formatChangeRate(data.changeRate);
   const priceFontSize = getPriceFontSize(priceStr);
+  const metricLayout = getMetricRowLayout(changeStr, rateStr);
 
   // 종목명 (길이 제한)
   const displayName = truncateName(data.name, 8);
@@ -646,11 +746,11 @@ export function renderStockCard(
   <!-- 현재가 (중앙) -->
   <text x="72" y="78" font-family="Arial, Helvetica, sans-serif" font-size="${priceFontSize}" font-weight="bold" fill="${COLOR_TEXT}" text-anchor="middle">${escapeXml(priceStr)}</text>
 
-  <!-- 변동량 + 화살표 (하단 첫째 행) -->
-  <text data-role="quote-change" x="72" y="108" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(changeStr)}" fill="${changeColor}" text-anchor="middle">${escapeXml(changeStr)}</text>
+  <!-- 변동량 + 화살표 (좌측 하단) -->
+  <text data-role="quote-change" x="${QUOTE_METRIC_LEFT_X}" y="${QUOTE_METRIC_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${metricLayout.change.fontSize}" fill="${changeColor}" text-anchor="start"${renderMetricWidthAttributes(metricLayout.change)}>${escapeXml(changeStr)}</text>
 
-  <!-- 변동률 (하단 둘째 행) -->
-  <text data-role="quote-rate" x="72" y="128" font-family="Arial, Helvetica, sans-serif" font-size="${getMetricFontSize(rateStr)}" fill="${changeColor}" text-anchor="middle">${escapeXml(rateStr)}</text>
+  <!-- 변동률 (우측 하단) -->
+  <text data-role="quote-rate" x="${QUOTE_METRIC_RIGHT_X}" y="${QUOTE_METRIC_Y}" font-family="Arial, Helvetica, sans-serif" font-size="${metricLayout.rate.fontSize}" fill="${changeColor}" text-anchor="end"${renderMetricWidthAttributes(metricLayout.rate)}>${escapeXml(rateStr)}</text>
 </svg>`;
 }
 

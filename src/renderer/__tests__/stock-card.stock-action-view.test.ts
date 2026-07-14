@@ -125,7 +125,7 @@ function expectQuoteMetricColor(svg: string, color: string): void {
 }
 
 describe("renderStockActionView", () => {
-  it("renders domestic rise change and rate in centered stacked rows", () => {
+  it("renders domestic rise change and rate at opposite row edges", () => {
     const svg = renderStockActionView(view({ session: "PRE" }));
     const change = metricSnapshot(svg, "quote-change");
     const rate = metricSnapshot(svg, "quote-rate");
@@ -137,18 +137,18 @@ describe("renderStockActionView", () => {
     expect(svg).toContain("72,100");
     expect(change).toEqual({
       text: "▲ +1,200",
-      x: "72",
-      y: "108",
-      anchor: "middle",
+      x: "12",
+      y: "116",
+      anchor: "start",
       fontSize: "14",
       textLength: null,
       lengthAdjust: null,
     });
     expect(rate).toEqual({
       text: "1.25%",
-      x: "72",
-      y: "128",
-      anchor: "middle",
+      x: "132",
+      y: "116",
+      anchor: "end",
       fontSize: "14",
       textLength: null,
       lengthAdjust: null,
@@ -181,13 +181,13 @@ describe("renderStockActionView", () => {
     expectValidSvg(svg);
     expect(svg).toContain("$182.50");
     expect(change.text).toBe("▼ -$1.25");
-    expect(change.x).toBe("72");
-    expect(change.y).toBe("108");
-    expect(change.anchor).toBe("middle");
+    expect(change.x).toBe("12");
+    expect(change.y).toBe("116");
+    expect(change.anchor).toBe("start");
     expect(rate.text).toBe("0.68%");
-    expect(rate.x).toBe("72");
-    expect(rate.y).toBe("128");
-    expect(rate.anchor).toBe("middle");
+    expect(rate.x).toBe("132");
+    expect(rate.y).toBe("116");
+    expect(rate.anchor).toBe("end");
     expect(rate.text).not.toMatch(/[▲▼]/);
     expectQuoteMetricColor(svg, "#2979ff");
     expect(svg).toContain("애프터");
@@ -232,7 +232,7 @@ describe("renderStockActionView", () => {
       fontSize: "8",
     },
   ])(
-    "uses the full-width stacked metric sizing contract for $text",
+    "uses the paired edge metric sizing contract for $text",
     ({ amount, text, fontSize }) => {
       const svg = renderStockActionView(view({
         quote: { ...view().quote!, change: amount },
@@ -240,9 +240,8 @@ describe("renderStockActionView", () => {
       const change = metricSnapshot(svg, "quote-change");
 
       expect(change.text).toBe(text);
-      expect(change.fontSize).toBe(fontSize);
-      expect(change.textLength).toBeNull();
-      expect(change.lengthAdjust).toBeNull();
+      expect(Number(change.fontSize)).toBeLessThanOrEqual(Number(fontSize));
+      expect(Number(change.fontSize)).toBeGreaterThanOrEqual(8);
     },
   );
 
@@ -266,7 +265,7 @@ describe("renderStockActionView", () => {
     expect(longRate.lengthAdjust).toBeNull();
   });
 
-  it("keeps a five-digit change and rate on separate rows", () => {
+  it("keeps a five-digit change and rate naturally separated at opposite edges", () => {
     const svg = renderStockActionView(view({
       quote: {
         ...view().quote!,
@@ -279,12 +278,32 @@ describe("renderStockActionView", () => {
 
     expect(change.text).toBe("▲ +10,000");
     expect(rate.text).toBe("4.92%");
-    expect(change.x).toBe("72");
-    expect(rate.x).toBe("72");
-    expect(change.y).toBe("108");
-    expect(rate.y).toBe("128");
-    expect(change.anchor).toBe("middle");
-    expect(rate.anchor).toBe("middle");
+    expect(change.x).toBe("12");
+    expect(rate.x).toBe("132");
+    expect(change.y).toBe("116");
+    expect(rate.y).toBe("116");
+    expect(change.anchor).toBe("start");
+    expect(rate.anchor).toBe("end");
+    expect(change.textLength).toBeNull();
+    expect(rate.textLength).toBeNull();
+  });
+
+  it("reserves a six-pixel gap when both edge metrics are extremely long", () => {
+    const svg = renderStockActionView(view({
+      quote: {
+        ...view().quote!,
+        change: 1_000_000_000_000_000,
+        changeRate: 100_000,
+      },
+    }));
+    const change = metricSnapshot(svg, "quote-change");
+    const rate = metricSnapshot(svg, "quote-rate");
+
+    expect(change.textLength).not.toBeNull();
+    expect(rate.textLength).not.toBeNull();
+    expect(Number(change.textLength) + Number(rate.textLength)).toBe(114);
+    expect(change.lengthAdjust).toBe("spacingAndGlyphs");
+    expect(rate.lengthAdjust).toBe("spacingAndGlyphs");
   });
 
   it("is deterministic when only non-visible quote metadata changes", () => {
@@ -315,8 +334,8 @@ describe("renderStockActionView", () => {
     expectValidSvg(svg);
     expectNoQuoteStatus(svg);
     expectConnectionTitle(svg, color);
-    expect(metricSnapshot(svg, "quote-change").y).toBe("108");
-    expect(metricSnapshot(svg, "quote-rate").y).toBe("128");
+    expect(metricSnapshot(svg, "quote-change").y).toBe("116");
+    expect(metricSnapshot(svg, "quote-rate").y).toBe("116");
     expect(svg).toContain("72,100");
   });
 
