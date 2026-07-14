@@ -652,6 +652,10 @@ describe("RestCoordinator cache policy", () => {
         ...customQuote(instrumentValue, context, 71_000),
         extra: "unsafe",
       })),
+      customAdapter("symbol-change-key", (_payload, instrumentValue, context) => ({
+        ...customQuote(instrumentValue, context, 71_000),
+        [Symbol("unsafe")]: "unsafe",
+      })),
     ];
 
     for (const adapter of invalidAdapters) {
@@ -669,6 +673,51 @@ describe("RestCoordinator cache policy", () => {
     }
 
     expect(getterCalls).toBe(0);
+  });
+
+  it("uses one descriptor snapshot so a stateful quote proxy cannot inject an unvalidated symbol", async () => {
+    let ownKeysCalls = 0;
+    let symbolDescriptorReads = 0;
+    const extraSymbol = Symbol("unexpected-quote-key");
+    const adapter = customAdapter("stateful-symbol-quote", (
+      _payload,
+      instrumentValue,
+      context,
+    ) => {
+      const target = customQuote(instrumentValue, context, 71_000);
+      return new Proxy(target, {
+        ownKeys(value) {
+          ownKeysCalls += 1;
+          const keys = Reflect.ownKeys(value);
+          return ownKeysCalls === 1 ? keys : [...keys, extraSymbol];
+        },
+        getOwnPropertyDescriptor(value, key) {
+          if (key === extraSymbol) {
+            symbolDescriptorReads += 1;
+            return {
+              configurable: true,
+              enumerable: true,
+              value: "unsafe",
+              writable: false,
+            };
+          }
+          return Reflect.getOwnPropertyDescriptor(value, key);
+        },
+      });
+    });
+    const fetch = vi.fn<RestFetch>().mockResolvedValue(successfulResponse());
+    const coordinator = new RestCoordinator(mutableCredentials(authorization(), fetch), {
+      now: () => openNow,
+    });
+
+    await expect(coordinator.requestQuote({
+      adapter,
+      instrument: customInstrument(adapter.id, "SAFE"),
+      marketSnapshot: openSnapshot,
+      priority: "initial",
+    })).resolves.toMatchObject({ symbol: "SAFE", change: 0 });
+    expect(ownKeysCalls).toBe(1);
+    expect(symbolDescriptorReads).toBe(0);
   });
 
   it("rejects accessor or context-mismatched adapter quotes at the coordinator boundary", async () => {

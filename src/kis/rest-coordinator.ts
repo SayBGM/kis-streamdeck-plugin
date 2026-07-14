@@ -294,7 +294,6 @@ function validateQuoteSample(
     }
     const prototype = Object.getPrototypeOf(value) as object | null;
     if (prototype !== Object.prototype && prototype !== null) throw protocolError();
-    if (Object.getOwnPropertySymbols(value).length > 0) throw protocolError();
     const descriptors = Object.getOwnPropertyDescriptors(value);
     const keys = [
       "symbol",
@@ -306,7 +305,12 @@ function validateQuoteSample(
       "receivedAt",
       "sessionEpoch",
     ] as const;
-    if (Object.keys(descriptors).length !== keys.length) throw protocolError();
+    const expectedKeys = new Set<PropertyKey>(keys);
+    const descriptorKeys = Reflect.ownKeys(descriptors);
+    if (
+      descriptorKeys.length !== keys.length ||
+      descriptorKeys.some((key) => !expectedKeys.has(key))
+    ) throw protocolError();
     const values = Object.create(null) as Record<(typeof keys)[number], unknown>;
     for (const key of keys) {
       const descriptor = descriptors[key];
