@@ -28,7 +28,12 @@ function createUi() {
   api.bootstrap({
     actionTitle: "국내주식 설정",
     fields: [
-      { id: "stockCode", label: "종목코드", serialize: (value: string) => value.trim() },
+      {
+        id: "stockCode",
+        label: "종목코드",
+        validate: (value: string) => /^[0-9A-Z]{6}$/i.test(value),
+        serialize: (value: string) => value.trim().toUpperCase(),
+      },
       { id: "stockName", label: "종목명", serialize: (value: string) => value.trim() },
     ],
   });
@@ -322,6 +327,89 @@ describe("Property Inspector UI", () => {
     expect(diagnosticsDetails?.querySelector("summary .sdpi-summary-meta")?.textContent)
       .toContain("필요할 때만");
   });
+
+  it("updates the action disclosure summary from settings and valid current controls", () => {
+    const { window, document } = createUi();
+    const actionSummary = document.querySelector(
+      '[data-section="stock-settings"] > summary .sdpi-summary-meta',
+    );
+    const stockCode = document.getElementById("stockCode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const stockName = document.getElementById("stockName") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+
+    expect(actionSummary?.textContent).toBe("종목 미설정");
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveSettings", {
+      detail: { stockCode: "005930", stockName: "삼성전자" },
+    }));
+    expect(actionSummary?.textContent).toBe("삼성전자 · 005930");
+
+    stockName.value = "삼성전자 우";
+    stockName.dispatchEvent(new window.Event("input"));
+    expect(actionSummary?.textContent).toBe("삼성전자 우 · 005930");
+
+    stockCode.value = "123";
+    stockCode.dispatchEvent(new window.Event("input"));
+    expect(actionSummary?.textContent).toBe("삼성전자 우 · 005930");
+
+    stockCode.value = "000660";
+    stockCode.dispatchEvent(new window.Event("input"));
+    expect(actionSummary?.textContent).toBe("삼성전자 우 · 000660");
+  });
+
+  it("updates the credential disclosure summary from accepted snapshots", () => {
+    const { window, document } = createUi();
+    const credentialSummary = document.querySelector(
+      '#credentialsDetails > summary .sdpi-summary-meta',
+    );
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(4, true, "ABC••••XYZ"),
+      },
+    }));
+    expect(credentialSummary?.textContent).toBe("Key 저장됨");
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithCredentialChanges(5, false, "", 5),
+      },
+    }));
+    expect(credentialSummary?.textContent).toBe("설정 필요");
+  });
+
+  it.each([
+    ["automatic", "realtime", 700, "자동 · 실시간"],
+    ["automatic", "throttled", 700, "자동 · 스로틀 700ms"],
+    ["rest-only", "throttled", 900, "REST 전용 · 스로틀 900ms"],
+  ] as const)(
+    "updates the preference disclosure summary for %s/%s",
+    (dataMode, uiUpdateMode, renderIntervalMs, expected) => {
+      const { window, document } = createUi();
+      const preferenceSummary = document.querySelector(
+        '#preferencesDetails > summary .sdpi-summary-meta',
+      );
+      document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+        detail: {
+          type: "settings/update",
+          snapshot: snapshotWithPreferenceChanges(4, {
+            dataMode,
+            uiUpdateMode,
+            renderIntervalMs,
+          }),
+        },
+      }));
+
+      expect(preferenceSummary?.textContent).toBe(expected);
+    },
+  );
 
   it.each([
     ["settings request response", "response", false, true],

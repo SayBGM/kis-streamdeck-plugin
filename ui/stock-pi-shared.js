@@ -532,12 +532,62 @@
     return valid || (!value && field.allowEmpty !== false);
   };
 
+  StockPropertyInspector.prototype.updateActionSummary = function () {
+    var codeField = null;
+    var nameField = null;
+    (this.config.fields || []).forEach(function (field) {
+      if (field.id === "stockCode" || field.id === "ticker") codeField = field;
+      if (field.id === "stockName") nameField = field;
+    });
+    if (!codeField) return;
+
+    var codeInput = byId(codeField.id);
+    var rawCode = codeInput.value;
+    var target = document.querySelector(
+      '[data-section="stock-settings"] > summary .sdpi-summary-meta'
+    );
+    if (!rawCode) {
+      target.textContent = "종목 미설정";
+      return;
+    }
+    if (codeField.validate && !codeField.validate(rawCode)) return;
+
+    var code = codeField.serialize
+      ? codeField.serialize(rawCode)
+      : rawCode.trim();
+    var rawName = nameField ? byId(nameField.id).value : "";
+    if (nameField && nameField.validate && !nameField.validate(rawName)) return;
+    var name = nameField && nameField.serialize
+      ? nameField.serialize(rawName)
+      : rawName.trim();
+    target.textContent = (name || code) + " · " + code;
+  };
+
+  StockPropertyInspector.prototype.updateCredentialSummary = function (
+    credentialsConfigured
+  ) {
+    document.querySelector(
+      '#credentialsDetails > summary .sdpi-summary-meta'
+    ).textContent = credentialsConfigured ? "Key 저장됨" : "설정 필요";
+  };
+
+  StockPropertyInspector.prototype.updatePreferenceSummary = function (preferences) {
+    var dataMode = preferences.dataMode === "rest-only" ? "REST 전용" : "자동";
+    var renderMode = preferences.uiUpdateMode === "throttled"
+      ? "스로틀 " + preferences.renderIntervalMs + "ms"
+      : "실시간";
+    document.querySelector(
+      '#preferencesDetails > summary .sdpi-summary-meta'
+    ).textContent = dataMode + " · " + renderMode;
+  };
+
   StockPropertyInspector.prototype.applyActionSettings = function (settings) {
     var inspector = this;
     (this.config.fields || []).forEach(function (field) {
       inspector.setFieldValue(field, settings && settings[field.settingKey || field.id]);
       inspector.validateField(field);
     });
+    this.updateActionSummary();
   };
 
   StockPropertyInspector.prototype.applyPreferenceSnapshot = function (
@@ -667,6 +717,8 @@
     byId("credentialSummary").textContent = safeSnapshot.credentialsConfigured
       ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
       : "자격증명을 입력해야 시세를 조회할 수 있습니다.";
+    this.updateCredentialSummary(safeSnapshot.credentialsConfigured);
+    this.updatePreferenceSummary(safeSnapshot.preferences);
     if (options.applyCredentials) byId("appSecret").value = "";
     this.applyPreferenceSnapshot(
       safeSnapshot.preferences,
@@ -878,6 +930,7 @@
       input.addEventListener(field.saveOn || (fieldType(field) === "select" ? "change" : "input"), function () {
         if (field.normalizeInput) this.value = field.normalizeInput(this.value);
         inspector.validateField(field);
+        inspector.updateActionSummary();
         inspector.queueActionSave();
       });
     });
