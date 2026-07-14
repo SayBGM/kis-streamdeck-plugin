@@ -319,6 +319,13 @@ body {
   overflow-wrap: anywhere;
 }
 
+.sdpi-segment-indicator {
+  visibility: hidden;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
 .sdpi-segmented-input:checked + .sdpi-segmented-content {
   border-color: var(--sdpi-focusborder);
   color: #ffffff;
@@ -328,6 +335,10 @@ body {
 
 .sdpi-segmented-input:checked + .sdpi-segmented-content .sdpi-segmented-description {
   color: #dce7ff;
+}
+
+.sdpi-segmented-input:checked + .sdpi-segmented-content .sdpi-segment-indicator {
+  visibility: visible;
 }
 
 .sdpi-segmented-input:focus-visible + .sdpi-segmented-content {

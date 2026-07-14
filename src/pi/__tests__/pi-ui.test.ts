@@ -58,6 +58,7 @@ function selectUiUpdateMode(
   mode: UiUpdateMode,
 ): void {
   const radio = uiUpdateModeRadio(document, mode);
+  uiUpdateModeRadio(document, mode === "realtime" ? "throttled" : "realtime").checked = false;
   radio.checked = true;
   radio.dispatchEvent(new window.Event("change"));
 }
@@ -344,6 +345,12 @@ describe("Property Inspector UI", () => {
     );
     expect(stylesheet).toMatch(/\.sdpi-segmented-input:checked\s*\+\s*\.sdpi-segmented-content/);
     expect(stylesheet).toMatch(/\.sdpi-segmented-input:focus-visible\s*\+\s*\.sdpi-segmented-content/);
+    expect(stylesheet).toMatch(
+      /\.sdpi-segment-indicator\s*\{[^}]*visibility:\s*hidden/s,
+    );
+    expect(stylesheet).toMatch(
+      /\.sdpi-segmented-input:checked\s*\+\s*\.sdpi-segmented-content\s+\.sdpi-segment-indicator\s*\{[^}]*visibility:\s*visible/s,
+    );
     expect(stylesheet).toMatch(/\.sdpi-item\[hidden\]\s*\{[^}]*display:\s*none\s*!important/s);
   });
 
@@ -375,6 +382,12 @@ describe("Property Inspector UI", () => {
       .toContain("스로틀링");
     expect(document.querySelector('label[for="uiUpdateModeThrottled"]')?.textContent)
       .toContain("선택한 간격마다 최신값 반영");
+    const indicators = [...document.querySelectorAll(".sdpi-segment-indicator")];
+    expect(indicators).toHaveLength(2);
+    expect(indicators.map((indicator) => indicator.textContent?.trim()))
+      .toEqual(["✓ 선택됨", "✓ 선택됨"]);
+    expect(indicators.every((indicator) => indicator.getAttribute("aria-hidden") === "true"))
+      .toBe(true);
     const interval = document.getElementById("renderIntervalMs");
     expect(document.getElementById("renderIntervalField")).not.toBeNull();
     expect(interval?.getAttribute("type")).toBe("number");
@@ -409,28 +422,39 @@ describe("Property Inspector UI", () => {
     expect(intervalField.hidden).toBe(false);
   });
 
-  it("preserves the throttled interval through a realtime-throttled-realtime round-trip", () => {
+  it("preserves the enabled throttled interval through a realtime-throttled-realtime-throttled round-trip", () => {
     const { window, document } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
     }));
     const interval = document.getElementById("renderIntervalMs") as unknown as {
       value: string;
+      disabled: boolean;
       dispatchEvent(event: unknown): boolean;
     };
     const intervalField = document.getElementById("renderIntervalField") as unknown as {
       hidden: boolean;
     };
 
+    expect(intervalField.hidden).toBe(true);
+    expect(interval.disabled).toBe(false);
     selectUiUpdateMode(window, document, "throttled");
     expect(intervalField.hidden).toBe(false);
+    expect(interval.disabled).toBe(false);
     interval.value = "900";
     interval.dispatchEvent(new window.Event("input"));
 
     selectUiUpdateMode(window, document, "realtime");
     expect(intervalField.hidden).toBe(true);
+    expect(interval.disabled).toBe(false);
     expect(interval.value).toBe("900");
     expect(selectedUiUpdateMode(document)).toBe("realtime");
+
+    selectUiUpdateMode(window, document, "throttled");
+    expect(intervalField.hidden).toBe(false);
+    expect(interval.disabled).toBe(false);
+    expect(interval.value).toBe("900");
+    expect(selectedUiUpdateMode(document)).toBe("throttled");
   });
 
   it("never fills secret inputs and saves action settings with schemaVersion 2", async () => {
