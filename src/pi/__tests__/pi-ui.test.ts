@@ -457,6 +457,295 @@ describe("Property Inspector UI", () => {
     expect(selectedUiUpdateMode(document)).toBe("throttled");
   });
 
+  it("preference save state stays saved and disabled before and after the first authoritative snapshot", () => {
+    const { window, document } = createUi();
+    const button = document.getElementById("savePreferencesButton") as unknown as {
+      disabled: boolean;
+      textContent: string;
+    };
+    const status = document.getElementById("advancedStatusMessage");
+
+    expect(button.textContent).toBe("변경사항 저장");
+    expect(button.disabled).toBe(true);
+    expect(status?.textContent).toBe("저장됨");
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+
+    expect(button.disabled).toBe(true);
+    expect(status?.textContent).toBe("저장됨");
+  });
+
+  it.each([
+    ["data mode", (window: Window, document: Window["document"]) => {
+      const control = document.getElementById("dataMode") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      control.value = "rest-only";
+      control.dispatchEvent(new window.Event("change"));
+    }],
+    ["render mode", (window: Window, document: Window["document"]) => {
+      selectUiUpdateMode(window, document, "throttled");
+    }],
+    ["render interval", (window: Window, document: Window["document"]) => {
+      const control = document.getElementById("renderIntervalMs") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      control.value = "800";
+      control.dispatchEvent(new window.Event("input"));
+    }],
+    ["backup polling interval", (window: Window, document: Window["document"]) => {
+      const control = document.getElementById("backupPollIntervalMs") as unknown as {
+        value: string;
+        dispatchEvent(event: unknown): boolean;
+      };
+      control.value = "60000";
+      control.dispatchEvent(new window.Event("change"));
+    }],
+  ] as const)("preference save state becomes dirty after changing %s", (_label, change) => {
+    const { window, document } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+
+    change(window, document);
+
+    expect((document.getElementById("savePreferencesButton") as unknown as { disabled: boolean }).disabled)
+      .toBe(false);
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("저장하지 않은 변경사항");
+  });
+
+  it("preference save state returns to saved after every control is reverted", () => {
+    const { window, document } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const interval = document.getElementById("renderIntervalMs") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const backup = document.getElementById("backupPollIntervalMs") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    selectUiUpdateMode(window, document, "throttled");
+    interval.value = "900";
+    interval.dispatchEvent(new window.Event("input"));
+    backup.value = "60000";
+    backup.dispatchEvent(new window.Event("change"));
+
+    dataMode.value = "automatic";
+    dataMode.dispatchEvent(new window.Event("change"));
+    selectUiUpdateMode(window, document, "realtime");
+    interval.value = "700";
+    interval.dispatchEvent(new window.Event("input"));
+    backup.value = "30000";
+    backup.dispatchEvent(new window.Event("change"));
+
+    expect((document.getElementById("savePreferencesButton") as unknown as { disabled: boolean }).disabled)
+      .toBe(true);
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toBe("저장됨");
+  });
+
+  it("preference save state sends once and blocks duplicate clicks while pending", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    const button = document.getElementById("savePreferencesButton") as unknown as {
+      disabled: boolean;
+      dispatchEvent(event: unknown): boolean;
+    };
+
+    button.dispatchEvent(new window.Event("click"));
+    button.dispatchEvent(new window.Event("click"));
+
+    expect(commands.filter((command) => (
+      command as { type?: string }
+    ).type === "preferences/save")).toHaveLength(1);
+    expect(button.disabled).toBe(true);
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("저장하는 중입니다.");
+  });
+
+  it("preference save state preserves newer edits and becomes dirty after a matching success", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const backup = document.getElementById("backupPollIntervalMs") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+    backup.value = "60000";
+    backup.dispatchEvent(new window.Event("change"));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: true,
+        snapshot: snapshotWithPreferenceChanges(5, { dataMode: "rest-only" }),
+      },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    expect(backup.value).toBe("60000");
+    expect((document.getElementById("savePreferencesButton") as unknown as { disabled: boolean }).disabled)
+      .toBe(false);
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("저장하지 않은 변경사항");
+  });
+
+  it("preference save state preserves controls and exposes a safe terminal error", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
+    const request = commands.at(-1) as { requestId: string };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: request.requestId,
+        ok: false,
+        error: { safeMessage: "최신 설정과 충돌했습니다." },
+      },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    expect((document.getElementById("savePreferencesButton") as unknown as { disabled: boolean }).disabled)
+      .toBe(false);
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("최신 설정과 충돌했습니다.");
+    expect(document.getElementById("advancedStatusMessage")?.className).toContain("error");
+  });
+
+  it("preference save state follows every accepted authoritative baseline without hydrating dirty controls", () => {
+    const { window, document } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { requestId: "initial", ok: true, snapshot: snapshotAt(4) },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const backup = document.getElementById("backupPollIntervalMs") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const button = document.getElementById("savePreferencesButton") as unknown as {
+      disabled: boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithPreferenceChanges(5, { dataMode: "rest-only" }),
+      },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    expect(button.disabled).toBe(true);
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toBe("저장됨");
+
+    backup.value = "60000";
+    backup.dispatchEvent(new window.Event("change"));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        type: "settings/update",
+        snapshot: snapshotWithPreferenceChanges(6, {
+          dataMode: "automatic",
+          backupPollIntervalMs: 30_000,
+        }),
+      },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    expect(backup.value).toBe("60000");
+    expect(button.disabled).toBe(false);
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("저장하지 않은 변경사항");
+  });
+
+  it("preference save state exits pending on an epoch transition and ignores retired acknowledgements", () => {
+    const { window, document, commands } = createUi();
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(5, 100, "epoch-a") },
+    }));
+    const dataMode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    const button = document.getElementById("savePreferencesButton") as unknown as {
+      disabled: boolean;
+      dispatchEvent(event: unknown): boolean;
+    };
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
+    button.dispatchEvent(new window.Event("click"));
+    const oldRequest = commands.at(-1) as { requestId: string };
+
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: { type: "settings/update", snapshot: snapshotAt(4, 1, "epoch-b") },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: oldRequest.requestId,
+        ok: false,
+        error: { safeMessage: "종료된 런타임 응답" },
+      },
+    }));
+    document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
+      detail: {
+        requestId: oldRequest.requestId,
+        ok: true,
+        snapshot: snapshotWithPreferenceChanges(6, { dataMode: "rest-only" }, 101, "epoch-a"),
+      },
+    }));
+
+    expect(dataMode.value).toBe("rest-only");
+    expect(button.disabled).toBe(false);
+    expect(document.getElementById("advancedStatusMessage")?.textContent)
+      .toBe("저장하지 않은 변경사항");
+    button.dispatchEvent(new window.Event("click"));
+    expect(commands.filter((command) => (
+      command as { type?: string }
+    ).type === "preferences/save")).toHaveLength(2);
+  });
+
   it("never fills secret inputs and saves action settings with schemaVersion 2", async () => {
     const { window, document, actionSettings } = createUi();
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
@@ -522,15 +811,25 @@ describe("Property Inspector UI", () => {
       detail: { requestId: "initial", ok: true, snapshot: responseSnapshot() },
     }));
 
+    const mode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     const preferenceRequest = commands.at(-1) as { requestId: string };
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
-      detail: { requestId: preferenceRequest.requestId, ok: true },
+      detail: {
+        requestId: preferenceRequest.requestId,
+        ok: true,
+        snapshot: snapshotWithPreferenceChanges(5, { dataMode: "rest-only" }),
+      },
     }));
 
     const preferenceStatus = document.getElementById("advancedStatusMessage");
     const troubleshootingStatus = document.getElementById("troubleshootingStatusMessage");
-    expect(preferenceStatus?.textContent).toContain("적용");
+    expect(preferenceStatus?.textContent).toBe("저장됨");
     expect(preferenceStatus?.className).toContain("success");
     expect(troubleshootingStatus?.textContent).toBe("");
 
@@ -559,7 +858,7 @@ describe("Property Inspector UI", () => {
         operation.ok ? "적용" : "WebSocket 재연결에 실패했습니다.",
       );
       expect(troubleshootingStatus?.className).toContain(operation.ok ? "success" : "error");
-      expect(preferenceStatus?.textContent).toContain("적용");
+      expect(preferenceStatus?.textContent).toBe("저장됨");
       expect(preferenceStatus?.className).toContain("success");
     }
   });
@@ -569,6 +868,12 @@ describe("Property Inspector UI", () => {
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: { requestId: "initial", ok: true, snapshot: snapshotWithRenderPreferences("realtime", 700) },
     }));
+    const mode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
 
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
 
@@ -646,11 +951,21 @@ describe("Property Inspector UI", () => {
     (document.getElementById("appKey") as unknown as { value: string }).value = "NEWKEY";
     document.getElementById("saveCredentialsButton")?.dispatchEvent(new window.Event("click"));
     const credentialRequest = commands.at(-1) as { requestId: string };
+    const mode = document.getElementById("dataMode") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     const preferenceRequest = commands.at(-1) as { requestId: string };
 
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
-      detail: { requestId: preferenceRequest.requestId, ok: true, snapshot: responseSnapshot() },
+      detail: {
+        requestId: preferenceRequest.requestId,
+        ok: true,
+        snapshot: snapshotWithPreferenceChanges(5, { dataMode: "rest-only" }),
+      },
     }));
     document.dispatchEvent(new window.CustomEvent("piDidReceiveMessage", {
       detail: {
@@ -660,7 +975,7 @@ describe("Property Inspector UI", () => {
       },
     }));
 
-    expect(document.getElementById("advancedStatusMessage")?.textContent).toContain("적용");
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toBe("저장됨");
     expect(document.getElementById("credentialStatusMessage")?.textContent).toContain("충돌");
   });
 
@@ -928,11 +1243,13 @@ describe("Property Inspector UI", () => {
         detail: { type: "settings/update", snapshot: sameRevisionFollowUp },
       }));
       expect(backup.value).toBe("30000");
+      backup.value = "60000";
+      backup.dispatchEvent(new window.Event("change"));
       document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
       expect(commands.at(-1)).toMatchObject({
         type: "preferences/save",
         settingsRevision: 6,
-        preferences: { backupPollIntervalMs: 30_000 },
+        preferences: { backupPollIntervalMs: 60_000 },
       });
     },
   );
@@ -979,12 +1296,14 @@ describe("Property Inspector UI", () => {
     expect(selectedUiUpdateMode(document)).toBe("throttled");
     expect(interval.value).toBe("800");
     expect(intervalField.hidden).toBe(false);
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     expect(commands.at(-1)).toMatchObject({
       type: "preferences/save",
       settingsRevision: 5,
       preferences: {
-        dataMode: "automatic",
+        dataMode: "rest-only",
         uiUpdateMode: "throttled",
         renderIntervalMs: 800,
       },
@@ -1122,6 +1441,8 @@ describe("Property Inspector UI", () => {
     }));
 
     expect(dataMode.value).toBe("automatic");
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     expect(commands.at(-1)).toMatchObject({
       type: "preferences/save",
@@ -1210,6 +1531,12 @@ describe("Property Inspector UI", () => {
     expect((document.getElementById("backupPollIntervalMs") as unknown as { value: string }).value)
       .toBe("60000");
 
+    const backup = document.getElementById("backupPollIntervalMs") as unknown as {
+      value: string;
+      dispatchEvent(event: unknown): boolean;
+    };
+    backup.value = "30000";
+    backup.dispatchEvent(new window.Event("change"));
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     expect(commands.at(-1)).toMatchObject({
       type: "preferences/save",
@@ -1218,7 +1545,7 @@ describe("Property Inspector UI", () => {
         dataMode: "rest-only",
         uiUpdateMode: "throttled",
         renderIntervalMs: 900,
-        backupPollIntervalMs: 60_000,
+        backupPollIntervalMs: 30_000,
       },
     });
     document.getElementById("clearCredentialsButton")?.dispatchEvent(new window.Event("click"));
@@ -2047,6 +2374,8 @@ describe("Property Inspector UI", () => {
     }));
 
     expect(dataMode.value).toBe("automatic");
+    dataMode.value = "rest-only";
+    dataMode.dispatchEvent(new window.Event("change"));
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     expect(commands.at(-1)).toMatchObject({
       type: "preferences/save",
@@ -2266,6 +2595,7 @@ describe("Property Inspector UI", () => {
         snapshot: remoteSnapshot,
       },
     }));
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toContain("충돌");
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
 
     expect(commands.at(-1)).toMatchObject({
@@ -2274,7 +2604,7 @@ describe("Property Inspector UI", () => {
     });
     expect(dataMode.value).toBe("rest-only");
     expect(interval.value).toBe("900");
-    expect(document.getElementById("advancedStatusMessage")?.textContent).toContain("충돌");
+    expect(document.getElementById("advancedStatusMessage")?.textContent).toBe("저장하는 중입니다.");
   });
 
   it("does not inspect accessor-backed remote preferences or advance their revision", () => {
@@ -2464,6 +2794,8 @@ describe("Property Inspector UI", () => {
     }));
 
     expect(mode.value).toBe("automatic");
+    mode.value = "rest-only";
+    mode.dispatchEvent(new window.Event("change"));
     document.getElementById("savePreferencesButton")?.dispatchEvent(new window.Event("click"));
     expect(commands.at(-1)).toMatchObject({
       type: "preferences/save",

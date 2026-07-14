@@ -40,6 +40,16 @@
     byId("renderIntervalField").hidden = selectedUiUpdateMode() === "realtime";
   }
 
+  function readPreferenceControls() {
+    var selectedMode = document.querySelector('input[name="uiUpdateMode"]:checked');
+    return {
+      dataMode: byId("dataMode").value,
+      uiUpdateMode: selectedMode ? selectedMode.value : null,
+      renderIntervalMs: Number(byId("renderIntervalMs").value),
+      backupPollIntervalMs: Number(byId("backupPollIntervalMs").value),
+    };
+  }
+
   function escapeHtml(value) {
     return String(value)
       .replace(/&/g, "&amp;")
@@ -372,7 +382,7 @@
       '<div class="sdpi-item"><div class="sdpi-item-label">백업 폴링</div><div class="sdpi-item-value">',
       '<select id="backupPollIntervalMs"><option value="15000">15초</option><option value="30000">30초</option><option value="60000">60초</option></select>',
       "</div></div>",
-      '<div class="sdpi-actions"><button type="button" id="savePreferencesButton" class="sdpi-button primary">고급 설정 저장</button></div>',
+      '<div class="sdpi-actions"><button type="button" id="savePreferencesButton" class="sdpi-button primary">변경사항 저장</button></div>',
       '<div id="advancedStatusMessage" class="sdpi-status info"></div>',
       "</div>",
       "</details>",
@@ -413,6 +423,7 @@
     this.settingsRevision = 0;
     this.preferencesRevision = 0;
     this.lastAppliedPreferences = null;
+    this.lastAuthoritativePreferences = null;
     this.actionSaveTimer = null;
     this.pendingRequests = Object.create(null);
     this.latestRequestBySection = Object.create(null);
@@ -424,6 +435,7 @@
     this.latestSnapshotSequence = 0;
     this.credentialEditVersion = 0;
     this.preferencesEditVersion = 0;
+    this.preferenceSaveRequestId = null;
   }
 
   StockPropertyInspector.prototype.sendCommand = function (type, fields, section) {
@@ -445,6 +457,7 @@
         : null,
     };
     this.latestRequestBySection[section] = requestId;
+    if (type === "preferences/save") this.preferenceSaveRequestId = requestId;
     sendToPlugin(payload);
     return requestId;
   };
@@ -454,6 +467,45 @@
     if (!target) return;
     target.textContent = message || "";
     target.className = "sdpi-status " + (kind || "info") + (message ? " visible" : "");
+  };
+
+  StockPropertyInspector.prototype.preferencesDirty = function () {
+    if (!this.lastAuthoritativePreferences) return false;
+    var controls = copyKnownPreferences(readPreferenceControls());
+    return !controls || !preferencesEqual(controls, this.lastAuthoritativePreferences);
+  };
+
+  StockPropertyInspector.prototype.preferenceSavePending = function () {
+    return this.preferenceSaveRequestId !== null;
+  };
+
+  StockPropertyInspector.prototype.preferenceControlsCanHydrate = function () {
+    if (this.preferenceSavePending()) return false;
+    if (!this.lastAuthoritativePreferences) return this.preferencesEditVersion === 0;
+    return !this.preferencesDirty();
+  };
+
+  StockPropertyInspector.prototype.syncPreferenceSaveState = function (resultStatus) {
+    var pending = this.preferenceSavePending();
+    var dirty = this.preferencesDirty();
+    var button = byId("savePreferencesButton");
+    button.disabled = pending || !this.lastAuthoritativePreferences || !dirty;
+
+    if (resultStatus && resultStatus.message) {
+      this.setStatus(
+        "advancedStatusMessage",
+        resultStatus.message,
+        resultStatus.kind || "info"
+      );
+      return;
+    }
+    if (pending) {
+      this.setStatus("advancedStatusMessage", "저장하는 중입니다.", "info");
+    } else if (dirty) {
+      this.setStatus("advancedStatusMessage", "저장하지 않은 변경사항", "info");
+    } else {
+      this.setStatus("advancedStatusMessage", "저장됨", "success");
+    }
   };
 
   StockPropertyInspector.prototype.setFieldValue = function (field, value) {
@@ -563,6 +615,10 @@
       this.currentSnapshotEpoch = snapshotEpoch;
       this.latestSafeSnapshot = null;
       this.latestSnapshotSequence = 0;
+      if (this.preferenceSavePending()) {
+        this.preferenceSaveRequestId = null;
+        this.syncPreferenceSaveState();
+      }
     }
     if (safeSnapshot.snapshotSequence > this.latestSnapshotSequence) {
       this.latestSafeSnapshot = safeSnapshot;
@@ -588,6 +644,7 @@
     this.settingsRevision = epochChanged
       ? settingsRevision
       : Math.max(this.settingsRevision, settingsRevision);
+    this.lastAuthoritativePreferences = safeSnapshot.preferences;
     byId("maskedAppKey").textContent = safeSnapshot.maskedAppKey || "설정 안 됨";
     byId("credentialSummary").textContent = safeSnapshot.credentialsConfigured
       ? "자격증명이 저장되어 있습니다. Secret은 다시 표시하지 않습니다."
@@ -600,6 +657,7 @@
       epochChanged
     );
     this.applyDiagnostics(safeSnapshot.diagnostics);
+    this.syncPreferenceSaveState();
     return { fresh: true, applied: true };
   };
 
@@ -642,7 +700,7 @@
     if (message.type === "diagnostics/update") {
       if (message.snapshot) this.applySnapshot(message.snapshot, {
         applyCredentials: false,
-        applyPreferences: this.preferencesEditVersion === 0,
+        applyPreferences: this.preferenceControlsCanHydrate(),
         applyStaleDiagnostics: true,
       });
       return;
@@ -650,7 +708,7 @@
     if (message.type === "settings/update") {
       if (message.snapshot) this.applySnapshot(message.snapshot, {
         applyCredentials: this.credentialEditVersion === 0,
-        applyPreferences: this.preferencesEditVersion === 0,
+        applyPreferences: this.preferenceControlsCanHydrate(),
         applyStaleDiagnostics: true,
       });
       return;
@@ -660,7 +718,7 @@
     if (!pending) {
       if (message.snapshot) this.applySnapshot(message.snapshot, {
         applyCredentials: this.credentialEditVersion === 0,
-        applyPreferences: this.preferencesEditVersion === 0,
+        applyPreferences: this.preferenceControlsCanHydrate(),
       });
       return;
     }
@@ -725,7 +783,7 @@
       } else if (pending.section === "settings") {
         this.applySafeSnapshot(safeSnapshot, {
           applyCredentials: pending.credentialEditVersion === this.credentialEditVersion,
-          applyPreferences: pending.preferencesEditVersion === this.preferencesEditVersion,
+          applyPreferences: this.preferenceControlsCanHydrate(),
         });
       } else {
         this.applySafeSnapshot(safeSnapshot, {
@@ -734,6 +792,10 @@
         });
       }
     }
+
+    var currentPreferenceSave = pending.type === "preferences/save" &&
+      this.preferenceSaveRequestId === message.requestId;
+    if (currentPreferenceSave) this.preferenceSaveRequestId = null;
 
     var safeMessage = message.error && message.error.safeMessage
       ? message.error.safeMessage
@@ -747,6 +809,11 @@
         message.ok === true ? credentialSuccessMessage : safeMessage,
         message.ok === true ? "success" : "error"
       );
+    } else if (pending.section === "advanced" && pending.type === "preferences/save") {
+      this.syncPreferenceSaveState(message.ok === true ? null : {
+        message: safeMessage,
+        kind: "error",
+      });
     } else if (pending.section === "advanced") {
       this.setStatus(
         "advancedStatusMessage",
@@ -808,31 +875,38 @@
       inspector.setStatus("credentialStatusMessage", "자격증명을 지우는 중입니다.", "info");
     });
     byId("savePreferencesButton").addEventListener("click", function () {
-      var intervalValue = byId("renderIntervalMs").value;
-      var renderIntervalMs = Number(intervalValue);
+      if (inspector.preferenceSavePending()) return;
+      if (!inspector.lastAuthoritativePreferences || !inspector.preferencesDirty()) {
+        inspector.syncPreferenceSaveState();
+        return;
+      }
+      var preferences = readPreferenceControls();
+      var safePreferences = copyKnownPreferences(preferences);
       if (
-        !intervalValue ||
-        !Number.isInteger(renderIntervalMs) ||
-        renderIntervalMs < 500 ||
-        renderIntervalMs > 1000 ||
-        renderIntervalMs % 100 !== 0
+        !byId("renderIntervalMs").value ||
+        !Number.isInteger(preferences.renderIntervalMs) ||
+        preferences.renderIntervalMs < 500 ||
+        preferences.renderIntervalMs > 1000 ||
+        preferences.renderIntervalMs % 100 !== 0
       ) {
-        inspector.setStatus(
-          "advancedStatusMessage",
-          "스로틀 간격은 500~1000ms 사이의 100ms 단위 정수로 입력하세요.",
-          "error"
-        );
+        inspector.syncPreferenceSaveState({
+          message: "스로틀 간격은 500~1000ms 사이의 100ms 단위 정수로 입력하세요.",
+          kind: "error",
+        });
+        return;
+      }
+      if (!safePreferences) {
+        inspector.syncPreferenceSaveState({
+          message: "환경설정 값을 확인하세요.",
+          kind: "error",
+        });
         return;
       }
       inspector.sendCommand("preferences/save", {
         settingsRevision: inspector.preferencesRevision,
-        preferences: {
-          dataMode: byId("dataMode").value,
-          uiUpdateMode: selectedUiUpdateMode(),
-          renderIntervalMs: renderIntervalMs,
-          backupPollIntervalMs: Number(byId("backupPollIntervalMs").value),
-        },
+        preferences: safePreferences,
       }, "advanced");
+      inspector.syncPreferenceSaveState();
     });
     byId("retryAuthButton").addEventListener("click", function () {
       inspector.sendCommand("auth/retry", null, "troubleshooting");
@@ -856,19 +930,23 @@
     ["dataMode", "backupPollIntervalMs"].forEach(function (id) {
       byId(id).addEventListener("change", function () {
         inspector.preferencesEditVersion += 1;
+        inspector.syncPreferenceSaveState();
       });
     });
     var uiUpdateModeRadios = document.querySelectorAll('input[name="uiUpdateMode"]');
     for (var radioIndex = 0; radioIndex < uiUpdateModeRadios.length; radioIndex += 1) {
       uiUpdateModeRadios[radioIndex].addEventListener("change", function () {
-        syncRenderIntervalVisibility();
         inspector.preferencesEditVersion += 1;
+        syncRenderIntervalVisibility();
+        inspector.syncPreferenceSaveState();
       });
     }
     byId("renderIntervalMs").addEventListener("input", function () {
       inspector.preferencesEditVersion += 1;
+      inspector.syncPreferenceSaveState();
     });
     syncRenderIntervalVisibility();
+    this.syncPreferenceSaveState();
   };
 
   function bootstrap(config) {
